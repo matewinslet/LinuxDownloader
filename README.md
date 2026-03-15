@@ -11,23 +11,19 @@ A powerful, IDM-style download manager for Linux — with a Firefox extension, Y
 
 ## Screenshots
 
-| Downloads in Progress | Downloaded Files |
-|---|---|
-| ![Downloading](screenshots/03-downloading.png) | ![Downloaded](screenshots/04-downloaded-files.png) |
+![Downloading](screenshots/03-downloading.png)
 
-| YouTube Downloader | YouTube Completed |
-|---|---|
-| ![YouTube](screenshots/01-youtube-downloader.png) | ![YouTube Done](screenshots/02-youtube-completed.png) |
+![Downloaded Files](screenshots/04-downloaded-files.png)
 
-| Install Dependencies | About |
-|---|---|
-| ![Ins| Install Dependencies | About |
-|---|---|
-| ![Install](screenshots/05-install-dependencies.png) | ![About](screenshots/06-about.png) |
+![YouTube Downloader](screenshots/01-youtube-downloader.png)
 
-| Firefox Extension Popup |
-|---|
-| ![Extension](screenshots/07-extension-popup.png) |tall](screenshots/05-install-dependencies.png) | ![About](screenshots/06-about.png) |
+![YouTube Completed](screenshots/02-youtube-completed.png)
+
+![Install Dependencies](screenshots/05-install-dependencies.png)
+
+![About](screenshots/06-about.png)
+
+![Firefox Extension](screenshots/07-extension-popup.png)
 
 ---
 
