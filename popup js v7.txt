@@ -1,0 +1,44 @@
+// Step 1: Unlock right-click
+document.getElementById('unlockBtn').addEventListener('click', async () => {
+  let [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  chrome.tabs.sendMessage(tab.id, { action: "unlock" });
+  document.getElementById('unlockBtn').innerText = "✓ Unlocked!";
+  document.getElementById('unlockBtn').style.background = "#8e44ad";
+});
+
+// Step 2: Grab video URL and send to Python
+document.getElementById('sendBtn').addEventListener('click', async () => {
+  let [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+
+  chrome.tabs.sendMessage(tab.id, { action: "grab" }, (response) => {
+    if (response && response.url) {
+      const bridgeUrl = `http://127.0.0.1:9999/?url=${encodeURIComponent(response.url)}&filename=captured_video.mp4&type=video_stream`;
+      fetch(bridgeUrl).then(() => {
+        document.getElementById('sendBtn').innerText = "✓ Sent to App!";
+      }).catch(() => {
+        document.getElementById('sendBtn').innerText = "Error: App Closed?";
+        document.getElementById('sendBtn').style.background = "#c0392b";
+      });
+    } else {
+      document.getElementById('sendBtn').innerText = "No Video Found";
+      document.getElementById('sendBtn').style.background = "#c0392b";
+    }
+  });
+});
+
+// Step 3: Toggle — load saved state then listen for changes
+const toggle = document.getElementById('interceptToggle');
+const sub = document.getElementById('toggleSub');
+
+browser.storage.local.get("interceptEnabled").then((result) => {
+  // Default ON if never set before
+  const enabled = result.interceptEnabled !== false;
+  toggle.checked = enabled;
+  sub.textContent = enabled ? "Sending to Linux DM" : "Firefox handles downloads";
+});
+
+toggle.addEventListener("change", () => {
+  const enabled = toggle.checked;
+  browser.storage.local.set({ interceptEnabled: enabled });
+  sub.textContent = enabled ? "Sending to Linux DM" : "Firefox handles downloads";
+});

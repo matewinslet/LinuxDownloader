@@ -1,0 +1,142 @@
+// background.js - Version 2.1.0
+
+const handledUrls = new Set();
+
+// Cache intercept state — default ON
+let interceptEnabled = true;
+
+// Load saved state on startup
+browser.storage.local.get("interceptEnabled").then((result) => {
+  interceptEnabled = result.interceptEnabled !== false;
+});
+
+// Stay in sync when popup toggles it
+browser.storage.onChanged.addListener((changes) => {
+  if (changes.interceptEnabled !== undefined) {
+    interceptEnabled = changes.interceptEnabled.newValue;
+  }
+});
+
+// 1. Context Menu — always works regardless of toggle
+browser.contextMenus.create({
+  id: "send-to-linux-dm",
+  title: "Download with Linux Manager",
+  contexts: ["link"]
+});
+
+browser.contextMenus.onClicked.addListener((info) => {
+  if (info.menuItemId === "send-to-linux-dm") {
+    const url = info.linkUrl;
+    const filename = url.split("?")[0].split("/").pop() || "download";
+    sendToPython(url, filename, "file");
+  }
+});
+
+// 2. Silent intercept at response headers level
+browser.webRequest.onHeadersReceived.addListener(
+  (details) => {
+    // If toggled off, do nothing — Firefox handles it normally
+    if (!interceptEnabled) return {};
+
+    const url = details.url;
+    const lowerUrl = url.toLowerCase();
+
+    if (
+      lowerUrl.includes("googlevideo.com") ||
+      lowerUrl.includes("youtube.com") ||
+      lowerUrl.includes("youtu.be") ||
+      lowerUrl.includes("google.com") ||
+      lowerUrl.includes("googleapis.com") ||
+      lowerUrl.includes("gstatic.com") ||
+      lowerUrl.includes("googleusercontent.com")
+    ) return {};
+
+    if (lowerUrl.startsWith("blob:") || lowerUrl.startsWith("data:")) return {};
+
+    const allowedTypes = ["main_frame", "sub_frame", "other"];
+    if (!allowedTypes.includes(details.type)) return {};
+
+    const headers = details.responseHeaders || [];
+    const contentDisposition = headers.find(h =>
+      h.name.toLowerCase() === "content-disposition"
+    );
+    const contentType = headers.find(h =>
+      h.name.toLowerCase() === "content-type"
+    );
+
+    const isAttachment = contentDisposition &&
+      contentDisposition.value.toLowerCase().includes("attachment");
+
+    const downloadTypes = [
+      "application/octet-stream",
+      "application/zip", "application/x-zip",
+      "application/x-rar", "application/x-7z-compressed",
+      "application/x-tar", "application/gzip",
+      "application/x-bzip2",
+      "application/vnd.android.package-archive",
+      "application/x-msdownload",
+      "application/x-debian-package",
+      "application/x-rpm",
+      "application/pdf",
+      "audio/mpeg", "audio/flac", "audio/wav", "audio/aac", "audio/ogg", "audio/x-m4a",
+      "video/mp4", "video/x-matroska", "video/webm", "video/avi", "video/quicktime"
+    ];
+
+    const isBinaryType = contentType &&
+      downloadTypes.some(t => contentType.value.toLowerCase().includes(t));
+
+    if (!isAttachment && !isBinaryType) return {};
+
+    const skipTypes = ["text/plain", "text/html", "text/xml",
+                       "application/json", "text/json", "text/css"];
+    if (contentType) {
+      const ct = contentType.value.toLowerCase();
+      if (skipTypes.some(t => ct.includes(t))) return {};
+    }
+
+    if (handledUrls.has(url)) {
+      handledUrls.delete(url);
+      return { cancel: true };
+    }
+
+    let filename = "";
+    if (contentDisposition) {
+      const match = contentDisposition.value.match(
+        /filename\*?=["']?(?:UTF-\d['"]*)?([^;"'\n]+)/i
+      );
+      if (match) filename = decodeURIComponent(match[1].trim().replace(/['"]/g, ""));
+    }
+    if (!filename) {
+      filename = url.split("?")[0].split("/").pop() || "download";
+    }
+
+    handledUrls.add(url);
+    sendToPython(url, filename, "file");
+    return { cancel: true };
+  },
+  { urls: ["<all_urls>"] },
+  ["blocking", "responseHeaders"]
+);
+
+// 3. Fallback for blob/data URIs only
+browser.downloads.onCreated.addListener((downloadItem) => {
+  const url = downloadItem.url || "";
+  const lowerUrl = url.toLowerCase();
+
+  if (!lowerUrl.startsWith("blob:") && !lowerUrl.startsWith("data:")) {
+    if (!interceptEnabled) return; // Let Firefox keep it
+    browser.downloads.erase({ id: downloadItem.id });
+    return;
+  }
+
+  const filename = (downloadItem.filename || "").split(/[\\/]/).pop() || "download";
+  sendToPython(url, filename, "file");
+  browser.downloads.erase({ id: downloadItem.id });
+});
+
+function sendToPython(url, filename, type) {
+  const bridgeUrl = `http://127.0.0.1:9999/?url=${encodeURIComponent(url)}&filename=${encodeURIComponent(filename)}&type=${type}`;
+  fetch(bridgeUrl).catch(() => {
+    console.error("Linux Download Manager is not running.");
+  });
+}

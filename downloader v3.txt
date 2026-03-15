@@ -1,0 +1,249 @@
+#!/usr/bin/env python3
+
+import sys, requests, time, os, threading, queue
+import yt_dlp
+from http.server import HTTPServer, BaseHTTPRequestHandler
+from urllib.parse import parse_qs, urlparse
+from PyQt6.QtWidgets import (
+    QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLineEdit, 
+    QPushButton, QTableWidget, QTableWidgetItem, QHeaderView, QLabel
+)
+from PyQt6.QtCore import QThread, pyqtSignal, QTimer, Qt
+from PyQt6.QtGui import QIcon
+
+HOME = os.path.expanduser("~")
+
+file_types = {
+    "Videos":     ["mp4", "mkv", "avi", "mov", "webm"],
+    "Documents":  ["pdf", "doc", "docx", "txt", "ppt", "pptx"],
+    "Compressed": ["zip", "rar", "7z", "tar", "gz"],
+    "Programs":   ["exe", "bin", "appimage", "deb", "rpm"]
+}
+
+def choose_folder(filename):
+    ext = filename.split(".")[-1].lower() if "." in filename else ""
+    for folder, extensions in file_types.items():
+        if ext in extensions:
+            path = os.path.join(HOME, "Downloads", folder)
+            os.makedirs(path, exist_ok=True)
+            return path
+    path = os.path.join(HOME, "Downloads", "Others")
+    os.makedirs(path, exist_ok=True)
+    return path
+
+url_queue = queue.Queue()
+
+class BridgeHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        try:
+            q = parse_qs(urlparse(self.path).query)
+            url = q.get("url", [None])[0]
+            filename = q.get("filename", [None])[0]
+            msg_type = q.get("type", ["file"])[0]
+            if url:
+                url_queue.put((url, filename, msg_type))
+                self.send_response(200); self.end_headers()
+                self.wfile.write(b"OK")
+        except Exception:
+            self.send_response(500); self.end_headers()
+
+    def log_message(self, *args): pass
+
+def start_bridge_server(port=9999):
+    server = HTTPServer(("127.0.0.1", port), BridgeHandler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+
+class DownloadThread(QThread):
+    progress = pyqtSignal(int)
+    speed    = pyqtSignal(str)
+    finished = pyqtSignal(str)
+
+    def __init__(self, url, filename, is_video=False):
+        super().__init__()
+        self.url = url
+        self.filename = filename
+        self.is_video = is_video
+        self.running = True
+
+    def run(self):
+        if self.is_video:
+            self.download_video()
+        else:
+            self.download_file()
+
+    def download_video(self):
+        """Uses yt-dlp with terminal logging to find the error."""
+        try:
+            folder = choose_folder("video.mp4")
+            # We remove 'quiet': True so we can see the real error in the terminal
+            ydl_opts = {
+                'outtmpl': os.path.join(folder, '%(title).50s.%(ext)s'),
+                'restrictfilenames': True, 
+                'trim_file_name': 80,
+                'progress_hooks': [self.yt_dlp_hook],
+                'no_warnings': False, 
+            }
+            
+            print(f"\n--- STARTING VIDEO DOWNLOAD ---")
+            print(f"URL: {self.url}")
+            
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                # download() returns 0 on success, non-zero on failure
+                exit_code = ydl.download([self.url])
+                if exit_code != 0:
+                    raise Exception(f"yt-dlp failed with exit code {exit_code}")
+            
+            self.finished.emit("Finished")
+            print(f"--- DOWNLOAD COMPLETE ---\n")
+            
+        except Exception as e:
+            print(f"--- DOWNLOAD ERROR: {str(e)} ---")
+            self.finished.emit(f"Video Error: {str(e)}")
+
+    def yt_dlp_hook(self, d):
+        if d['status'] == 'downloading':
+            p = d.get('_percent_str', '0%').replace('%','')
+            try: self.progress.emit(int(float(p)))
+            except: pass
+            self.speed.emit(d.get('_speed_str', 'N/A'))
+
+    def download_file(self):
+        try:
+            with requests.get(self.url, stream=True, allow_redirects=True, timeout=15, verify=False) as r:
+                r.raise_for_status()
+                total = int(r.headers.get("content-length", 0))
+                folder = choose_folder(self.filename)
+                filepath = os.path.join(folder, self.filename)
+                
+                downloaded, start_time = 0, time.time()
+                with open(filepath, "wb") as f:
+                    for chunk in r.iter_content(chunk_size=8192):
+                        if not self.running:
+                            self.finished.emit("Cancelled"); return
+                        if chunk:
+                            f.write(chunk); downloaded += len(chunk)
+                            if total > 0: self.progress.emit(int(downloaded * 100 / total))
+                            elapsed = time.time() - start_time
+                            if elapsed > 0: self.speed.emit(f"{downloaded / elapsed / 1024:.2f} KB/s")
+            self.finished.emit("Finished")
+        except Exception as e:
+            self.finished.emit(f"Error: {str(e)}")
+
+    def stop(self): self.running = False
+
+class FloatingButton(QWidget):
+    clicked = pyqtSignal(str)
+
+    def __init__(self):
+        super().__init__()
+        self.setWindowFlags(Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.FramelessWindowHint | Qt.WindowType.Tool)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setFixedSize(220, 100)
+        
+        self.container = QWidget(self)
+        self.container.setFixedSize(220, 100)
+        self.container.setStyleSheet("background-color: #2980b9; border-radius: 10px; border: 2px solid white;")
+        
+        layout = QVBoxLayout(self.container)
+        
+        header = QHBoxLayout()
+        header.addStretch()
+        self.close_btn = QPushButton("✕")
+        self.close_btn.setFixedSize(20, 20)
+        self.close_btn.setStyleSheet("background-color: #c0392b; color: white; border-radius: 10px; border: none; font-size: 10px;")
+        self.close_btn.clicked.connect(self.hide)
+        header.addWidget(self.close_btn)
+        layout.addLayout(header)
+
+        self.btn = QPushButton("↓ Download Video")
+        self.btn.setStyleSheet("background-color: #3498db; color: white; font-weight: bold; padding: 8px; border-radius: 5px;")
+        self.btn.clicked.connect(self.on_btn_clicked)
+        layout.addWidget(self.btn)
+
+        self.target_url = ""
+
+    def show_for_url(self, url):
+        self.target_url = url
+        screen = QApplication.primaryScreen().geometry()
+        self.move(screen.width() - 240, screen.height() - 160)
+        self.show()
+
+    def on_btn_clicked(self):
+        self.clicked.emit(self.target_url)
+        self.hide()
+
+class DownloadManager(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("Linux Download Manager")
+        self.resize(750, 500)
+        
+        self.floater = FloatingButton()
+        self.floater.clicked.connect(lambda url: self._enqueue(url, "video_stream.mp4", True))
+
+        layout = QVBoxLayout()
+        self.url_input = QLineEdit(); self.url_input.setPlaceholderText("URL will appear here..."); layout.addWidget(self.url_input)
+
+        btn_layout = QHBoxLayout(); btn_layout.setSpacing(10)
+        style = "font-weight: bold; color: white; border-radius: 5px; font-size: 14px; min-width: 120px; min-height: 80px;"
+        
+        self.start_btn = QPushButton("Start\nDownload"); self.start_btn.setStyleSheet(f"{style} background-color: #27ae60;")
+        self.cancel_btn = QPushButton("Cancel\nDownload"); self.cancel_btn.setStyleSheet(f"{style} background-color: #c0392b;")
+        self.clear_btn = QPushButton("Clear\nList"); self.clear_btn.setStyleSheet(f"{style} background-color: #f39c12;")
+        
+        for b in [self.start_btn, self.cancel_btn, self.clear_btn]: btn_layout.addWidget(b)
+        self.start_btn.clicked.connect(self.start_manual)
+        self.cancel_btn.clicked.connect(self.cancel_last)
+        self.clear_btn.clicked.connect(self.clear_list)
+        layout.addLayout(btn_layout)
+
+        self.status_label = QLabel("Status: Ready. Listening for Firefox..."); layout.addWidget(self.status_label)
+
+        self.table = QTableWidget(); self.table.setColumnCount(4)
+        self.table.setHorizontalHeaderLabels(["File Name", "Progress", "Speed", "Status"])
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        layout.addWidget(self.table)
+
+        self.setLayout(layout); self.threads = []
+        start_bridge_server()
+        self.timer = QTimer(); self.timer.timeout.connect(self.check_queue); self.timer.start(500)
+
+    def check_queue(self):
+        while not url_queue.empty():
+            url, filename, msg_type = url_queue.get()
+            if msg_type == "video_stream":
+                self.floater.show_for_url(url)
+            else:
+                self.url_input.setText(url)
+                self._enqueue(url, filename if filename else "downloaded_file")
+
+    def start_manual(self):
+        url = self.url_input.text().strip()
+        if url: self._enqueue(url, "manual_download")
+
+    def _enqueue(self, url, filename, is_video=False):
+        row = self.table.rowCount(); self.table.insertRow(row)
+        self.table.setItem(row, 0, QTableWidgetItem(filename))
+        self.table.setItem(row, 1, QTableWidgetItem("0%"))
+        self.table.setItem(row, 2, QTableWidgetItem("0 KB/s"))
+        self.table.setItem(row, 3, QTableWidgetItem("Downloading" if not is_video else "Extracting Video..."))
+
+        thread = DownloadThread(url, filename, is_video)
+        self.threads.append(thread)
+        thread.progress.connect(lambda v, r=row: self.table.setItem(r, 1, QTableWidgetItem(f"{v}%")))
+        thread.speed.connect(lambda s, r=row: self.table.setItem(r, 2, QTableWidgetItem(s)))
+        thread.finished.connect(lambda m, r=row: self.table.setItem(r, 3, QTableWidgetItem(m)))
+        thread.start()
+
+    def cancel_last(self):
+        for t in reversed(self.threads):
+            if t.isRunning(): t.stop(); break
+
+    def clear_list(self):
+        self.table.setRowCount(0)
+        self.threads = [t for t in self.threads if t.isRunning()]
+
+if __name__ == "__main__":
+    app = QApplication(sys.argv)
+    window = DownloadManager(); window.show()
+    sys.exit(app.exec())

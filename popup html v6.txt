@@ -1,0 +1,18 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <style>
+    body { width: 180px; padding: 10px; font-family: sans-serif; text-align: center; background: #2c3e50; margin: 0; }
+    button { width: 100%; padding: 12px; margin: 6px 0; cursor: pointer; color: white; border: none; border-radius: 6px; font-weight: bold; font-size: 13px; }
+    button#unlockBtn { background: #e67e22; }
+    button#unlockBtn:hover { background: #d35400; }
+    button#sendBtn { background: #27ae60; }
+    button#sendBtn:hover { background: #2ecc71; }
+  </style>
+</head>
+<body>
+  <button id="unlockBtn">1. Unlock Right-Click</button>
+  <button id="sendBtn">2. Send to Python App</button>
+  <script src="popup.js"></script>
+</body>
+</html>

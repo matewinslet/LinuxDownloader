@@ -1,0 +1,131 @@
+// background.js - Version 1.6.0
+
+const handledUrls = new Set();
+const recentVideoUrls = new Set(); // Dedup for video stream sniffs
+
+// 1. Context Menu
+browser.contextMenus.create({
+  id: "send-to-linux-dm",
+  title: "Download with Linux Manager",
+  contexts: ["link"]
+});
+
+browser.contextMenus.onClicked.addListener((info) => {
+  if (info.menuItemId === "send-to-linux-dm") {
+    sendToPython(info.linkUrl, "Manual_Download", "file");
+  }
+});
+
+// 2. Silent intercept at response headers level
+browser.webRequest.onHeadersReceived.addListener(
+  (details) => {
+    const url = details.url;
+    const lowerUrl = url.toLowerCase();
+
+    if (
+      lowerUrl.includes("googlevideo.com") ||
+      lowerUrl.includes("youtube.com") ||
+      lowerUrl.includes("youtu.be")
+    ) return {};
+
+    if (lowerUrl.startsWith("blob:") || lowerUrl.startsWith("data:")) return {};
+
+    const headers = details.responseHeaders || [];
+    const contentDisposition = headers.find(h =>
+      h.name.toLowerCase() === "content-disposition"
+    );
+    const contentType = headers.find(h =>
+      h.name.toLowerCase() === "content-type"
+    );
+
+    const isAttachment = contentDisposition &&
+      contentDisposition.value.toLowerCase().includes("attachment");
+
+    const binaryTypes = [
+      "application/octet-stream",
+      "application/zip", "application/x-zip",
+      "application/x-rar", "application/x-7z-compressed",
+      "application/x-tar", "application/gzip",
+      "application/x-bzip2",
+      "application/vnd.android.package-archive",
+      "application/x-msdownload",
+      "application/x-debian-package",
+      "application/x-rpm"
+    ];
+    const isBinary = contentType &&
+      binaryTypes.some(t => contentType.value.toLowerCase().includes(t));
+
+    if (!isAttachment && !isBinary) return {};
+
+    if (handledUrls.has(url)) {
+      handledUrls.delete(url);
+      return { cancel: true };
+    }
+
+    let filename = "download";
+    if (contentDisposition) {
+      const match = contentDisposition.value.match(/filename\*?=["']?(?:UTF-\d['"]*)?([^;"'\n]+)/i);
+      if (match) filename = decodeURIComponent(match[1].trim().replace(/['"]/g, ""));
+    }
+    if (filename === "download") {
+      filename = url.split("?")[0].split("/").pop() || "download";
+    }
+
+    handledUrls.add(url);
+    sendToPython(url, filename, "file");
+    return { cancel: true };
+  },
+  { urls: ["<all_urls>"] },
+  ["blocking", "responseHeaders"]
+);
+
+// 3. Fallback for blob/data URIs
+browser.downloads.onCreated.addListener((downloadItem) => {
+  const url = downloadItem.url || "";
+  const lowerUrl = url.toLowerCase();
+
+  if (!lowerUrl.startsWith("blob:") && !lowerUrl.startsWith("data:")) {
+    browser.downloads.erase({ id: downloadItem.id });
+    return;
+  }
+
+  const filename = (downloadItem.filename || "").split(/[\\/]/).pop() || "download";
+  sendToPython(url, filename, "file");
+  browser.downloads.erase({ id: downloadItem.id });
+});
+
+// 4. Video Stream Sniffer with deduplication
+browser.webRequest.onBeforeRequest.addListener(
+  (details) => {
+    const url = details.url;
+    const lowerUrl = url.toLowerCase();
+
+    if (
+      lowerUrl.includes("googlevideo.com") ||
+      lowerUrl.includes("youtube.com") ||
+      lowerUrl.includes("youtu.be")
+    ) return;
+
+    if (lowerUrl.includes(".m3u8") || lowerUrl.includes(".mp4")) {
+      // Strip query string for dedup key — same file, different tokens = same download
+      const dedupKey = url.split("?")[0];
+
+      if (recentVideoUrls.has(dedupKey)) return;
+
+      recentVideoUrls.add(dedupKey);
+      // Clear after 3 seconds so the same URL can be re-sent if user wants it again
+      setTimeout(() => recentVideoUrls.delete(dedupKey), 3000);
+
+      const filename = dedupKey.split("/").pop() || "video.mp4";
+      sendToPython(url, filename, "video_stream");
+    }
+  },
+  { urls: ["<all_urls>"], types: ["media", "xmlhttprequest"] }
+);
+
+function sendToPython(url, filename, type) {
+  const bridgeUrl = `http://127.0.0.1:9999/?url=${encodeURIComponent(url)}&filename=${encodeURIComponent(filename)}&type=${type}`;
+  fetch(bridgeUrl).catch(() => {
+    console.error("Linux Download Manager is not running.");
+  });
+}

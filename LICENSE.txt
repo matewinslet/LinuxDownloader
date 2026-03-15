@@ -1,0 +1,33 @@
+Copyright (c) 2026 Tanjim
+Contact: tpodbcs@gmail.com
+All rights reserved.
+
+PROPRIETARY SOFTWARE LICENSE
+
+This software, "Linux Download Manager" (LDM), including all source code,
+documentation, assets, and associated files, is the exclusive intellectual
+property of the author, Tanjim.
+
+PERMISSIONS:
+- You may use this software for personal, non-commercial purposes.
+- You may not redistribute, sell, sublicense, or transfer this software
+  or any part of it to any third party without explicit written permission
+  from the author.
+
+RESTRICTIONS:
+- You may not copy, modify, merge, publish, or distribute this software
+  or its source code without explicit written permission from the author.
+- You may not use this software or any portion of it to create derivative
+  works without explicit written permission from the author.
+- You may not reverse engineer, decompile, or disassemble this software
+  except to the extent permitted by applicable law.
+
+DISCLAIMER:
+This software is provided "as is", without warranty of any kind, express
+or implied, including but not limited to the warranties of merchantability,
+fitness for a particular purpose, and non-infringement. In no event shall
+the author be liable for any claim, damages, or other liability arising
+from the use of this software.
+
+For permissions, licensing inquiries, or any other matters, contact:
+tpodbcs@gmail.com

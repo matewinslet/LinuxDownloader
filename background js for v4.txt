@@ -1,0 +1,64 @@
+// background.js - Version 1.2.0 (YouTube-Free Sniffer)
+
+// 1. Context Menu Support
+browser.contextMenus.create({
+  id: "send-to-linux-dm",
+  title: "Download with Linux Manager",
+  contexts: ["link"]
+});
+
+browser.contextMenus.onClicked.addListener((info) => {
+  if (info.menuItemId === "send-to-linux-dm") {
+    sendToPython(info.linkUrl, "Manual_Download", "file");
+  }
+});
+
+// Updated Catcher in background.js
+browser.downloads.onCreated.addListener((downloadItem) => {
+    if (!downloadItem.url || downloadItem.url.startsWith('blob:') || downloadItem.url.startsWith('data:')) {
+        return;
+    }
+
+    // Forward to Python immediately
+    const suggestedFilename = downloadItem.filename.split(/[\\/]/).pop();
+    sendToPython(downloadItem.url, suggestedFilename, "file");
+
+    // Silently cancel and remove from Firefox UI history
+    browser.downloads.cancel(downloadItem.id).then(() => {
+        browser.downloads.erase({ id: downloadItem.id });
+    });
+});
+
+// 3. Video Stream Sniffer (Excludes YouTube)
+browser.webRequest.onBeforeRequest.addListener(
+  (details) => {
+    const url = details.url.toLowerCase();
+    
+    // Skip all Google/YouTube video traffic
+    if (url.includes("googlevideo.com") || url.includes("youtube.com") || url.includes("youtu.be")) {
+      return;
+    }
+
+    if (url.includes(".m3u8") || url.includes(".mp4")) {
+      sendToPython(details.url, "Video_Detected", "video_stream");
+    }
+  },
+  { urls: ["<all_urls>"], types: ["media", "xmlhttprequest"] }
+);
+
+// 4. Listener for the Python Floating Button click
+// This sends a message to the content script to unlock and grab the URL
+function triggerUnlockAndGrab(tabId) {
+  browser.tabs.sendMessage(tabId, { action: "unlock_and_grab" }).then(response => {
+    if (response && response.url) {
+      sendToPython(response.url, "Captured_Video", "video_stream");
+    }
+  }).catch(err => console.error("Content script not ready or YouTube page."));
+}
+
+function sendToPython(url, filename, type) {
+  const bridgeUrl = `http://127.0.0.1:9999/?url=${encodeURIComponent(url)}&filename=${encodeURIComponent(filename)}&type=${type}`;
+  fetch(bridgeUrl).catch(() => {
+    console.error("Linux Download Manager is not running.");
+  });
+}

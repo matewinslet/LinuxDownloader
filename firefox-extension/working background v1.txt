@@ -1,0 +1,44 @@
+// background.js - Version 1.0.4
+
+// 1. Context Menu (Right-Click) Support
+browser.contextMenus.create({
+  id: "send-to-linux-dm",
+  title: "Download with Linux Manager",
+  contexts: ["link"]
+});
+
+browser.contextMenus.onClicked.addListener((info) => {
+  if (info.menuItemId === "send-to-linux-dm") {
+    // Send with no filename (Python will parse from URL)
+    sendToPython(info.linkUrl, "");
+  }
+});
+
+// 2. Universal "IDM-Style" Catcher
+browser.downloads.onCreated.addListener((downloadItem) => {
+  // Ignore internal blob/data URLs
+  if (!downloadItem.url || downloadItem.url.startsWith('blob:') || downloadItem.url.startsWith('data:')) {
+    return;
+  }
+
+  // Immediately cancel Firefox's internal download
+  browser.downloads.cancel(downloadItem.id);
+  browser.downloads.erase({ id: downloadItem.id });
+
+  // Extract the filename Firefox suggested (removes path slashes)
+  const suggestedFilename = downloadItem.filename.split(/[\\/]/).pop();
+
+  // Send BOTH the URL and the Filename to your Python app
+  sendToPython(downloadItem.url, suggestedFilename);
+});
+
+// Helper: Communicates with the Python Bridge
+function sendToPython(url, filename) {
+  const bridgeUrl = `http://127.0.0.1:9999/?url=${encodeURIComponent(url)}&filename=${encodeURIComponent(filename)}`;
+  
+  fetch(bridgeUrl)
+    .then(() => console.log("Success: Sent " + filename))
+    .catch(err => {
+        console.error("Python Bridge not running on port 9999");
+    });
+}

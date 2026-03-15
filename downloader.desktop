@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Linux Download Manager
+Comment=Custom Python Download Manager
+Exec=env PATH=/home/tanjim/.deno/bin:/home/tanjim/.bun/bin:/usr/local/bin:/usr/bin:/bin python3 /home/tanjim/linux-downloader/download_manager.py
+Icon=linux-downloader
+Terminal=false
+Categories=Network;
+StartupWMClass=download_manager.py

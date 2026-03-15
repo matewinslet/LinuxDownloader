@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <!-- Background circle -->
+  <circle cx="32" cy="32" r="32" fill="#2980b9"/>
+
+  <!-- Down arrow shaft -->
+  <rect x="28" y="10" width="8" height="22" rx="3" fill="white"/>
+
+  <!-- Down arrow head -->
+  <polygon points="16,30 32,48 48,30" fill="white"/>
+
+  <!-- Bottom bar / tray -->
+  <rect x="12" y="50" width="40" height="6" rx="3" fill="white"/>
+</svg>

@@ -1,0 +1,58 @@
+{
+  "manifest_version": 3,
+  "name": "Linux Download Manager",
+  "version": "2.5.3",
+  "description": "Silent Download Interceptor + Video Sender",
+  "permissions": [
+    "downloads",
+    "activeTab",
+    "scripting",
+    "contextMenus",
+    "webRequest",
+    "webRequestBlocking",
+    "storage"
+  ],
+  "icons": {
+    "16": "icon-16.png",
+    "32": "icon-32.png",
+    "48": "icon-48.png",
+    "96": "icon-96.png",
+    "128": "icon-128.png"
+  },
+  "action": {
+    "default_title": "Linux DM",
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icon-16.png",
+      "32": "icon-32.png",
+      "48": "icon-48.png",
+      "96": "icon-96.png",
+      "128": "icon-128.png"
+    }
+  },
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "scripts": ["background.js"]
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "exclude_matches": [
+        "*://*.youtube.com/*",
+        "*://youtube.com/*",
+        "*://*.youtu.be/*"
+      ],
+      "js": ["content.js"]
+    }
+  ],
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "jamesodorisiowoundcenter@gmail.com",
+      "data_collection_permissions": {
+        "required": ["none"]
+      }
+    }
+  }
+}

@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div class="section-label">Capture Streaming Sites</div>
+  <button id="unlockBtn">1. Unlock Right-Click</button>
+  <button id="sendBtn">2. Send to LDM</button>
+
+  <hr class="divider">
+
+  <div class="section-label">YouTube</div>
+  <button id="youtubeBtn">Capture YouTube</button>
+
+  <hr class="divider">
+
+  <div class="toggle-row">
+    <div class="toggle-label">
+      Auto Intercept
+      <div class="sub" id="toggleSub">Sending to Linux DM</div>
+    </div>
+    <label class="switch">
+      <input type="checkbox" id="interceptToggle">
+      <span class="slider"></span>
+    </label>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
