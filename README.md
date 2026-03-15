@@ -9,6 +9,22 @@ A powerful, IDM-style download manager for Linux — with a Firefox extension, Y
 
 ---
 
+## Screenshots
+
+| Downloads in Progress | Downloaded Files |
+|---|---|
+| ![Downloading](screenshots/03-downloading.png) | ![Downloaded](screenshots/04-downloaded-files.png) |
+
+| YouTube Downloader | YouTube Completed |
+|---|---|
+| ![YouTube](screenshots/01-youtube-downloader.png) | ![YouTube Done](screenshots/02-youtube-completed.png) |
+
+| Install Dependencies | About |
+|---|---|
+| ![Install](screenshots/05-install-dependencies.png) | ![About](screenshots/06-about.png) |
+
+---
+
 ## Features
 
 - **Silent download interception** — Firefox downloads are automatically redirected to LDM with no "Cancelled" flash
@@ -20,12 +36,6 @@ A powerful, IDM-style download manager for Linux — with a Firefox extension, Y
 - **Right-click context menu** — send any link directly to LDM from Firefox
 - **Toggle interception** — disable automatic interception anytime from the extension popup
 - **Clean light theme** — IDM-inspired interface with category sidebar
-
----
-
-## Screenshots
-
-> Coming soon
 
 ---
 
@@ -55,7 +65,7 @@ chmod +x install.sh
 
 The installer will automatically:
 - Install system packages (ffmpeg, curl)
-- Install Python packages (PyQt6, requests, yt-dlp)
+- Install Python packages (PyQt6, requests, yt-dlp, browser-cookie3)
 - Install Deno (JavaScript runtime required for YouTube)
 - Generate and install app icons
 - Create the desktop entry for your application menu
@@ -96,14 +106,12 @@ Or paste a YouTube URL directly into the LDM URL bar and click **Start Download*
 
 ## Manual Installation (without installer)
 
-If you prefer to install manually:
-
 ```bash
 # 1. System packages
 sudo apt install -y ffmpeg curl
 
 # 2. Python packages
-pip install PyQt6 requests yt-dlp --break-system-packages
+pip install PyQt6 requests yt-dlp browser-cookie3 --break-system-packages
 
 # 3. Deno (required for YouTube)
 curl -fsSL https://deno.land/install.sh | sh
@@ -135,6 +143,7 @@ linux-downloader/
 ├── download_manager.py     # Main application
 ├── install.sh              # Installer script
 ├── icons/                  # App icons
+├── screenshots/            # Screenshots
 ├── LICENSE.txt             # License
 ├── firefox-extension/      # Firefox extension source
 │   ├── manifest.json
@@ -155,6 +164,7 @@ linux-downloader/
 | PyQt6 | GUI framework |
 | requests | HTTP downloads |
 | yt-dlp | YouTube and video downloads |
+| browser-cookie3 | Firefox cookie support for authenticated downloads |
 | ffmpeg | Video/audio processing |
 | curl | Download fallback for complex sites |
 | Deno | JavaScript runtime for YouTube signature solving |
@@ -178,6 +188,6 @@ See [LICENSE.txt](LICENSE.txt) for details.
 
 ## Support Development
 
-If you find LDM useful, consider buying me a coffee ☕
+If you find LDM useful, consider supporting development ☕
 
 > Donation link coming soon
