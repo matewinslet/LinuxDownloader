@@ -694,6 +694,12 @@ class DownloadThread(QThread):
             session = requests.Session()
             session.headers.update(HEADERS)
             try:
+                import browser_cookie3
+                cookies = browser_cookie3.firefox()
+                session.cookies.update(cookies)
+            except Exception:
+                pass
+            try:
                 head = session.head(self.url, allow_redirects=True, timeout=10, verify=False)
                 cd = head.headers.get("Content-Disposition", "")
                 if "filename=" in cd:

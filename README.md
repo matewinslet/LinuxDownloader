@@ -183,7 +183,7 @@ Having issues? Contact the developer:
 
 ## License
 
-Copyright (c) 2025 Tanjim — All Rights Reserved.
+Copyright (c) 2026 Tanjim — All Rights Reserved.
 See [LICENSE.txt](LICENSE.txt) for details.
 
 ---
