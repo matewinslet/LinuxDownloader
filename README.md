@@ -21,7 +21,13 @@ A powerful, IDM-style download manager for Linux — with a Firefox extension, Y
 
 | Install Dependencies | About |
 |---|---|
+| ![Ins| Install Dependencies | About |
+|---|---|
 | ![Install](screenshots/05-install-dependencies.png) | ![About](screenshots/06-about.png) |
+
+| Firefox Extension Popup |
+|---|
+| ![Extension](screenshots/07-extension-popup.png) |tall](screenshots/05-install-dependencies.png) | ![About](screenshots/06-about.png) |
 
 ---
 
