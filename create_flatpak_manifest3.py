@@ -19,6 +19,7 @@ manifest = {
         "--socket=x11",
         "--socket=wayland",
         "--filesystem=home",
+"--filesystem=/home/tanjim/.config/mozilla/firefox:ro",
         "--talk-name=org.freedesktop.Notifications",
         "--talk-name=org.freedesktop.FileManager1"
     ],
