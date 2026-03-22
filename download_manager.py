@@ -1975,13 +1975,13 @@ class DownloadManager(QWidget):
         layout.addWidget(intro)
 
         commands = [
-            ("1. System packages  (ffmpeg, curl)",
-             "sudo apt install -y ffmpeg curl"),
-            ("2. Python packages  (PyQt6, requests, yt-dlp, browser-cookie3)",
-             "pip install PyQt6 requests yt-dlp browser-cookie3 --break-system-packages"),
-            ("3. Deno  —  JavaScript runtime required for YouTube",
-             "curl -fsSL https://deno.land/install.sh | sh && sudo ln -sf ~/.deno/bin/deno /usr/local/bin/deno"),
-        ]
+    ("1. System packages  (ffmpeg, curl, PyQt6 SVG)",
+     "sudo apt install -y ffmpeg curl python3-pyqt6.qtsvg"),
+    ("2. Python packages  (PyQt6, requests, yt-dlp, browser-cookie3)",
+     "pip install PyQt6 requests yt-dlp browser-cookie3 --break-system-packages"),
+    ("3. Deno  —  JavaScript runtime required for YouTube",
+     "curl -fsSL https://deno.land/install.sh | sh && sudo ln -sf ~/.deno/bin/deno /usr/local/bin/deno"),
+]
 
         for label_text, cmd in commands:
             lbl = QLabel(label_text)

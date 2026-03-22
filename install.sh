@@ -20,12 +20,12 @@ echo ""
 # ── Step 1: System packages ──────────────────────────────────────────────────
 echo "► [1/5] Installing system packages (ffmpeg, curl)..."
 sudo apt-get update -y -qq
-sudo apt-get install -y ffmpeg curl python3 python3-pip > /dev/null 2>&1
+sudo apt-get install -y ffmpeg curl python3 python3-pip python3-pyqt6.qtsvg > /dev/null 2>&1
 echo "  Done."
 
 # ── Step 2: Python packages ──────────────────────────────────────────────────
 echo "► [2/5] Installing Python packages (PyQt6, requests, yt-dlp)..."
-pip install PyQt6 requests yt-dlp --break-system-packages -q
+pip install PyQt6 requests yt-dlp browser-cookie3 --break-system-packages -q
 echo "  Done."
 
 # ── Step 3: Deno (JavaScript runtime for YouTube) ────────────────────────────
