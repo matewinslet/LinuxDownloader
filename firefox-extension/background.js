@@ -1,7 +1,72 @@
-// background.js - Version 2.4.1
+// background.js - Version 2.5.5
 
 const handledUrls = new Set();
 let interceptEnabled = true;
+
+// Per-tab m3u8 store — populated passively when page loads, used on Capture click.
+// Manifests are NEVER cancelled so the browser player always works normally.
+var tabM3u8Store = {};
+
+// Per-tab social CDN store — stores last 5 CDN video URLs per tab.
+// Used for Facebook/Instagram (fbcdn.net mp4) and Twitter (twimg.com m3u8).
+// Key: tabId → array of { cdnUrl, videoId, ts } (newest first)
+var tabSocialStore = {};
+var SOCIAL_STORE_MAX = 5;
+
+function socialStoreAdd(tabId, entry) {
+  if (!tabSocialStore[tabId]) tabSocialStore[tabId] = [];
+  tabSocialStore[tabId] = tabSocialStore[tabId]
+    .filter(function(e) { return e.cdnUrl !== entry.cdnUrl; });
+  tabSocialStore[tabId].unshift(entry);
+  if (tabSocialStore[tabId].length > SOCIAL_STORE_MAX)
+    tabSocialStore[tabId] = tabSocialStore[tabId].slice(0, SOCIAL_STORE_MAX);
+}
+
+// Social CDN domains — we intercept these passively for direct CDN download
+var SOCIAL_CDN_DOMAINS = [
+  "fbcdn.net",          // Facebook + Instagram video CDN
+  "cdninstagram.com",   // Instagram CDN alias
+  "video.twimg.com",    // Twitter video CDN
+];
+
+function isSocialCDN(url) {
+  try {
+    var host = new URL(url).hostname;
+    return SOCIAL_CDN_DOMAINS.some(function(d) { return host.endsWith(d); });
+  } catch(e) { return false; }
+}
+
+// Decode Facebook/Instagram efg param to extract video_id
+function decodeFbVideoId(url) {
+  try {
+    var efg = new URL(url).searchParams.get('efg');
+    if (!efg) return null;
+    var decoded = JSON.parse(atob(efg));
+    return decoded.video_id ? String(decoded.video_id) : null;
+  } catch(e) { return null; }
+}
+
+// CF-protected domains (no CDN store, use yt-dlp page URL)
+var cfProtectedDomains = [
+  "luluvdo.com", "lulustream.com",
+  "doodstream.com", "dood.watch", "dood.to",
+];
+
+function isCFProtected(url) {
+  try {
+    var host = new URL(url).hostname;
+    return cfProtectedDomains.some(function(d) { return host.includes(d); });
+  } catch(e) { return false; }
+}
+
+// Strip /e/, /embed/ iframe prefixes from URLs
+function normalizeStreamUrl(url) {
+  try {
+    var u = new URL(url);
+    u.pathname = u.pathname.replace(/^\/e\//, '/').replace(/^\/embed\//, '/');
+    return u.toString();
+  } catch(e) { return url; }
+}
 
 browser.storage.local.get("interceptEnabled").then(function(result) {
   interceptEnabled = result.interceptEnabled !== false;
@@ -13,6 +78,14 @@ browser.storage.onChanged.addListener(function(changes) {
   }
 });
 
+// Clear stored URLs when tab navigates to a new page
+browser.tabs.onUpdated.addListener(function(tabId, changeInfo) {
+  if (changeInfo.status === 'loading') {
+    delete tabM3u8Store[tabId];
+    delete tabSocialStore[tabId];
+  }
+});
+
 // Context menu for regular download links
 browser.contextMenus.create({
   id: "send-to-linux-dm",
@@ -20,7 +93,7 @@ browser.contextMenus.create({
   contexts: ["link"]
 });
 
-// Context menu for YouTube — shows on all pages, works on YouTube
+// Context menu for YouTube pages and links
 browser.contextMenus.create({
   id: "capture-youtube",
   title: "Capture YouTube with LDM",
@@ -32,20 +105,68 @@ browser.contextMenus.onClicked.addListener(function(info) {
   if (info.menuItemId === "send-to-linux-dm") {
     var url = info.linkUrl;
     var filename = url.split("?")[0].split("/").pop() || "download";
-    sendToPython(url, filename, "file");
+    var referer = info.pageUrl || "";
+    sendToPython(url, filename, "file", referer);
   }
   if (info.menuItemId === "capture-youtube") {
     var url = info.linkUrl || info.pageUrl;
-    sendToPython(url, "youtube", "youtube");
+    sendToPython(url, "youtube", "youtube", "");
   }
 });
+
+var skipExts = [
+  // images
+  ".jpg", ".jpeg", ".png", ".gif", ".webp",
+  ".bmp", ".svg", ".avif", ".tiff", ".ico",
+  // code / text
+  ".py", ".sh", ".js", ".css", ".html", ".htm",
+  ".json", ".xml", ".yaml", ".yml", ".toml", ".ini", ".cfg",
+  ".md", ".rst", ".tex", ".csv", ".log", ".env",
+  ".c", ".cpp", ".h", ".java", ".rb", ".go", ".rs", ".php",
+  // HLS / DASH stream segments — never intercept these individually
+  ".enc", ".key", ".aes", ".m4s", ".frag", ".chunk"
+];
+
+var videoAudioMimes = [
+  'video/mp4', 'video/x-matroska', 'video/webm', 'video/avi',
+  'video/quicktime', 'video/mp2t', 'video/vnd.dlna.mpeg-tts',
+  'audio/mpeg', 'audio/flac', 'audio/wav', 'audio/aac',
+  'audio/ogg', 'audio/x-m4a',
+];
+var videoAudioExts = [
+  '.mp4', '.mkv', '.webm', '.avi', '.mov', '.ts', '.flv', '.m4v',
+  '.mp3', '.flac', '.wav', '.aac', '.ogg', '.m4a',
+];
+function isVideoAudio(url, contentType) {
+  if (contentType) {
+    var ct = contentType.value.toLowerCase();
+    for (var i = 0; i < videoAudioMimes.length; i++) {
+      if (ct.includes(videoAudioMimes[i])) return true;
+    }
+  }
+  var path = url.split('?')[0].toLowerCase();
+  for (var j = 0; j < videoAudioExts.length; j++) {
+    if (path.endsWith(videoAudioExts[j])) return true;
+  }
+  return false;
+}
 
 browser.webRequest.onHeadersReceived.addListener(
   function(details) {
     if (!interceptEnabled) return {};
     var url = details.url;
     var lowerUrl = url.toLowerCase();
+    console.log("LDM intercept check:", url);
     if (
+      lowerUrl.includes("claude.ai") ||
+      lowerUrl.includes("anthropic.com") ||
+      lowerUrl.includes("chatgpt.com") ||
+      lowerUrl.includes("chat.openai.com") ||
+      lowerUrl.includes("stackoverflow.com") ||
+      lowerUrl.includes("codepen.io") ||
+      lowerUrl.includes("jsfiddle.net") ||
+      lowerUrl.includes("pastebin.com") ||
+      lowerUrl.includes("gist.github.com") ||
       lowerUrl.includes("googlevideo.com") ||
       lowerUrl.includes("youtube.com") ||
       lowerUrl.includes("youtu.be") ||
@@ -59,7 +180,7 @@ browser.webRequest.onHeadersReceived.addListener(
       lowerUrl.includes("lh6.google")
     ) return {};
     if (lowerUrl.startsWith("blob:") || lowerUrl.startsWith("data:")) return {};
-    var allowedTypes = ["main_frame", "sub_frame", "other"];
+    var allowedTypes = ["main_frame", "sub_frame", "other", "xmlhttprequest", "media"];
     if (allowedTypes.indexOf(details.type) === -1) return {};
     var headers = details.responseHeaders || [];
     var contentDisposition = null;
@@ -69,6 +190,9 @@ browser.webRequest.onHeadersReceived.addListener(
       if (name === "content-disposition") contentDisposition = headers[i];
       if (name === "content-type") contentType = headers[i];
     }
+    // Also catch manifest URLs by extension regardless of MIME
+    var urlPathLower = url.split("?")[0].toLowerCase();
+    var isManifest = urlPathLower.endsWith(".m3u8") || urlPathLower.endsWith(".mpd");
     var isAttachment = contentDisposition &&
       contentDisposition.value.toLowerCase().includes("attachment");
     var downloadTypes = [
@@ -95,7 +219,13 @@ browser.webRequest.onHeadersReceived.addListener(
       "video/x-matroska",
       "video/webm",
       "video/avi",
-      "video/quicktime"
+      "video/quicktime",
+      "video/mp2t",
+      "video/vnd.dlna.mpeg-tts",
+      "application/dash+xml",
+      "application/x-mpegurl",
+      "application/vnd.apple.mpegurl",
+      "application/vnd.ms-sstr+xml"
     ];
     var isBinaryType = false;
     if (contentType) {
@@ -107,7 +237,18 @@ browser.webRequest.onHeadersReceived.addListener(
         }
       }
     }
-    if (!isAttachment && !isBinaryType) return {};
+    // Auto-intercept:
+    //   1. Explicit attachment downloads (Content-Disposition: attachment)
+    //   2. HLS/DASH manifests
+    //   3. Binary file types (zip, rar, exe, apk etc.) even without attachment header
+    // Inline video/audio must NOT be cancelled -- breaks in-browser players.
+    // PDF excluded from binary intercept -- user may want to view in browser.
+    var isNonVideoAttachment = isBinaryType && contentType && (() => {
+      var ct = contentType.value.toLowerCase();
+      return !ct.startsWith('video/') && !ct.startsWith('audio/') &&
+             !ct.includes('application/pdf');
+    })();
+    if (!isAttachment && !isManifest && !isNonVideoAttachment) return {};
     if (contentType) {
       var ct = contentType.value.toLowerCase();
       if (ct.startsWith("image/")) return {};
@@ -115,12 +256,13 @@ browser.webRequest.onHeadersReceived.addListener(
       if (ct.includes("application/json")) return {};
       if (ct.includes("application/javascript")) return {};
       if (ct.includes("application/xhtml")) return {};
+      if (ct.includes("text/x-python")) return {};
+      if (ct.includes("text/x-sh")) return {};
+      if (ct.includes("application/x-python")) return {};
     }
-    var imageExts = [".jpg", ".jpeg", ".png", ".gif", ".webp",
-                     ".bmp", ".svg", ".avif", ".tiff", ".ico"];
     var urlPath = url.split("?")[0].toLowerCase();
-    for (var k = 0; k < imageExts.length; k++) {
-      if (urlPath.endsWith(imageExts[k])) return {};
+    for (var k = 0; k < skipExts.length; k++) {
+      if (urlPath.endsWith(skipExts[k])) return {};
     }
     if (handledUrls.has(url)) {
       handledUrls.delete(url);
@@ -134,11 +276,89 @@ browser.webRequest.onHeadersReceived.addListener(
     if (!filename) {
       filename = url.split("?")[0].split("/").pop() || "download";
     }
-    for (var m = 0; m < imageExts.length; m++) {
-      if (filename.toLowerCase().endsWith(imageExts[m])) return {};
+    for (var m = 0; m < skipExts.length; m++) {
+      if (filename.toLowerCase().endsWith(skipExts[m])) return {};
+    }
+    // Skip HLS/DASH segment URLs — numbered chunks served by CDNs
+    var segmentPatterns = [
+      /\/seg[-_]?\d+/i,
+      /\/chunk[-_]?\d+/i,
+      /\/fragment[-_]?\d+/i,
+      /\/media[-_]?\d+/i,
+      /[&?]segment=\d+/i,
+      /\/\d+\.enc(\?|$)/i,
+      /\/\d+\.ts(\?|$)/i,
+      /\/\d+\.m4s(\?|$)/i,
+    ];
+    for (var n = 0; n < segmentPatterns.length; n++) {
+      if (segmentPatterns[n].test(url)) return {};
+    }
+    var referer = details.documentUrl || details.originUrl || "";
+
+    // Social CDN: passively store fbcdn.net mp4 and twimg.com m3u8 per tab.
+    // NEVER cancel — the browser player needs these to play normally.
+    if (isSocialCDN(url)) {
+      var videoId = decodeFbVideoId(url);
+      var isTwimg = url.includes("video.twimg.com");
+      // Only store actual video files/manifests, not thumbnails or tiny clips
+      var contentLen = 0;
+      for (var ci = 0; ci < headers.length; ci++) {
+        if (headers[ci].name.toLowerCase() === 'content-length') {
+          contentLen = parseInt(headers[ci].value) || 0;
+        }
+      }
+      var isFbcdn = url.includes("fbcdn.net") || url.includes("cdninstagram.com");
+      var isFirstChunk = /[?&]bytestart=0(&|$)/.test(url);
+      var isVideoUrl = isTwimg ||
+        url.split("?")[0].toLowerCase().endsWith(".mp4") ||
+        (contentType && contentType.value.toLowerCase().includes("video/"));
+      // fbcdn uses DASH byte-range chunks -- each has tiny Content-Length.
+      // Accept first chunk (bytestart=0) regardless of size.
+      // For twimg keep >100000 check (serves full files).
+      var sizeOk = isFbcdn ? (isFirstChunk && isVideoUrl)
+                 : contentLen > 100000;
+      if (isVideoUrl && sizeOk) {
+        var entry = {
+          cdnUrl:  url,
+          videoId: videoId,
+          isTwimg: isTwimg,
+          ts:      Date.now(),
+        };
+        socialStoreAdd(details.tabId, entry);
+        // Push to content script immediately -- associate with playing video
+        browser.tabs.sendMessage(details.tabId, {
+          action: 'storeCdnEntry',
+          entry:  entry,
+        }).catch(function() {});
+      }
+      return {};
+    }
+
+    // Manifests: store silently per tab so Capture button can use them.
+    // NEVER cancel — the browser player needs these to function normally.
+    // Skip CF-protected domains — their m3u8 expires quickly, page URL is better.
+    var isHLSType = contentType && (
+      contentType.value.toLowerCase().includes("mpegurl") ||
+      contentType.value.toLowerCase().includes("dash+xml")
+    );
+    if (isManifest || isHLSType) {
+      if (!isCFProtected(url)) {
+        tabM3u8Store[details.tabId] = url;
+      }
+      return {};
+    }
+
+    // Option A: video/audio attachments pass through — Capture button handles them.
+    // Only non-video attachments (zip, exe, pdf, apk, deb etc.) are auto-triggered.
+    if (isVideoAudio(url, contentType)) return {};
+
+    // Attachment downloads only — intercept and send to LDM
+    if (handledUrls.has(url)) {
+      handledUrls.delete(url);
+      return { cancel: true };
     }
     handledUrls.add(url);
-    sendToPython(url, filename, "file");
+    sendToPython(url, filename, "file", referer);
     return { cancel: true };
   },
   { urls: ["<all_urls>"] },
@@ -149,15 +369,11 @@ browser.downloads.onCreated.addListener(function(downloadItem) {
   var url = downloadItem.url || "";
   var lowerUrl = url.toLowerCase();
   if (!lowerUrl.startsWith("blob:") && !lowerUrl.startsWith("data:")) {
-    if (!interceptEnabled) return;
-    browser.downloads.erase({ id: downloadItem.id });
     return;
   }
   var filename = (downloadItem.filename || "").split(/[\\/]/).pop() || "";
-  var imageExts = [".jpg", ".jpeg", ".png", ".gif", ".webp",
-                   ".bmp", ".svg", ".avif", ".tiff", ".ico"];
-  for (var i = 0; i < imageExts.length; i++) {
-    if (filename.toLowerCase().endsWith(imageExts[i])) return;
+  for (var i = 0; i < skipExts.length; i++) {
+    if (filename.toLowerCase().endsWith(skipExts[i])) return;
   }
   var mime = (downloadItem.mime || "").toLowerCase();
   if (mime.startsWith("image/")) return;
@@ -166,14 +382,55 @@ browser.downloads.onCreated.addListener(function(downloadItem) {
   if (!hasExt && mime === "application/octet-stream") return;
   if (!hasExt && mime === "") return;
   if (!interceptEnabled) return;
-  sendToPython(url, filename || "download", "file");
+  sendToPython(url, filename || "download", "file", "");
   browser.downloads.erase({ id: downloadItem.id });
 });
 
-function sendToPython(url, filename, type) {
+function sendToPython(url, filename, type, referer) {
+  referer = referer || "";
   var bridgeUrl = "http://127.0.0.1:9999/?url=" + encodeURIComponent(url) +
-    "&filename=" + encodeURIComponent(filename) + "&type=" + type;
+    "&filename=" + encodeURIComponent(filename) +
+    "&type=" + type +
+    "&referer=" + encodeURIComponent(referer);
   fetch(bridgeUrl).catch(function() {
     console.error("Linux Download Manager is not running.");
   });
 }
+
+// Relay bridge calls from content scripts (avoids iframe CORS blocks)
+browser.runtime.onMessage.addListener(function(message, sender, sendResponse) {
+  if (message.action === 'bridge') {
+    sendToPython(message.url, message.filename || 'download', message.type || 'file', '');
+    sendResponse({ ok: true });
+  }
+  // Return stored m3u8 for current tab (called from content.js Capture button)
+  if (message.action === 'getM3u8') {
+    var tabId = sender.tab ? sender.tab.id : null;
+    var m3u8  = tabId ? (tabM3u8Store[tabId] || null) : null;
+    sendResponse({ url: m3u8 });
+  }
+  // Return stored m3u8 by explicit tabId (called from popup.js)
+  if (message.action === 'getM3u8ForTab') {
+    var m3u8 = tabM3u8Store[message.tabId] || null;
+    sendResponse({ url: m3u8 });
+  }
+  // Return most recent social CDN video for current tab (content.js)
+  if (message.action === 'getSocialVideo') {
+    var tabId = sender.tab ? sender.tab.id : null;
+    var entry = tabId && tabSocialStore[tabId] && tabSocialStore[tabId].length
+      ? tabSocialStore[tabId][0] : null;
+    sendResponse({ entry: entry });
+  }
+  // Return social CDN video by explicit tabId (popup.js)
+  if (message.action === 'getSocialVideoForTab') {
+    var entries = tabSocialStore[message.tabId] || [];
+    // Prefer entry matching videoId hint if provided
+    var entry = null;
+    if (message.videoId) {
+      entry = entries.find(function(e) { return e.videoId === message.videoId; }) || null;
+    }
+    if (!entry) entry = entries[0] || null;
+    sendResponse({ entry: entry });
+  }
+  return true;
+});

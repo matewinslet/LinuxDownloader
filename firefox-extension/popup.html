@@ -5,17 +5,21 @@
   <link rel="stylesheet" href="popup.css">
 </head>
 <body>
-  <div class="section-label">Capture Streaming Sites</div>
-  <button id="unlockBtn">1. Unlock Right-Click</button>
-  <button id="sendBtn">2. Send to LDM</button>
+  <div class="section-label">Stream Capture</div>
+  <button id="captureBtn">&#11015; Capture Stream</button>
 
   <hr class="divider">
-
   <div class="section-label">YouTube</div>
-  <button id="youtubeBtn">Capture YouTube</button>
+  <button id="youtubeBtn">&#9654; Capture YouTube</button>
 
   <hr class="divider">
+  <div class="section-label">Tools</div>
+  <button id="unlockBtn" class="secondary">
+    <span class="btn-title">&#128275; Unlock Right-click</span>
+    <span class="btn-sub">Enables restricted right-click downloads</span>
+  </button>
 
+  <hr class="divider">
   <div class="toggle-row">
     <div class="toggle-label">
       Auto Intercept
@@ -26,7 +30,6 @@
       <span class="slider"></span>
     </label>
   </div>
-
   <script src="popup.js"></script>
 </body>
 </html>
