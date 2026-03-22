@@ -405,7 +405,7 @@ class FetchFormatsThread(QThread):
                 'quiet': True,
                 'no_warnings': True,
                 'http_headers': {'User-Agent': HEADERS['User-Agent']},
-                'cookiesfrombrowser': ('firefox',),
+                'cookiesfrombrowser': ('firefox', os.path.join(HOME, '.config', 'mozilla', 'firefox')),
             }
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(self.url, download=False)
@@ -436,7 +436,7 @@ class YouTubeDownloadThread(QThread):
     def run(self):
         try:
             self.ydl_opts['progress_hooks'] = [self.hook]
-            self.ydl_opts['cookiesfrombrowser'] = ('firefox',)
+            self.ydl_opts['cookiesfrombrowser'] = ('firefox', os.path.join(HOME, '.config', 'mozilla', 'firefox'))
             with yt_dlp.YoutubeDL(self.ydl_opts) as ydl:
                 info = ydl.extract_info(self.url, download=True)
                 if info is None:
@@ -1001,7 +1001,7 @@ class StreamDialog(QDialog):
             'merge_output_format': 'mp4',
             'quiet':               True,
             'no_warnings':         True,
-            'cookiesfrombrowser':  ('firefox',),
+            'cookiesfrombrowser':  ('firefox', os.path.join(HOME, '.config', 'mozilla', 'firefox')),
             'http_headers':        {'User-Agent': HEADERS['User-Agent']},
         }
         self.download_started.emit(self._url, display_name, folder)
