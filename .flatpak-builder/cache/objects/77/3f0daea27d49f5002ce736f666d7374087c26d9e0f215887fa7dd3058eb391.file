@@ -1,0 +1,14 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <style>
+        body { width: 200px; font-family: sans-serif; padding: 10px; text-align: center; }
+        .status { color: #2ecc71; font-weight: bold; }
+    </style>
+</head>
+<body>
+    <h3>Linux DM</h3>
+    <p class="status">Extension Active</p>
+    <p>Ready to capture downloads.</p>
+</body>
+</html>

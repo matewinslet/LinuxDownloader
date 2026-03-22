@@ -1,0 +1,98 @@
+{
+  "id" : "com.tanjim.LDM",
+  "runtime" : "org.kde.Platform",
+  "runtime-version" : "6.8",
+  "runtime-commit" : "d101b2f79d972e83b6e438af2e4abe90e3a01387a6db6db2667d4ba1835afbc8",
+  "sdk" : "org.kde.Sdk",
+  "sdk-commit" : "a62790750ef9c82730075a66dec280f6a03be14a148f8e4eb4b5f07fa8499ba2",
+  "command" : "ldm",
+  "modules" : [
+    {
+      "name" : "python3-deps",
+      "buildsystem" : "simple",
+      "sources" : [
+        {
+          "path" : "pip-packages/browser_cookie3-0.20.1-py3-none-any.whl",
+          "type" : "file"
+        },
+        {
+          "path" : "pip-packages/certifi-2026.2.25-py3-none-any.whl",
+          "type" : "file"
+        },
+        {
+          "path" : "pip-packages/charset_normalizer-3.4.6-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl",
+          "type" : "file"
+        },
+        {
+          "path" : "pip-packages/idna-3.11-py3-none-any.whl",
+          "type" : "file"
+        },
+        {
+          "path" : "pip-packages/jeepney-0.9.0-py3-none-any.whl",
+          "type" : "file"
+        },
+        {
+          "path" : "pip-packages/lz4-4.4.5-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl",
+          "type" : "file"
+        },
+        {
+          "path" : "pip-packages/pycryptodomex-3.23.0-cp37-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl",
+          "type" : "file"
+        },
+        {
+          "path" : "pip-packages/requests-2.32.5-py3-none-any.whl",
+          "type" : "file"
+        },
+        {
+          "path" : "pip-packages/urllib3-2.6.3-py3-none-any.whl",
+          "type" : "file"
+        },
+        {
+          "path" : "pip-packages/yt_dlp-2026.3.17-py3-none-any.whl",
+          "type" : "file"
+        }
+      ],
+      "build-commands" : [
+        "pip3 install --no-index --find-links=/run/build/python3-deps --prefix=/app browser_cookie3-0.20.1-py3-none-any.whl",
+        "pip3 install --no-index --find-links=/run/build/python3-deps --prefix=/app certifi-2026.2.25-py3-none-any.whl",
+        "pip3 install --no-index --find-links=/run/build/python3-deps --prefix=/app charset_normalizer-3.4.6-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl",
+        "pip3 install --no-index --find-links=/run/build/python3-deps --prefix=/app idna-3.11-py3-none-any.whl",
+        "pip3 install --no-index --find-links=/run/build/python3-deps --prefix=/app jeepney-0.9.0-py3-none-any.whl",
+        "pip3 install --no-index --find-links=/run/build/python3-deps --prefix=/app lz4-4.4.5-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl",
+        "pip3 install --no-index --find-links=/run/build/python3-deps --prefix=/app pycryptodomex-3.23.0-cp37-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl",
+        "pip3 install --no-index --find-links=/run/build/python3-deps --prefix=/app requests-2.32.5-py3-none-any.whl",
+        "pip3 install --no-index --find-links=/run/build/python3-deps --prefix=/app urllib3-2.6.3-py3-none-any.whl",
+        "pip3 install --no-index --find-links=/run/build/python3-deps --prefix=/app yt_dlp-2026.3.17-py3-none-any.whl"
+      ]
+    },
+    {
+      "name" : "ldm",
+      "buildsystem" : "simple",
+      "sources" : [
+        {
+          "path" : ".",
+          "type" : "dir"
+        }
+      ],
+      "build-commands" : [
+        "cp -r . /app/ldm",
+        "mkdir -p /app/bin",
+        "echo '#!/bin/bash' > /app/bin/ldm",
+        "echo 'exec /app/ldm/venv/bin/python3 /app/ldm/download_manager.py \"$@\"' >> /app/bin/ldm",
+        "chmod +x /app/bin/ldm",
+        "install -Dm644 icons/linux-downloader-256.png /app/share/icons/hicolor/256x256/apps/com.tanjim.LDM.png",
+        "install -Dm644 com.tanjim.LDM.desktop /app/share/applications/com.tanjim.LDM.desktop"
+      ]
+    }
+  ],
+  "finish-args" : [
+    "--share=network",
+    "--share=ipc",
+    "--socket=x11",
+    "--socket=wayland",
+    "--filesystem=home",
+    "--talk-name=org.freedesktop.Notifications",
+    "--talk-name=org.freedesktop.FileManager1"
+  ],
+  "source-date-epoch" : 1774218868
+}

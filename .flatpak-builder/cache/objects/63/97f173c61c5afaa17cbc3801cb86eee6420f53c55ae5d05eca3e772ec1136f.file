@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Linux Download Manager
+Comment=A powerful download manager for Linux
+Exec=ldm
+Icon=com.tanjim.LDM
+Terminal=false
+Categories=Network;FileTransfer;

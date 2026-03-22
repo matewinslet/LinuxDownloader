@@ -1,0 +1,2 @@
+#!/bin/bash
+exec /app/ldm/venv/bin/python3 /app/ldm/download_manager.py "$@"

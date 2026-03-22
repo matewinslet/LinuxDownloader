@@ -1,0 +1,162 @@
+// content.js - Linux Download Manager
+// Handles: unlock right-click, floating capture overlay, stream detection
+// Bridge calls are relayed through background.js to avoid iframe CORS blocks
+
+(function () {
+  'use strict';
+
+  // ── Message listener ────────────────────────────────────────────────
+  chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+    if (request.action === 'unlock') {
+      window.addEventListener('contextmenu', e => e.stopPropagation(), true);
+      sendResponse({ status: 'unlocked' });
+    } else if (request.action === 'grab') {
+      sendResponse(detectStream());
+    }
+    return true;
+  });
+
+  // ── Stream detection ────────────────────────────────────────────────
+  function detectStream() {
+    const video = document.querySelector('video');
+    if (!video) return { url: null, isHLS: false };
+    let url = null, isHLS = false;
+    if (video.src && !video.src.startsWith('blob:')) {
+      url = video.src; isHLS = url.includes('.m3u8');
+    } else {
+      const source = document.querySelector('video source');
+      if (source && source.src && !source.src.startsWith('blob:')) {
+        url = source.src; isHLS = url.includes('.m3u8');
+      }
+    }
+    if (!url && window.hls && window.hls.url) { url = window.hls.url; isHLS = true; }
+    if (!url) { try { if (window.videojs) {
+      const p = Object.values(window.videojs.getPlayers ? window.videojs.getPlayers() : {})[0];
+      if (p) { url = p.currentSrc(); isHLS = url && url.includes('.m3u8'); }
+    }} catch(e) {} }
+    if (!url) { try { if (window.jwplayer) {
+      const p = window.jwplayer(), item = p && p.getPlaylistItem && p.getPlaylistItem();
+      if (item) { url = item.file || (item.sources && item.sources[0] && item.sources[0].file); isHLS = url && url.includes('.m3u8'); }
+    }} catch(e) {} }
+    return { url: url || null, isHLS: !!isHLS };
+  }
+
+  // ── Relay bridge call through background.js (avoids iframe CORS) ────
+  function relayToBridge(url, type, filename) {
+    return new Promise((resolve, reject) => {
+      chrome.runtime.sendMessage(
+        { action: 'bridge', url: url, type: type, filename: filename },
+        (resp) => {
+          if (chrome.runtime.lastError) reject(chrome.runtime.lastError);
+          else if (resp && resp.ok) resolve();
+          else reject(new Error('bridge failed'));
+        }
+      );
+    });
+  }
+
+  function resolveFilename(url, pageTitle) {
+    const videoExts = ['mp4','mkv','webm','avi','mov','ts','flv','m4v'];
+    const pathPart = url.split('?')[0].split('/').pop();
+    if (pathPart && pathPart.includes('.')) {
+      const ext = pathPart.split('.').pop().toLowerCase();
+      if (videoExts.includes(ext)) return pathPart;
+    }
+    const urlExt = (() => { const e = url.split('?')[0].split('.').pop().toLowerCase(); return videoExts.includes(e) ? e : 'mp4'; })();
+    if (pageTitle && pageTitle.trim()) {
+      const safe = pageTitle.trim().replace(/[^\w\s\-]/g,'').replace(/\s+/g,'_').slice(0,60).replace(/_+$/,'');
+      if (safe) return `${safe}.${urlExt}`;
+    }
+    const now = new Date();
+    const ts = now.getFullYear()+'-'+String(now.getMonth()+1).padStart(2,'0')+'-'+String(now.getDate()).padStart(2,'0')+'_'+String(now.getHours()).padStart(2,'0')+'-'+String(now.getMinutes()).padStart(2,'0')+'-'+String(now.getSeconds()).padStart(2,'0');
+    return `video_${ts}.${urlExt}`;
+  }
+
+  // ── Floating overlay ─────────────────────────────────────────────────
+  function createOverlay(video) {
+    // Dedup via attribute — works reliably across MutationObserver re-fires
+    if (video.hasAttribute('data-ldm-overlay')) return;
+    video.setAttribute('data-ldm-overlay', '1');
+
+    const btn = document.createElement('div');
+    btn.innerHTML = '&#11015; Capture';
+    Object.assign(btn.style, {
+      position:'fixed', zIndex:'2147483647', background:'rgba(2,6,23,0.88)',
+      color:'#38bdf8', fontFamily:'sans-serif', fontSize:'12px', fontWeight:'bold',
+      padding:'5px 10px', borderRadius:'5px', cursor:'pointer',
+      border:'1px solid #38bdf8', pointerEvents:'all', userSelect:'none', lineHeight:'1.4',
+    });
+    btn.addEventListener('mouseenter', () => { btn.style.background = 'rgba(56,189,248,0.22)'; });
+    btn.addEventListener('mouseleave', () => { btn.style.background = 'rgba(2,6,23,0.88)'; });
+
+    btn.addEventListener('click', e => {
+      e.stopPropagation(); e.preventDefault();
+      const result   = detectStream();
+      const sendUrl  = result.url || window.location.href;
+      const sendType = (result.url && !result.isHLS) ? 'video_stream' : 'stream_hls';
+      const filename = resolveFilename(sendUrl, document.title);
+      btn.innerHTML = '&#8987; Sending...';
+      relayToBridge(sendUrl, sendType, filename)
+        .then(() => {
+          btn.innerHTML = result.url ? '&#10003; Sent!' : '&#10003; Sent page!';
+          btn.style.color = '#22c55e'; btn.style.borderColor = '#22c55e';
+          setTimeout(() => removeOverlay(video), 1500);
+        })
+        .catch(() => {
+          btn.innerHTML = '&#10007; Failed';
+          btn.style.color = '#ef4444'; btn.style.borderColor = '#ef4444';
+          setTimeout(() => {
+            btn.innerHTML = '&#11015; Capture';
+            btn.style.color = '#38bdf8'; btn.style.borderColor = '#38bdf8';
+          }, 2000);
+        });
+    });
+
+    document.body.appendChild(btn);
+    positionOverlay(video, btn);
+
+    const reposition = () => positionOverlay(video, btn);
+    window.addEventListener('scroll', reposition, { passive: true });
+    window.addEventListener('resize', reposition, { passive: true });
+    const ro = new ResizeObserver(() => positionOverlay(video, btn));
+    ro.observe(video);
+    btn._cleanup = () => {
+      ro.disconnect();
+      window.removeEventListener('scroll', reposition);
+      window.removeEventListener('resize', reposition);
+    };
+    video._ldmBtn = btn;
+  }
+
+  function positionOverlay(video, btn) {
+    const r = video.getBoundingClientRect();
+    if (r.width < 100 || r.height < 60) { btn.style.display = 'none'; return; }
+    btn.style.display = 'block';
+    btn.style.top  = `${r.top  + 10}px`;
+    btn.style.left = `${r.right - 115}px`;
+  }
+
+  function removeOverlay(video) {
+    if (video._ldmBtn) {
+      if (video._ldmBtn._cleanup) video._ldmBtn._cleanup();
+      video._ldmBtn.remove();
+      delete video._ldmBtn;
+    }
+    video.removeAttribute('data-ldm-overlay');
+  }
+
+  function attachToVideos() {
+    document.querySelectorAll('video').forEach(v => createOverlay(v));
+  }
+
+  new MutationObserver(attachToVideos).observe(
+    document.body || document.documentElement, { childList: true, subtree: true }
+  );
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', attachToVideos);
+  } else {
+    attachToVideos();
+  }
+
+})();

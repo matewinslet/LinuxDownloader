@@ -1,0 +1,303 @@
+// content.js - Linux Download Manager
+// Smart floating button: YouTube → YouTubeDialog, stream → StreamDialog
+
+(function () {
+  'use strict';
+
+  const YOUTUBE_HOSTS = ['youtube.com', 'youtu.be', 'youtube-nocookie.com'];
+
+  function isYouTubePage() {
+    const host = window.location.hostname.replace('www.', '');
+    const path = window.location.pathname;
+    return YOUTUBE_HOSTS.some(h => host.includes(h)) &&
+      (path.includes('/watch') || path.includes('/shorts') || host === 'youtu.be');
+  }
+
+  // ── Stream detection ──────────────────────────────────────────────────────
+  function detectStream() {
+    const video = document.querySelector('video');
+    if (!video) return { url: null, isHLS: false };
+    let url = null, isHLS = false;
+    if (video.src && !video.src.startsWith('blob:')) {
+      url = video.src; isHLS = url.includes('.m3u8');
+    } else {
+      const source = document.querySelector('video source');
+      if (source && source.src && !source.src.startsWith('blob:')) {
+        url = source.src; isHLS = url.includes('.m3u8');
+      }
+    }
+    if (!url && window.hls && window.hls.url) { url = window.hls.url; isHLS = true; }
+    if (!url) { try { if (window.videojs) {
+      const p = Object.values(window.videojs.getPlayers ? window.videojs.getPlayers() : {})[0];
+      if (p) { url = p.currentSrc(); isHLS = url && url.includes('.m3u8'); }
+    }} catch(e) {} }
+    if (!url) { try { if (window.jwplayer) {
+      const p = window.jwplayer(), item = p && p.getPlaylistItem && p.getPlaylistItem();
+      if (item) { url = item.file || (item.sources && item.sources[0] && item.sources[0].file); isHLS = url && url.includes('.m3u8'); }
+    }} catch(e) {} }
+    return { url: url || null, isHLS: !!isHLS };
+  }
+
+  // ── Relay through background.js (avoids iframe CORS) ─────────────────────
+  function relayToBridge(url, type, filename) {
+    return new Promise((resolve, reject) => {
+      chrome.runtime.sendMessage(
+        { action: 'bridge', url, type, filename },
+        (resp) => {
+          if (chrome.runtime.lastError) reject(chrome.runtime.lastError);
+          else if (resp && resp.ok) resolve();
+          else reject(new Error('bridge failed'));
+        }
+      );
+    });
+  }
+
+  function resolveFilename(url, pageTitle) {
+    const videoExts = ['mp4','mkv','webm','avi','mov','ts','flv','m4v'];
+    const pathPart = url.split('?')[0].split('/').pop();
+    if (pathPart && pathPart.includes('.')) {
+      const ext = pathPart.split('.').pop().toLowerCase();
+      if (videoExts.includes(ext)) return pathPart;
+    }
+    const urlExt = (() => {
+      const e = url.split('?')[0].split('.').pop().toLowerCase();
+      return videoExts.includes(e) ? e : 'mp4';
+    })();
+    if (pageTitle && pageTitle.trim()) {
+      const safe = pageTitle.trim()
+        .replace(/[^\w\s\-]/g, '').replace(/\s+/g, '_')
+        .slice(0, 60).replace(/_+$/, '');
+      if (safe) return `${safe}.${urlExt}`;
+    }
+    const now = new Date();
+    const ts = now.getFullYear() + '-' +
+      String(now.getMonth() + 1).padStart(2, '0') + '-' +
+      String(now.getDate()).padStart(2, '0') + '_' +
+      String(now.getHours()).padStart(2, '0') + '-' +
+      String(now.getMinutes()).padStart(2, '0') + '-' +
+      String(now.getSeconds()).padStart(2, '0');
+    return `video_${ts}.${urlExt}`;
+  }
+
+  // ── URL normalizer — strips /e/, /embed/ iframe prefixes ─────────────────
+  function normalizeStreamUrl(url) {
+    try {
+      var u = new URL(url);
+      u.pathname = u.pathname.replace(/^\/e\//, '/').replace(/^\/embed\//, '/');
+      return u.toString();
+    } catch(e) { return url; }
+  }
+
+  // ── CF-protected domains: always use page URL, skip stored m3u8 ───────────
+  var CF_DOMAINS = ['luluvdo.com', 'lulustream.com', 'doodstream.com', 'dood.watch', 'dood.to'];
+  function isCFProtected(url) {
+    try { var h = new URL(url).hostname; return CF_DOMAINS.some(d => h.includes(d)); }
+    catch(e) { return false; }
+  }
+
+  // ── Smart capture ─────────────────────────────────────────────────────────
+  function captureVideo() {
+    // YouTube → always route to YouTubeDialog
+    if (isYouTubePage()) {
+      return relayToBridge(window.location.href, 'youtube', 'youtube');
+    }
+
+    const pageUrl = normalizeStreamUrl(window.location.href);
+
+    // CF-protected (luluvdo etc.) — stored m3u8 expires, page URL is reliable
+    if (isCFProtected(pageUrl)) {
+      const filename = resolveFilename(pageUrl, document.title);
+      return relayToBridge(pageUrl, 'stream_hls', filename);
+    }
+
+    // Ask background for a passively stored m3u8 (vidara etc.)
+    return new Promise((resolve, reject) => {
+      chrome.runtime.sendMessage({ action: 'getM3u8' }, (resp) => {
+        if (!chrome.runtime.lastError && resp && resp.url) {
+          const filename = resolveFilename(resp.url, document.title);
+          resolve(relayToBridge(resp.url, 'stream_hls', filename));
+          return;
+        }
+        // Fall back to DOM video element detection
+        const result = detectStream();
+        if (result.url) {
+          const type     = result.isHLS ? 'stream_hls' : 'video_stream';
+          const filename = resolveFilename(result.url, document.title);
+          resolve(relayToBridge(result.url, type, filename));
+          return;
+        }
+        // No m3u8 found — page URL fallback (works once play is pressed on vidara)
+        const filename = resolveFilename(pageUrl, document.title);
+        resolve(relayToBridge(pageUrl, 'stream_hls', filename));
+      });
+    });
+  }
+
+  // ── Message listener (for popup grab/unlock actions) ──────────────────────
+  chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+    if (request.action === 'unlock') {
+      window.addEventListener('contextmenu', e => e.stopPropagation(), true);
+      sendResponse({ status: 'unlocked' });
+    } else if (request.action === 'grab') {
+      sendResponse(detectStream());
+    }
+    return true;
+  });
+
+  // ── Floating overlay ──────────────────────────────────────────────────────
+    function createOverlay(video) {
+    if (video.hasAttribute('data-ldm-overlay')) return;
+    if (video.hasAttribute('data-ldm-dismissed')) return;
+    video.setAttribute('data-ldm-overlay', '1');
+    const isYT    = isYouTubePage();
+    const label   = isYT ? '&#9654; YouTube' : '&#11015; Capture';
+    const color   = isYT ? '#dc2626' : '#38bdf8';
+
+    // Wrapper holds Capture button + dismiss button side by side (IDM style)
+    const wrapper = document.createElement('div');
+    Object.assign(wrapper.style, {
+      position:     'fixed',
+      zIndex:       '2147483647',
+      display:      'flex',
+      alignItems:   'stretch',
+      pointerEvents:'all',
+      userSelect:   'none',
+      borderRadius: '5px',
+      overflow:     'hidden',
+      border:       `1px solid ${color}`,
+      boxShadow:    '0 2px 8px rgba(0,0,0,0.5)',
+    });
+
+    // Main Capture button
+    const btn = document.createElement('div');
+    btn.innerHTML = label;
+    Object.assign(btn.style, {
+      background:  'rgba(2,6,23,0.88)',
+      color:       color,
+      fontFamily:  'sans-serif',
+      fontSize:    '12px',
+      fontWeight:  'bold',
+      padding:     '5px 10px',
+      cursor:      'pointer',
+      lineHeight:  '1.4',
+      borderRight: `1px solid ${color}`,
+    });
+    btn.addEventListener('mouseenter', () => {
+      btn.style.background = isYT ? 'rgba(220,38,38,0.22)' : 'rgba(56,189,248,0.22)';
+    });
+    btn.addEventListener('mouseleave', () => {
+      btn.style.background = 'rgba(2,6,23,0.88)';
+    });
+    btn.addEventListener('click', e => {
+      e.stopPropagation(); e.preventDefault();
+      btn.innerHTML = '&#8987; Sending...';
+      btn.style.opacity = '0.7';
+      captureVideo()
+        .then(() => {
+          btn.innerHTML = '&#10003; Sent!';
+          btn.style.color = '#22c55e';
+          wrapper.style.borderColor = '#22c55e';
+          btn.style.borderRightColor = '#22c55e';
+          btn.style.opacity = '1';
+          setTimeout(() => removeOverlay(video), 1500);
+        })
+        .catch(() => {
+          btn.innerHTML = '&#10007; Failed';
+          btn.style.color = '#ef4444';
+          wrapper.style.borderColor = '#ef4444';
+          btn.style.opacity = '1';
+          setTimeout(() => {
+            btn.innerHTML = label;
+            btn.style.color = color;
+            wrapper.style.borderColor = color;
+            btn.style.borderRightColor = color;
+          }, 2000);
+        });
+    });
+
+    // Dismiss button
+    const closeBtn = document.createElement('div');
+    closeBtn.innerHTML = '&#215;';
+    Object.assign(closeBtn.style, {
+      background:  'rgba(2,6,23,0.88)',
+      color:       '#94a3b8',
+      fontFamily:  'sans-serif',
+      fontSize:    '13px',
+      fontWeight:  'bold',
+      padding:     '4px 7px',
+      cursor:      'pointer',
+      lineHeight:  '1.4',
+      display:     'flex',
+      alignItems:  'center',
+    });
+    closeBtn.addEventListener('mouseenter', () => {
+      closeBtn.style.background = 'rgba(239,68,68,0.22)';
+      closeBtn.style.color = '#ef4444';
+    });
+    closeBtn.addEventListener('mouseleave', () => {
+      closeBtn.style.background = 'rgba(2,6,23,0.88)';
+      closeBtn.style.color = '#94a3b8';
+    });
+    closeBtn.addEventListener('click', e => {
+      e.stopPropagation(); e.preventDefault();
+      // Mark as permanently dismissed so MutationObserver doesn't re-add it
+      video.setAttribute('data-ldm-dismissed', '1');
+      removeOverlay(video);
+    });
+
+    wrapper.appendChild(btn);
+    wrapper.appendChild(closeBtn);
+    document.body.appendChild(wrapper);
+
+    positionOverlay(video, wrapper);
+    const reposition = () => positionOverlay(video, wrapper);
+    window.addEventListener('scroll', reposition, { passive: true });
+    window.addEventListener('resize', reposition, { passive: true });
+    const ro = new ResizeObserver(() => positionOverlay(video, wrapper));
+    ro.observe(video);
+    wrapper._cleanup = () => {
+      ro.disconnect();
+      window.removeEventListener('scroll', reposition);
+      window.removeEventListener('resize', reposition);
+    };
+    video._ldmBtn = wrapper;
+  }
+
+  function positionOverlay(video, wrapper) {
+    const r = video.getBoundingClientRect();
+    if (r.width < 100 || r.height < 60) { wrapper.style.display = 'none'; return; }
+    wrapper.style.display = 'flex';
+    wrapper.style.top  = `${r.top  + 10}px`;
+    // Anchor to right edge of video
+    wrapper.style.left = `${r.right - 140}px`;
+  }
+
+  function removeOverlay(video) {
+    if (video._ldmBtn) {
+      if (video._ldmBtn._cleanup) video._ldmBtn._cleanup();
+      video._ldmBtn.remove();
+      delete video._ldmBtn;
+    }
+    // Only remove overlay attribute if not permanently dismissed —
+    // dismissed videos should never get the overlay back until page reload.
+    if (!video.hasAttribute('data-ldm-dismissed')) {
+      video.removeAttribute('data-ldm-overlay');
+    }
+  }
+
+  function attachToVideos() {
+    document.querySelectorAll('video').forEach(v => createOverlay(v));
+  }
+
+  new MutationObserver(attachToVideos).observe(
+    document.body || document.documentElement,
+    { childList: true, subtree: true }
+  );
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', attachToVideos);
+  } else {
+    attachToVideos();
+  }
+
+})();

@@ -1,0 +1,13 @@
+0000000000000000000000000000000000000000 7efcecdca46740d397207e4ebc514e5dfbab8244 Tanjim <tpodbcs@gmail.com> 1773553221 +0600	commit (initial): Initial release - Linux Download Manager v1.0
+7efcecdca46740d397207e4ebc514e5dfbab8244 0000000000000000000000000000000000000000 Tanjim <tpodbcs@gmail.com> 1773553805 +0600	Branch: renamed refs/heads/master to refs/heads/main
+0000000000000000000000000000000000000000 7efcecdca46740d397207e4ebc514e5dfbab8244 Tanjim <tpodbcs@gmail.com> 1773553805 +0600	Branch: renamed refs/heads/master to refs/heads/main
+7efcecdca46740d397207e4ebc514e5dfbab8244 e185357ea1629abd225bef92b4b742798be6cdaf Tanjim <tpodbcs@gmail.com> 1773554224 +0600	commit: Add README
+e185357ea1629abd225bef92b4b742798be6cdaf 297701ff32f844d9a67762cecd5ee5c94bd5e861 Tanjim <tpodbcs@gmail.com> 1773557876 +0600	commit: Add screenshots
+297701ff32f844d9a67762cecd5ee5c94bd5e861 08ea783aebfda4e04d20387575f67e8a92894fac Tanjim <tpodbcs@gmail.com> 1773558260 +0600	commit: Add screenshots
+08ea783aebfda4e04d20387575f67e8a92894fac 965f48fdb40ae1c2692f878724c220b4833e2d87 Tanjim <tpodbcs@gmail.com> 1773558462 +0600	commit: Update README with screenshots
+965f48fdb40ae1c2692f878724c220b4833e2d87 12351ced0822ec30a1ec9cdafedbb87d3dc2391b Tanjim <tpodbcs@gmail.com> 1773558762 +0600	commit: Add extension popup screenshot
+12351ced0822ec30a1ec9cdafedbb87d3dc2391b b9fc2e878989453136f4f1154e84870693d261a4 Tanjim <tpodbcs@gmail.com> 1773558804 +0600	commit: Add extension popup to README
+b9fc2e878989453136f4f1154e84870693d261a4 5ed02b28a1c9d33985fda0008cb6886f5fa82b34 Tanjim <tpodbcs@gmail.com> 1773559052 +0600	commit: Fix README screenshots
+5ed02b28a1c9d33985fda0008cb6886f5fa82b34 8320013dd90ba3a443b5fa34d0b68a548a1a10bb Tanjim <tpodbcs@gmail.com> 1773559211 +0600	commit: Fix copyright year to 2026
+8320013dd90ba3a443b5fa34d0b68a548a1a10bb 5b10855381b68f37a87df67dfa912c46d935dc16 Tanjim <tpodbcs@gmail.com> 1774213617 +0600	commit: Add column width memory, Binance Pay donate dialog, new app icon
+5b10855381b68f37a87df67dfa912c46d935dc16 666a2a0516e31cfa93fcb249039cb6b33fe55aef Tanjim <tpodbcs@gmail.com> 1774214460 +0600	commit: Fix missing dependencies: browser-cookie3, PyQt6.QtSvg

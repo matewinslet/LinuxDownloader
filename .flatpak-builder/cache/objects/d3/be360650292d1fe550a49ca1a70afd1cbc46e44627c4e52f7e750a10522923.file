@@ -1,0 +1,26 @@
+[Application]
+name=com.tanjim.LDM
+runtime=org.kde.Platform/x86_64/6.8
+sdk=org.kde.Sdk/x86_64/6.8
+command=ldm
+
+[Context]
+shared=network;ipc;
+sockets=x11;wayland;
+filesystems=home;xdg-config/kdeglobals:ro;
+
+[Session Bus Policy]
+com.canonical.AppMenu.Registrar=talk
+org.kde.kconfig.notify=talk
+org.kde.KGlobalSettings=talk
+org.kde.kdeconnect=talk
+org.freedesktop.FileManager1=talk
+org.freedesktop.Notifications=talk
+
+[Extension com.tanjim.LDM.Debug]
+directory=lib/debug
+autodelete=true
+no-autodownload=true
+
+[Build]
+built-extensions=com.tanjim.LDM.Debug;

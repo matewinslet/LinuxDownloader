@@ -1,0 +1,5 @@
+[Runtime]
+name=com.tanjim.LDM.Debug
+
+[ExtensionOf]
+ref=app/com.tanjim.LDM/x86_64/master
