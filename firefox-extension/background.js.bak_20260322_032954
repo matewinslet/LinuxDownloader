@@ -127,30 +127,6 @@ var skipExts = [
   ".enc", ".key", ".aes", ".m4s", ".frag", ".chunk"
 ];
 
-var videoAudioMimes = [
-  'video/mp4', 'video/x-matroska', 'video/webm', 'video/avi',
-  'video/quicktime', 'video/mp2t', 'video/vnd.dlna.mpeg-tts',
-  'audio/mpeg', 'audio/flac', 'audio/wav', 'audio/aac',
-  'audio/ogg', 'audio/x-m4a',
-];
-var videoAudioExts = [
-  '.mp4', '.mkv', '.webm', '.avi', '.mov', '.ts', '.flv', '.m4v',
-  '.mp3', '.flac', '.wav', '.aac', '.ogg', '.m4a',
-];
-function isVideoAudio(url, contentType) {
-  if (contentType) {
-    var ct = contentType.value.toLowerCase();
-    for (var i = 0; i < videoAudioMimes.length; i++) {
-      if (ct.includes(videoAudioMimes[i])) return true;
-    }
-  }
-  var path = url.split('?')[0].toLowerCase();
-  for (var j = 0; j < videoAudioExts.length; j++) {
-    if (path.endsWith(videoAudioExts[j])) return true;
-  }
-  return false;
-}
-
 browser.webRequest.onHeadersReceived.addListener(
   function(details) {
     if (!interceptEnabled) return {};
@@ -237,18 +213,11 @@ browser.webRequest.onHeadersReceived.addListener(
         }
       }
     }
-    // Auto-intercept:
-    //   1. Explicit attachment downloads (Content-Disposition: attachment)
-    //   2. HLS/DASH manifests
-    //   3. Binary file types (zip, rar, exe, apk etc.) even without attachment header
-    // Inline video/audio must NOT be cancelled -- breaks in-browser players.
-    // PDF excluded from binary intercept -- user may want to view in browser.
-    var isNonVideoAttachment = isBinaryType && contentType && (() => {
-      var ct = contentType.value.toLowerCase();
-      return !ct.startsWith('video/') && !ct.startsWith('audio/') &&
-             !ct.includes('application/pdf');
-    })();
-    if (!isAttachment && !isManifest && !isNonVideoAttachment) return {};
+    // Only auto-intercept explicit attachment downloads and HLS/DASH manifests.
+    // Inline video/audio (isBinaryType without attachment header) must NOT be
+    // cancelled — it breaks in-browser players (e.g. streamtape). The floating
+    // Capture button in content.js handles on-demand capture for those.
+    if (!isAttachment && !isManifest) return {};
     if (contentType) {
       var ct = contentType.value.toLowerCase();
       if (ct.startsWith("image/")) return {};
@@ -307,29 +276,16 @@ browser.webRequest.onHeadersReceived.addListener(
           contentLen = parseInt(headers[ci].value) || 0;
         }
       }
-      var isFbcdn = url.includes("fbcdn.net") || url.includes("cdninstagram.com");
-      var isFirstChunk = /[?&]bytestart=0(&|$)/.test(url);
       var isVideoUrl = isTwimg ||
         url.split("?")[0].toLowerCase().endsWith(".mp4") ||
         (contentType && contentType.value.toLowerCase().includes("video/"));
-      // fbcdn uses DASH byte-range chunks -- each has tiny Content-Length.
-      // Accept first chunk (bytestart=0) regardless of size.
-      // For twimg keep >100000 check (serves full files).
-      var sizeOk = isFbcdn ? (isFirstChunk && isVideoUrl)
-                 : contentLen > 100000;
-      if (isVideoUrl && sizeOk) {
-        var entry = {
+      if (isVideoUrl && contentLen > 100000) {
+        socialStoreAdd(details.tabId, {
           cdnUrl:  url,
           videoId: videoId,
           isTwimg: isTwimg,
           ts:      Date.now(),
-        };
-        socialStoreAdd(details.tabId, entry);
-        // Push to content script immediately -- associate with playing video
-        browser.tabs.sendMessage(details.tabId, {
-          action: 'storeCdnEntry',
-          entry:  entry,
-        }).catch(function() {});
+        });
       }
       return {};
     }

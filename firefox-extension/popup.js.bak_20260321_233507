@@ -22,7 +22,7 @@ document.getElementById('captureBtn').addEventListener('click', async () => {
     return;
   }
 
-  // CF-only domains (luluvdo etc.) — page URL → yt-dlp
+  // CF-protected domains (luluvdo etc.) — stored m3u8 expires, always use page URL
   const cfDomains = ['luluvdo.com', 'lulustream.com', 'doodstream.com', 'dood.watch', 'dood.to'];
   const isCF = cfDomains.some(d => tab.url.includes(d));
   if (isCF) {
@@ -36,32 +36,6 @@ document.getElementById('captureBtn').addEventListener('click', async () => {
       })
       .catch(() => { btn.innerText = 'Error: App Closed?'; btn.style.background = '#c0392b'; });
     return;
-  }
-
-  // Social domains (Facebook, Instagram, Twitter/X) — try CDN store first
-  const socialDomains = ['facebook.com', 'fb.watch', 'instagram.com', 'twitter.com', 'x.com'];
-  const isSocial = socialDomains.some(d => tab.url.includes(d));
-  if (isSocial) {
-    const videoId = (tab.url.match(/\/status\/(\d+)/) || tab.url.match(/(?:reel|video|videos)\/?([\d]+)/) || [])[1] || null;
-    const socialResp = await new Promise(r =>
-      chrome.runtime.sendMessage({ action: 'getSocialVideoForTab', tabId: tab.id, videoId: videoId }, r)
-    );
-    if (socialResp && socialResp.entry) {
-      const entry      = socialResp.entry;
-      const pageUrl    = normalizeUrl(tab.url);
-      const type       = entry.isTwimg ? 'stream_hls' : 'video_stream';
-      const filename   = resolveSocialFilename(entry, tab.url, tab.title);
-      const bridgeUrl  = `http://127.0.0.1:9999/?url=${encodeURIComponent(entry.cdnUrl)}&filename=${encodeURIComponent(filename)}&type=${type}&referer=${encodeURIComponent(pageUrl)}`;
-      fetch(bridgeUrl)
-        .then(() => {
-          btn.innerHTML = '&#10003; Sent to LDM!';
-          btn.style.background = '#27ae60';
-          setTimeout(() => { btn.innerHTML = '&#11015; Capture Stream'; btn.style.background = ''; }, 2500);
-        })
-        .catch(() => { btn.innerText = 'Error: App Closed?'; btn.style.background = '#c0392b'; });
-      return;
-    }
-    // No CDN URL — fall through to page URL → yt-dlp below
   }
 
   // Check background for a passively stored m3u8 (vidara etc.)
@@ -128,25 +102,8 @@ function normalizeUrl(url) {
   try {
     var u = new URL(url);
     u.pathname = u.pathname.replace(/^\/e\//, '/').replace(/^\/embed\//, '/');
-    ['__cft__', '__tn__', '_nc_cat', '_nc_sid', 'paipv', 'eav'].forEach(p => u.searchParams.delete(p));
     return u.toString();
   } catch(e) { return url; }
-}
-
-function resolveSocialFilename(entry, pageUrl, pageTitle) {
-  try {
-    var host = new URL(pageUrl).hostname;
-    var ts   = new Date().toISOString().slice(0,19).replace(/[:T]/g,'-');
-    if (host.includes('twitter.com') || host.includes('x.com')) {
-      var m = pageUrl.match(/\/status\/(\d+)/);
-      return m ? 'twitter_' + m[1] + '.mp4' : 'twitter_' + ts + '.mp4';
-    }
-    if (entry && entry.videoId) {
-      if (host.includes('instagram')) return 'instagram_' + entry.videoId + '.mp4';
-      if (host.includes('facebook') || host.includes('fb.watch')) return 'facebook_' + entry.videoId + '.mp4';
-    }
-    return 'social_video_' + ts + '.mp4';
-  } catch(e) { return 'social_video.mp4'; }
 }
 
 // Unlock Right-click

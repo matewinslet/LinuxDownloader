@@ -83,7 +83,9 @@
   function normalizeStreamUrl(url) {
     try {
       var u = new URL(url);
+      // Strip /e/, /embed/ iframe prefixes (luluvdo etc.)
       u.pathname = u.pathname.replace(/^\/e\//, '/').replace(/^\/embed\//, '/');
+      // Strip Facebook/Meta tracking junk params
       ['__cft__', '__tn__', '_nc_cat', '_nc_sid', 'paipv', 'eav'].forEach(function(p) {
         u.searchParams.delete(p);
       });
@@ -101,140 +103,41 @@
     return STORY_PATTERNS.some(function(p) { return p.test(url); });
   }
 
-  // Overlay suppression rules for social platforms
-  // Returns true if overlay should be suppressed on this page
-  function isSuppressedPage(url) {
-    if (isStoryUrl(url)) return true;
-    // facebook.com/reels/ is a feed page (login redirect) -- not downloadable
-    // facebook.com/reel/ID is a specific reel -- yt-dlp handles it, show overlay
-    if (/facebook\.com\/reels\/?$/.test(url)) return true;
-    if (/facebook\.com\/reels\/\?/.test(url)) return true;
-    return false;
-  }
-
-  // Social domains — use CDN store + yt-dlp fallback, not direct page URL
-  var SOCIAL_DOMAINS = ['facebook.com', 'fb.watch', 'twitter.com', 'x.com', 'instagram.com'];
-  function isSocialDomain(url) {
-    try { var h = new URL(url).hostname; return SOCIAL_DOMAINS.some(function(d) { return h.includes(d); }); }
-    catch(e) { return false; }
-  }
-
-  // CF domains (luluvdo etc.) — always page URL → yt-dlp
-  var CF_DOMAINS = ['luluvdo.com', 'lulustream.com', 'doodstream.com', 'dood.watch', 'dood.to'];
+  // ── CF-protected domains: always use page URL, skip stored m3u8 ───────────
+  var CF_DOMAINS = [
+    'luluvdo.com', 'lulustream.com',
+    'doodstream.com', 'dood.watch', 'dood.to',
+    'facebook.com', 'fb.watch',
+    'twitter.com', 'x.com',
+    'instagram.com',
+  ];
   function isCFProtected(url) {
-    try { var h = new URL(url).hostname; return CF_DOMAINS.some(function(d) { return h.includes(d); }); }
+    try { var h = new URL(url).hostname; return CF_DOMAINS.some(d => h.includes(d)); }
     catch(e) { return false; }
   }
 
-  // Extract Twitter status ID from page URL
-  function getTwitterStatusId(url) {
-    var m = url.match(/\/status\/(\d+)/);
-    return m ? m[1] : null;
-  }
-
-  // Extract Facebook/Instagram video ID from page URL
-  function getFbVideoId(url) {
-    // Numeric ID: /videos/ID, /reel/ID, watch?v=ID
-    var m = url.match(/(?:reel|video|watch(?:\?v=)|videos)\/?([\d]+)/);
-    if (m) return m[1];
-    // Alphanumeric share URLs: /share/v/ID or /share/r/ID
-    m = url.match(/\/share\/[vr]\/([A-Za-z0-9_\-]+)/);
-    if (m) return m[1];
-    return null;
-  }
   // ── Smart capture ─────────────────────────────────────────────────────────
-  // Walk up from video element to find nearest post permalink in feed DOM.
-  function extractPostUrl(videoEl) {
-    if (!videoEl) return null;
-    var host = window.location.hostname;
-    var patterns = [];
-    if (host.includes('instagram.com')) {
-      patterns = [/^\/(?:p|reel|reels|tv)\/[A-Za-z0-9_\-]+\/?$/];
-    } else if (host.includes('facebook.com') || host.includes('fb.watch')) {
-      patterns = [/\/(?:reel|watch|videos)\//, /[?&]v=\d+/];
-    } else if (host.includes('twitter.com') || host.includes('x.com')) {
-      patterns = [/\/status\/\d+/];
-    }
-    if (!patterns.length) return null;
-    var el = videoEl.parentElement;
-    var depth = 0;
-    while (el && depth < 20) {
-      var links = el.querySelectorAll('a[href]');
-      for (var i = 0; i < links.length; i++) {
-        var href = links[i].getAttribute('href') || '';
-        for (var j = 0; j < patterns.length; j++) {
-          if (patterns[j].test(href)) {
-            try { return new URL(href, window.location.origin).toString(); }
-            catch(e) { return null; }
-          }
-        }
-      }
-      el = el.parentElement;
-      depth++;
-    }
-    return null;
-  }
-
-  function captureVideo(videoEl) {
+  function captureVideo() {
+    // YouTube → always route to YouTubeDialog
     if (isYouTubePage()) {
       return relayToBridge(window.location.href, 'youtube', 'youtube');
     }
 
     const pageUrl = normalizeStreamUrl(window.location.href);
 
+    // Block story URLs — not downloadable
     if (isStoryUrl(pageUrl)) {
-      return Promise.reject(new Error('Story — not downloadable'));
+      return Promise.reject(new Error('Story URL — not downloadable'));
     }
 
-    // CF-only domains (luluvdo etc.) — page URL → yt-dlp
+    // CF-protected (luluvdo, facebook, twitter etc.)
+    // stored m3u8 expires or doesn't exist — page URL + yt-dlp with cookies
     if (isCFProtected(pageUrl)) {
       const filename = resolveFilename(pageUrl, document.title);
       return relayToBridge(pageUrl, 'stream_hls', filename);
     }
 
-    // Social domains (Facebook, Instagram, Twitter)
-    if (isSocialDomain(pageUrl)) {
-      return new Promise((resolve, reject) => {
-        // Priority 1: CDN entry on THIS video element (set at play time)
-        // Most accurate for feed pages with multiple videos
-        if (videoEl && videoEl._ldmCdnEntry) {
-          const entry    = videoEl._ldmCdnEntry;
-          const type     = entry.isTwimg ? 'stream_hls' : 'video_stream';
-          const filename = resolveSocialFilename(entry, pageUrl);
-          resolve(relayToBridge(entry.cdnUrl, type, filename));
-          return;
-        }
-        // Priority 2: DOM traversal -- find post permalink from feed article
-        // e.g. instagram.com/reels/ID/ from the <a> wrapping the video
-        const postUrl = extractPostUrl(videoEl);
-        if (postUrl && postUrl !== pageUrl) {
-          const filename = resolveFilename(postUrl, document.title);
-          resolve(relayToBridge(postUrl, 'stream_hls', filename));
-          return;
-        }
-        // Priority 3: tab-level CDN store (post/reel pages, single video)
-        const videoId = getFbVideoId(pageUrl) || getTwitterStatusId(pageUrl);
-        chrome.runtime.sendMessage(
-          { action: 'getSocialVideo', videoId: videoId },
-          (resp) => {
-            if (!chrome.runtime.lastError && resp && resp.entry) {
-              const entry    = resp.entry;
-              const type     = entry.isTwimg ? 'stream_hls' : 'video_stream';
-              const filename = resolveSocialFilename(entry, pageUrl);
-              resolve(relayToBridge(entry.cdnUrl, type, filename));
-              return;
-            }
-            // Priority 4: page URL -> yt-dlp
-            // StreamDialog handles the Facebook feed hint message.
-            const url4     = postUrl || pageUrl;
-            const filename = resolveFilename(url4, document.title);
-            resolve(relayToBridge(url4, 'stream_hls', filename));
-          }
-        );
-      });
-    }
-
-    // Non-social: check m3u8 store (vidara, vidnest etc.)
+    // Ask background for a passively stored m3u8 (vidara, vidnest etc.)
     return new Promise((resolve, reject) => {
       chrome.runtime.sendMessage({ action: 'getM3u8' }, (resp) => {
         if (!chrome.runtime.lastError && resp && resp.url) {
@@ -242,6 +145,7 @@
           resolve(relayToBridge(resp.url, 'stream_hls', filename));
           return;
         }
+        // Fall back to DOM video element detection
         const result = detectStream();
         if (result.url) {
           const type     = result.isHLS ? 'stream_hls' : 'video_stream';
@@ -249,29 +153,11 @@
           resolve(relayToBridge(result.url, type, filename));
           return;
         }
+        // No m3u8 found — page URL fallback
         const filename = resolveFilename(pageUrl, document.title);
         resolve(relayToBridge(pageUrl, 'stream_hls', filename));
       });
     });
-  }
-
-  // Generate meaningful social media filenames
-  function resolveSocialFilename(entry, pageUrl) {
-    try {
-      var host = new URL(pageUrl).hostname;
-      var ts   = new Date().toISOString().slice(0,19).replace(/[:T]/g,'-');
-      if (host.includes('twitter.com') || host.includes('x.com')) {
-        var sid = getTwitterStatusId(pageUrl);
-        return sid ? 'twitter_' + sid + '.mp4' : 'twitter_' + ts + '.mp4';
-      }
-      if (entry.videoId) {
-        if (host.includes('instagram')) return 'instagram_' + entry.videoId + '.mp4';
-        if (host.includes('facebook') || host.includes('fb.watch')) return 'facebook_' + entry.videoId + '.mp4';
-      }
-      return 'social_video_' + ts + '.mp4';
-    } catch(e) {
-      return 'social_video.mp4';
-    }
   }
 
   // ── Message listener (for popup grab/unlock actions) ──────────────────────
@@ -281,18 +167,6 @@
       sendResponse({ status: 'unlocked' });
     } else if (request.action === 'grab') {
       sendResponse(detectStream());
-    } else if (request.action === 'storeCdnEntry' && request.entry) {
-      // Background intercepted a social CDN URL -- assign to playing video
-      var playing = null;
-      document.querySelectorAll('video').forEach(function(v) {
-        if (!v.paused && !v.ended) playing = v;
-      });
-      if (playing) {
-        playing._ldmCdnEntry = request.entry;
-      } else if (window._ldmLastHoveredVideo) {
-        window._ldmLastHoveredVideo._ldmCdnEntry = request.entry;
-      }
-      sendResponse({ ok: true });
     }
     return true;
   });
@@ -302,19 +176,18 @@
     if (video.hasAttribute('data-ldm-overlay')) return;
     if (video.hasAttribute('data-ldm-dismissed')) return;
 
-    // Suppress overlay on story pages, Facebook dedicated reel pages etc.
-    if (isSuppressedPage(window.location.href)) return;
+    // Story suppression layer 1 — URL pattern
+    if (isStoryUrl(window.location.href)) return;
 
-    // Suppress on videos too small to be meaningful (ads, thumbnails)
+    // Story suppression layer 2 — portrait + autoplay + tiny width (feed stories)
     const r0 = video.getBoundingClientRect();
-    if (r0.width < 120 || r0.height < 80) return;
-    // Suppress tiny portrait autoplay story card previews
-    if (r0.height > r0.width && video.autoplay && !video.hasAttribute('controls') && r0.width < 160) return;
+    if (r0.width < 300) return;
+    if (r0.height > r0.width && video.autoplay && !video.hasAttribute('controls') && r0.width < 200) return;
 
     video.setAttribute('data-ldm-overlay', '1');
     const isYT    = isYouTubePage();
     const accent  = isYT ? '#dc2626' : '#38bdf8';
-    const label   = isYT ? '&#9654; YouTube' : '&#11015;&#65038; Capture';
+    const label   = isYT ? '&#9654; YouTube' : '&#11015; Capture';
     const hoverBg = isYT ? 'rgba(220,38,38,0.18)' : 'rgba(56,189,248,0.18)';
 
     // ── Wrapper ───────────────────────────────────────────────────────────────
@@ -371,7 +244,7 @@
       e.stopPropagation(); e.preventDefault();
       btn.innerHTML = '&#8987; Sending...';
       btn.style.opacity = '0.7';
-      captureVideo(video)
+      captureVideo()
         .then(() => {
           btn.innerHTML = '&#10003; Sent!';
           btn.style.color = '#22c55e';
@@ -441,15 +314,9 @@
     const r = video.getBoundingClientRect();
     if (r.width < 100 || r.height < 60) { wrapper.style.display = 'none'; return; }
     wrapper.style.display = 'flex';
-    const btnH = wrapper.offsetHeight || 28;
-    // IDM style: sit just ABOVE the video top-right corner
-    // If too close to top of viewport, place inside instead
-    if (r.top > btnH + 4) {
-      wrapper.style.top  = `${r.top - btnH - 4}px`;
-    } else {
-      wrapper.style.top  = `${r.top + 6}px`;
-    }
-    wrapper.style.left = `${r.right - 160}px`;
+    wrapper.style.top  = `${r.top  + 10}px`;
+    // Anchor to right edge of video
+    wrapper.style.left = `${r.right - 140}px`;
   }
 
   function removeOverlay(video) {
@@ -465,38 +332,9 @@
     }
   }
 
-  // Track play events — associate video element with CDN entry at play time
-  function fetchAndStoreCdnEntry(video) {
-    chrome.runtime.sendMessage({ action: 'getSocialVideo' }, function(resp) {
-      if (!chrome.runtime.lastError && resp && resp.entry) {
-        video._ldmCdnEntry = resp.entry;
-      }
-    });
-  }
-  function attachPlayTracker(video) {
-    if (video._ldmPlayTracked) return;
-    video._ldmPlayTracked = true;
-    // Already autoplaying — fetch CDN entry immediately
-    if (!video.paused && !video.ended) {
-      fetchAndStoreCdnEntry(video);
-    }
-    // Also track future play/playing events
-    video.addEventListener('play',    function() { fetchAndStoreCdnEntry(video); }, { passive: true });
-    video.addEventListener('playing', function() { fetchAndStoreCdnEntry(video); }, { passive: true });
-  }
-
   function attachToVideos() {
-    if (isSuppressedPage(window.location.href)) return;
-    document.querySelectorAll('video').forEach(function(v) {
-      createOverlay(v);
-      attachPlayTracker(v);
-      if (!v._ldmHoverTracked) {
-        v._ldmHoverTracked = true;
-        v.addEventListener('mouseenter', function() {
-          window._ldmLastHoveredVideo = v;
-        }, { passive: true });
-      }
-    });
+    if (isStoryUrl(window.location.href)) return;
+    document.querySelectorAll('video').forEach(v => createOverlay(v));
   }
 
   new MutationObserver(attachToVideos).observe(

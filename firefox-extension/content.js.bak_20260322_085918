@@ -314,7 +314,7 @@
     video.setAttribute('data-ldm-overlay', '1');
     const isYT    = isYouTubePage();
     const accent  = isYT ? '#dc2626' : '#38bdf8';
-    const label   = isYT ? '&#9654; YouTube' : '&#11015;&#65038; Capture';
+    const label   = isYT ? '&#9654; YouTube' : '&#11015; Capture';
     const hoverBg = isYT ? 'rgba(220,38,38,0.18)' : 'rgba(56,189,248,0.18)';
 
     // ── Wrapper ───────────────────────────────────────────────────────────────

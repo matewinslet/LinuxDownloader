@@ -127,30 +127,6 @@ var skipExts = [
   ".enc", ".key", ".aes", ".m4s", ".frag", ".chunk"
 ];
 
-var videoAudioMimes = [
-  'video/mp4', 'video/x-matroska', 'video/webm', 'video/avi',
-  'video/quicktime', 'video/mp2t', 'video/vnd.dlna.mpeg-tts',
-  'audio/mpeg', 'audio/flac', 'audio/wav', 'audio/aac',
-  'audio/ogg', 'audio/x-m4a',
-];
-var videoAudioExts = [
-  '.mp4', '.mkv', '.webm', '.avi', '.mov', '.ts', '.flv', '.m4v',
-  '.mp3', '.flac', '.wav', '.aac', '.ogg', '.m4a',
-];
-function isVideoAudio(url, contentType) {
-  if (contentType) {
-    var ct = contentType.value.toLowerCase();
-    for (var i = 0; i < videoAudioMimes.length; i++) {
-      if (ct.includes(videoAudioMimes[i])) return true;
-    }
-  }
-  var path = url.split('?')[0].toLowerCase();
-  for (var j = 0; j < videoAudioExts.length; j++) {
-    if (path.endsWith(videoAudioExts[j])) return true;
-  }
-  return false;
-}
-
 browser.webRequest.onHeadersReceived.addListener(
   function(details) {
     if (!interceptEnabled) return {};

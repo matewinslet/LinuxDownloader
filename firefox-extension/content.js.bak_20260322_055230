@@ -225,10 +225,17 @@
               return;
             }
             // Priority 4: page URL -> yt-dlp
-            // StreamDialog handles the Facebook feed hint message.
-            const url4     = postUrl || pageUrl;
-            const filename = resolveFilename(url4, document.title);
-            resolve(relayToBridge(url4, 'stream_hls', filename));
+            // For bare Facebook homepage (no video path), show hint instead.
+            const url4 = postUrl || pageUrl;
+            var hasDlPath = /\/(reel|watch|videos)[\/\?]|[?&]v=\d|\/share\/[vr]\//.test(url4);
+            var isFbFeed = (url4.includes('facebook.com') || url4.includes('fb.watch'))
+              && !hasDlPath;
+            if (isFbFeed) {
+              reject(new Error('fb_feed_hint'));
+            } else {
+              const filename = resolveFilename(url4, document.title);
+              resolve(relayToBridge(url4, 'stream_hls', filename));
+            }
           }
         );
       });
@@ -314,7 +321,7 @@
     video.setAttribute('data-ldm-overlay', '1');
     const isYT    = isYouTubePage();
     const accent  = isYT ? '#dc2626' : '#38bdf8';
-    const label   = isYT ? '&#9654; YouTube' : '&#11015;&#65038; Capture';
+    const label   = isYT ? '&#9654; YouTube' : '&#11015; Capture';
     const hoverBg = isYT ? 'rgba(220,38,38,0.18)' : 'rgba(56,189,248,0.18)';
 
     // ── Wrapper ───────────────────────────────────────────────────────────────
@@ -378,15 +385,28 @@
           btn.style.opacity = '1';
           setTimeout(() => removeOverlay(video), 1500);
         })
-        .catch(() => {
-          btn.innerHTML = '&#10007; Failed';
-          btn.style.color = '#ef4444';
-          btn.style.opacity = '1';
-          setTimeout(() => {
-            btn.innerHTML = label;
-            btn.style.color = accent;
+        .catch((err) => {
+          if (err && err.message === 'fb_feed_hint') {
+            btn.innerHTML = 'Click ⋯ → Copy link → paste to LDM';
+            btn.style.color = '#f97316';
+            btn.style.fontSize = '10px';
             btn.style.opacity = '1';
-          }, 2000);
+            setTimeout(() => {
+              btn.innerHTML = label;
+              btn.style.color = accent;
+              btn.style.fontSize = '12px';
+              btn.style.opacity = '1';
+            }, 4000);
+          } else {
+            btn.innerHTML = '&#10007; Failed';
+            btn.style.color = '#ef4444';
+            btn.style.opacity = '1';
+            setTimeout(() => {
+              btn.innerHTML = label;
+              btn.style.color = accent;
+              btn.style.opacity = '1';
+            }, 2000);
+          }
         });
     });
 

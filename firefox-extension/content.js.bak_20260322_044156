@@ -105,10 +105,10 @@
   // Returns true if overlay should be suppressed on this page
   function isSuppressedPage(url) {
     if (isStoryUrl(url)) return true;
-    // facebook.com/reels/ is a feed page (login redirect) -- not downloadable
-    // facebook.com/reel/ID is a specific reel -- yt-dlp handles it, show overlay
-    if (/facebook\.com\/reels\/?$/.test(url)) return true;
-    if (/facebook\.com\/reels\/\?/.test(url)) return true;
+    // Facebook dedicated reel/reels pages — IDM doesn't show button there either
+    if (/facebook\.com\/reel\//.test(url)) return true;
+    if (/facebook\.com\/reels\//.test(url)) return true;
+    // Instagram dedicated stories (already covered) — reels feed IS ok
     return false;
   }
 
@@ -134,13 +134,8 @@
 
   // Extract Facebook/Instagram video ID from page URL
   function getFbVideoId(url) {
-    // Numeric ID: /videos/ID, /reel/ID, watch?v=ID
     var m = url.match(/(?:reel|video|watch(?:\?v=)|videos)\/?([\d]+)/);
-    if (m) return m[1];
-    // Alphanumeric share URLs: /share/v/ID or /share/r/ID
-    m = url.match(/\/share\/[vr]\/([A-Za-z0-9_\-]+)/);
-    if (m) return m[1];
-    return null;
+    return m ? m[1] : null;
   }
   // ── Smart capture ─────────────────────────────────────────────────────────
   // Walk up from video element to find nearest post permalink in feed DOM.
@@ -224,8 +219,9 @@
               resolve(relayToBridge(entry.cdnUrl, type, filename));
               return;
             }
-            // Priority 4: page URL -> yt-dlp
-            // StreamDialog handles the Facebook feed hint message.
+            // Priority 4: page URL -> yt-dlp last resort
+            // On feed pages this will be just 'instagram.com' etc.
+            // User should scroll to/play the video first so CDN entry is stored.
             const url4     = postUrl || pageUrl;
             const filename = resolveFilename(url4, document.title);
             resolve(relayToBridge(url4, 'stream_hls', filename));
@@ -314,7 +310,7 @@
     video.setAttribute('data-ldm-overlay', '1');
     const isYT    = isYouTubePage();
     const accent  = isYT ? '#dc2626' : '#38bdf8';
-    const label   = isYT ? '&#9654; YouTube' : '&#11015;&#65038; Capture';
+    const label   = isYT ? '&#9654; YouTube' : '&#11015; Capture';
     const hoverBg = isYT ? 'rgba(220,38,38,0.18)' : 'rgba(56,189,248,0.18)';
 
     // ── Wrapper ───────────────────────────────────────────────────────────────
