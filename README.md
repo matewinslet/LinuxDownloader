@@ -1,6 +1,6 @@
 # Linux Download Manager (LDM)
 
-A powerful, IDM-style download manager for Linux — with a Firefox extension, YouTube downloader, automatic file categorization, and video capture from streaming sites.
+A powerful download manager for Linux — with a Firefox extension, YouTube downloader, automatic file categorization, and video capture from streaming sites.
 
 ![Platform](https://img.shields.io/badge/platform-Linux-blue)
 ![Python](https://img.shields.io/badge/python-3.10%2B-blue)
@@ -11,19 +11,30 @@ A powerful, IDM-style download manager for Linux — with a Firefox extension, Y
 
 ## Screenshots
 
-![Downloading](screenshots/03-downloading.png)
+### Main Window
+![Main Window](screenshots/01-main-window.png)
 
-![Downloaded Files](screenshots/04-downloaded-files.png)
+### YouTube Downloader
+![YouTube Downloader](screenshots/07-youtube-downloader.png)
 
-![YouTube Downloader](screenshots/01-youtube-downloader.png)
+![YouTube Download Complete](screenshots/08-youtube-download-complete.png)
 
-![YouTube Completed](screenshots/02-youtube-completed.png)
+### Video Capture from Streaming Sites
 
-![Install Dependencies](screenshots/05-install-dependencies.png)
+**Facebook**
+![Video Capture — Facebook](screenshots/03-video-capture-facebook.png)
 
-![About](screenshots/06-about.png)
+**Facebook Gaming**
+![Video Capture — Facebook Gaming](screenshots/04-video-capture-facebook-gaming.png)
 
-![Firefox Extension](screenshots/07-extension-popup.png)
+**Instagram**
+![Video Capture — Instagram](screenshots/05-video-capture-instagram.png)
+
+**TikTok**
+![Video Capture — TikTok](screenshots/06-video-capture-tiktok.png)
+
+### Stream Downloader
+![Stream Downloader](screenshots/09-stream-downloader.png)
 
 ---
 
@@ -31,13 +42,14 @@ A powerful, IDM-style download manager for Linux — with a Firefox extension, Y
 
 - **Silent download interception** — Firefox downloads are automatically redirected to LDM with no "Cancelled" flash
 - **YouTube Downloader** — download YouTube videos in any quality (Best, 1080p, 720p, 480p, 360p) or audio only (mp3, m4a, flac, wav, ogg, aac)
-- **Video capture** — unlock right-click protection on streaming sites and capture video URLs directly
+- **Video capture** — unlock right-click protection on streaming sites (Facebook, Instagram, TikTok, etc.) and capture video URLs directly
 - **Auto file categorization** — files are automatically sorted into Videos, Music, Documents, Compressed, Programs, Others
 - **Real-time progress** — progress bar, download speed, and file size displayed for every download
 - **Already downloaded detection** — warns you if you try to download the same file again
 - **Right-click context menu** — send any link directly to LDM from Firefox
 - **Toggle interception** — disable automatic interception anytime from the extension popup
-- **Clean light theme** — IDM-inspired interface with category sidebar
+- **Dark / Light theme** — toggle between dark and light mode
+- **Per-category sidebar** — color-coded categories with badge counts
 
 ---
 
@@ -76,7 +88,7 @@ The installer will automatically:
 
 Install the extension from the Firefox Add-ons store:
 
-👉 **[Linux Download Manager on Firefox Add-ons](https://addons.mozilla.org/en-US/firefox/addon/linux-download-manager/)**
+[Linux Download Manager on Firefox Add-ons](https://addons.mozilla.org/en-US/firefox/addon/linux-download-manager/)
 
 Or install manually by downloading the `.xpi` file from the [Releases](https://github.com/matewinslet/linux-downloader/releases) page and dragging it into Firefox.
 
@@ -98,7 +110,7 @@ Or install manually by downloading the `.xpi` file from the [Releases](https://g
 Or paste a YouTube URL directly into the LDM URL bar and click **Start Download**.
 
 ### Video Capture from Streaming Sites
-1. Navigate to a streaming site
+1. Navigate to a streaming site (Facebook, Instagram, TikTok, etc.)
 2. Click the LDM extension icon
 3. Click **1. Unlock Right-Click** to remove right-click protection
 4. Right-click the video and copy the video URL
@@ -177,7 +189,7 @@ linux-downloader/
 
 Having issues? Contact the developer:
 
-📧 **tpodbcs@gmail.com**
+**tpodbcs@gmail.com**
 
 ---
 
@@ -185,11 +197,3 @@ Having issues? Contact the developer:
 
 Copyright (c) 2026 Tanjim — All Rights Reserved.
 See [LICENSE.txt](LICENSE.txt) for details.
-
----
-
-## Support Development
-
-If you find LDM useful, consider supporting development ☕
-
-> Donation link coming soon
