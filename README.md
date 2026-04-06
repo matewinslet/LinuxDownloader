@@ -88,7 +88,7 @@ The installer will automatically:
 
 Install the extension from the Firefox Add-ons store:
 
-[Linux Download Manager on Firefox Add-ons](https://addons.mozilla.org/en-US/firefox/addon/linux-download-manager/)
+[Linux Download Manager on Firefox Add-ons](https://addons.mozilla.org/en-US/firefox/addon/49cdbb655b5d47a7bce3/)
 
 Or install manually by downloading the `.xpi` file from the [Releases](https://github.com/matewinslet/linux-downloader/releases) page and dragging it into Firefox.
 
