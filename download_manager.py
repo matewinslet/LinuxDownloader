@@ -1906,6 +1906,7 @@ class CoreDownloaderDialog(QDialog):
 class DownloadManager(QWidget):
     def __init__(self):
         super().__init__()
+        self.setObjectName("mainWindow")
         self.setWindowTitle("Linux Download Manager")
         self.resize(1200, 680)
         self.recent_urls = {}
@@ -2467,8 +2468,12 @@ class DownloadManager(QWidget):
 
         # ── Main window ───────────────────────────────────────────────────────
         self.setStyleSheet(f"""
-            QWidget {{
+            QWidget#mainWindow {{
                 background-color: {t['bg']};
+                color: {t['text']};
+                font-family: -apple-system, 'Segoe UI', Ubuntu, sans-serif;
+            }}
+            QWidget#mainWindow * {{
                 color: {t['text']};
                 font-family: -apple-system, 'Segoe UI', Ubuntu, sans-serif;
             }}
@@ -3591,11 +3596,18 @@ class DownloadManager(QWidget):
         self._set_btn_opacity(self.resume_btn, 1.0 if resumable else 0.3)
     
     def _set_btn_opacity(self, btn, opacity):
-        # Apply opacity to the wrapper parent if it exists, to preserve btn's drop shadow
-        target = btn.parent() if btn.parent() and hasattr(btn.parent(), '_inner_btn') else btn
-        effect = QGraphicsOpacityEffect(target)
-        effect.setOpacity(opacity)
-        target.setGraphicsEffect(effect)
+        wrapper = btn.parent() if btn.parent() and hasattr(btn.parent(), '_inner_btn') else None
+        if wrapper:
+            wrapper.setStyleSheet(f"background: transparent; opacity: {opacity};")
+        # Dim/undim the icon and text label directly
+        if hasattr(btn, '_icon_lbl'):
+            effect = QGraphicsOpacityEffect(btn._icon_lbl)
+            effect.setOpacity(opacity)
+            btn._icon_lbl.setGraphicsEffect(effect)
+        if hasattr(btn, '_text_lbl'):
+            effect = QGraphicsOpacityEffect(btn._text_lbl)
+            effect.setOpacity(opacity)
+            btn._text_lbl.setGraphicsEffect(effect)
 
     def _open_donate(self):
         t = self._theme()
