@@ -1908,6 +1908,12 @@ class DownloadManager(QWidget):
         super().__init__()
         self.setObjectName("mainWindow")
         self.setWindowTitle("Linux Download Manager")
+        self.setWindowFlags(
+            Qt.WindowType.Window |
+            Qt.WindowType.WindowMinimizeButtonHint |
+            Qt.WindowType.WindowMaximizeButtonHint |
+            Qt.WindowType.WindowCloseButtonHint
+        )
         self.resize(1200, 680)
         self.recent_urls = {}
         self.finished_urls = {}
@@ -2128,6 +2134,7 @@ class DownloadManager(QWidget):
         btn._icon_lbl = icon_lbl
         btn._text_lbl = text_lbl
         btn._icon_color = icon_color
+        btn._svg_path = svg_path_data
         return wrapper
 
     def _open_selected_folder(self):
@@ -3596,18 +3603,42 @@ class DownloadManager(QWidget):
         self._set_btn_opacity(self.resume_btn, 1.0 if resumable else 0.3)
     
     def _set_btn_opacity(self, btn, opacity):
-        wrapper = btn.parent() if btn.parent() and hasattr(btn.parent(), '_inner_btn') else None
-        if wrapper:
-            wrapper.setStyleSheet(f"background: transparent; opacity: {opacity};")
-        # Dim/undim the icon and text label directly
+        dimmed = opacity < 1.0
         if hasattr(btn, '_icon_lbl'):
-            effect = QGraphicsOpacityEffect(btn._icon_lbl)
-            effect.setOpacity(opacity)
-            btn._icon_lbl.setGraphicsEffect(effect)
-        if hasattr(btn, '_text_lbl'):
-            effect = QGraphicsOpacityEffect(btn._text_lbl)
-            effect.setOpacity(opacity)
-            btn._text_lbl.setGraphicsEffect(effect)
+            icon_color = getattr(btn, '_icon_color', '#3b82f6')
+            if dimmed:
+                # Convert hex to faded version
+                r, g, b = int(icon_color[1:3], 16), int(icon_color[3:5], 16), int(icon_color[5:7], 16)
+                faded = f"rgba({r},{g},{b},0.25)"
+                btn._icon_lbl.setStyleSheet(f"background: transparent; border: none; opacity: 0.3;")
+                btn._text_lbl.setStyleSheet(f"background: transparent; border: none; color: {faded}; font-size: 9px; font-weight: 800; letter-spacing: 0.5px;")
+                # Re-render icon with faded color
+                self._recolor_btn_icon(btn, faded)
+            else:
+                btn._icon_lbl.setStyleSheet("background: transparent; border: none;")
+                btn._text_lbl.setStyleSheet(f"background: transparent; border: none; color: {icon_color}; font-size: 9px; font-weight: 800; letter-spacing: 0.5px;")
+                self._recolor_btn_icon(btn, icon_color)
+
+    def _recolor_btn_icon(self, btn, color):
+        if not hasattr(btn, '_svg_path') or not hasattr(btn, '_icon_lbl'):
+            return
+        from PyQt6.QtSvg import QSvgRenderer
+        from PyQt6.QtCore import QByteArray
+        render_size = 128
+        display_size = 38
+        svg = f'<svg xmlns="http://www.w3.org/2000/svg" width="{render_size}" height="{render_size}" viewBox="0 0 24 24" fill="{color}" stroke="none">{btn._svg_path}</svg>'
+        renderer = QSvgRenderer(QByteArray(svg.encode()))
+        pixmap = QPixmap(render_size, render_size)
+        pixmap.fill(QColor(0, 0, 0, 0))
+        p = QPainter(pixmap)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+        renderer.render(p)
+        p.end()
+        display_pixmap = pixmap.scaled(display_size, display_size,
+                                       Qt.AspectRatioMode.KeepAspectRatio,
+                                       Qt.TransformationMode.SmoothTransformation)
+        btn._icon_lbl.setPixmap(display_pixmap)
 
     def _open_donate(self):
         t = self._theme()
