@@ -32,7 +32,10 @@ var SOCIAL_CDN_DOMAINS = [
 function isSocialCDN(url) {
   try {
     var host = new URL(url).hostname;
-    return SOCIAL_CDN_DOMAINS.some(function(d) { return host.endsWith(d); });
+    if (SOCIAL_CDN_DOMAINS.some(function(d) { return host.endsWith(d); })) return true;
+    // TikTok video CDN: v16-webapp-prime.tiktok.com, v19-webapp.tiktok.com, etc.
+    if (/^v\d+[-\w]*\.tiktok\.com$/.test(host)) return true;
+    return false;
   } catch(e) { return false; }
 }
 
@@ -93,11 +96,18 @@ browser.contextMenus.create({
   contexts: ["link"]
 });
 
-// Context menu for YouTube pages and links
+// Context menu for YouTube pages and links — only on video/shorts pages
 browser.contextMenus.create({
   id: "capture-youtube",
   title: "Capture YouTube with LDM",
-  contexts: ["page", "link"]
+  contexts: ["page", "link"],
+  documentUrlPatterns: [
+    "*://www.youtube.com/watch*",
+    "*://www.youtube.com/shorts/*",
+    "*://youtu.be/*",
+    "*://youtube.com/watch*",
+    "*://youtube.com/shorts/*"
+  ]
 });
 
 // Single combined listener for all context menu clicks
@@ -177,7 +187,9 @@ browser.webRequest.onHeadersReceived.addListener(
       lowerUrl.includes("lh3.google") ||
       lowerUrl.includes("lh4.google") ||
       lowerUrl.includes("lh5.google") ||
-      lowerUrl.includes("lh6.google")
+      lowerUrl.includes("lh6.google") ||
+      lowerUrl.includes("edge-chat.facebook.com") ||
+      lowerUrl.includes("mqtt")
     ) return {};
     if (lowerUrl.startsWith("blob:") || lowerUrl.startsWith("data:")) return {};
     var allowedTypes = ["main_frame", "sub_frame", "other", "xmlhttprequest", "media"];
@@ -243,12 +255,57 @@ browser.webRequest.onHeadersReceived.addListener(
     //   3. Binary file types (zip, rar, exe, apk etc.) even without attachment header
     // Inline video/audio must NOT be cancelled -- breaks in-browser players.
     // PDF excluded from binary intercept -- user may want to view in browser.
+    // Social CDN: passively store fbcdn/twimg/tiktok video URLs per tab.
+    // Must run BEFORE the early return below — these are inline video, not attachments.
+    // NEVER cancel — the browser player needs these to play normally.
+    if (isSocialCDN(url)) {
+      var videoId = decodeFbVideoId(url);
+      var isTwimg = url.includes("video.twimg.com");
+      var isTikTok = false;
+      try { isTikTok = /^v\d+[-\w]*\.tiktok\.com$/.test(new URL(url).hostname); } catch(e) {}
+      // Only store actual video files/manifests, not thumbnails or tiny clips
+      var contentLen = 0;
+      for (var ci = 0; ci < headers.length; ci++) {
+        if (headers[ci].name.toLowerCase() === 'content-length') {
+          contentLen = parseInt(headers[ci].value) || 0;
+        }
+      }
+      // fbcdn/cdninstagram serve DASH byte-range chunks — tiny segments that
+      // are useless for download. Skip storing them; capture falls through to
+      // post permalink URL → yt-dlp instead.
+      var isFbcdn = url.includes("fbcdn.net") || url.includes("cdninstagram.com");
+      if (isFbcdn) return {};
+      var isVideoUrl = isTwimg ||
+        isTikTok ||
+        url.split("?")[0].toLowerCase().endsWith(".mp4") ||
+        (contentType && contentType.value.toLowerCase().includes("video/"));
+      var isTikTokVideo = isTikTok && url.includes("mime_type=video_mp4");
+      var sizeOk = isTikTok ? isTikTokVideo
+                 : contentLen > 100000;
+      if (isVideoUrl && sizeOk) {
+        var entry = {
+          cdnUrl:  url,
+          videoId: videoId,
+          isTwimg: isTwimg,
+          ts:      Date.now(),
+        };
+        socialStoreAdd(details.tabId, entry);
+        browser.tabs.sendMessage(details.tabId, {
+          action: 'storeCdnEntry',
+          entry:  entry,
+        }).catch(function() {});
+      }
+      return {};
+    }
+
     var isNonVideoAttachment = isBinaryType && contentType && (() => {
       var ct = contentType.value.toLowerCase();
       return !ct.startsWith('video/') && !ct.startsWith('audio/') &&
              !ct.includes('application/pdf');
     })();
-    if (!isAttachment && !isManifest && !isNonVideoAttachment) return {};
+    // Intercept direct navigation to video/audio files (main_frame .mp4, .mkv etc.)
+    var isDirectVideoNav = details.type === "main_frame" && isVideoAudio(url, contentType);
+    if (!isAttachment && !isManifest && !isNonVideoAttachment && !isDirectVideoNav) return {};
     if (contentType) {
       var ct = contentType.value.toLowerCase();
       if (ct.startsWith("image/")) return {};
@@ -295,45 +352,6 @@ browser.webRequest.onHeadersReceived.addListener(
     }
     var referer = details.documentUrl || details.originUrl || "";
 
-    // Social CDN: passively store fbcdn.net mp4 and twimg.com m3u8 per tab.
-    // NEVER cancel — the browser player needs these to play normally.
-    if (isSocialCDN(url)) {
-      var videoId = decodeFbVideoId(url);
-      var isTwimg = url.includes("video.twimg.com");
-      // Only store actual video files/manifests, not thumbnails or tiny clips
-      var contentLen = 0;
-      for (var ci = 0; ci < headers.length; ci++) {
-        if (headers[ci].name.toLowerCase() === 'content-length') {
-          contentLen = parseInt(headers[ci].value) || 0;
-        }
-      }
-      var isFbcdn = url.includes("fbcdn.net") || url.includes("cdninstagram.com");
-      var isFirstChunk = /[?&]bytestart=0(&|$)/.test(url);
-      var isVideoUrl = isTwimg ||
-        url.split("?")[0].toLowerCase().endsWith(".mp4") ||
-        (contentType && contentType.value.toLowerCase().includes("video/"));
-      // fbcdn uses DASH byte-range chunks -- each has tiny Content-Length.
-      // Accept first chunk (bytestart=0) regardless of size.
-      // For twimg keep >100000 check (serves full files).
-      var sizeOk = isFbcdn ? (isFirstChunk && isVideoUrl)
-                 : contentLen > 100000;
-      if (isVideoUrl && sizeOk) {
-        var entry = {
-          cdnUrl:  url,
-          videoId: videoId,
-          isTwimg: isTwimg,
-          ts:      Date.now(),
-        };
-        socialStoreAdd(details.tabId, entry);
-        // Push to content script immediately -- associate with playing video
-        browser.tabs.sendMessage(details.tabId, {
-          action: 'storeCdnEntry',
-          entry:  entry,
-        }).catch(function() {});
-      }
-      return {};
-    }
-
     // Manifests: store silently per tab so Capture button can use them.
     // NEVER cancel — the browser player needs these to function normally.
     // Skip CF-protected domains — their m3u8 expires quickly, page URL is better.
@@ -348,9 +366,9 @@ browser.webRequest.onHeadersReceived.addListener(
       return {};
     }
 
-    // Option A: video/audio attachments pass through — Capture button handles them.
-    // Only non-video attachments (zip, exe, pdf, apk, deb etc.) are auto-triggered.
-    if (isVideoAudio(url, contentType)) return {};
+    // Video/audio: intercept if it's a direct navigation or explicit attachment.
+    // Inline video/audio (embedded players) pass through — Capture button handles them.
+    if (isVideoAudio(url, contentType) && !isAttachment && !isDirectVideoNav) return {};
 
     // Attachment downloads only — intercept and send to LDM
     if (handledUrls.has(url)) {

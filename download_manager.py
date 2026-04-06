@@ -1972,6 +1972,8 @@ class DownloadManager(QWidget):
 
             if status == "Finished" and path and not os.path.exists(path):
                 status = "File Missing"
+            elif status == "Downloading":
+                status = "Interrupted"
 
             date     = entry.get("date", "")
             progress = entry.get("progress", None)
