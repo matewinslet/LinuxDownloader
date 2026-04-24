@@ -189,7 +189,9 @@ browser.webRequest.onHeadersReceived.addListener(
       lowerUrl.includes("lh5.google") ||
       lowerUrl.includes("lh6.google") ||
       lowerUrl.includes("edge-chat.facebook.com") ||
-      lowerUrl.includes("mqtt")
+      lowerUrl.includes("mqtt") ||
+      lowerUrl.includes("mega.co.nz") ||
+      lowerUrl.includes("mega.nz")
     ) return {};
     if (lowerUrl.startsWith("blob:") || lowerUrl.startsWith("data:")) return {};
     var allowedTypes = ["main_frame", "sub_frame", "other", "xmlhttprequest", "media"];
@@ -207,6 +209,10 @@ browser.webRequest.onHeadersReceived.addListener(
     var isManifest = urlPathLower.endsWith(".m3u8") || urlPathLower.endsWith(".mpd");
     var isAttachment = contentDisposition &&
       contentDisposition.value.toLowerCase().includes("attachment");
+    // Player-initiated loads (<video>/<audio> src): some CDNs force
+    // Content-Disposition: attachment, but the user is streaming, not
+    // downloading. Capture button is the explicit download path.
+    if (details.type === "media") isAttachment = false;
     var downloadTypes = [
       "application/octet-stream",
       "application/zip",
@@ -387,6 +393,10 @@ browser.downloads.onCreated.addListener(function(downloadItem) {
   var url = downloadItem.url || "";
   var lowerUrl = url.toLowerCase();
   if (!lowerUrl.startsWith("blob:") && !lowerUrl.startsWith("data:")) {
+    return;
+  }
+  if (lowerUrl.startsWith("blob:https://mega.nz") ||
+      lowerUrl.startsWith("blob:https://mega.co.nz")) {
     return;
   }
   var filename = (downloadItem.filename || "").split(/[\\/]/).pop() || "";
