@@ -101,19 +101,51 @@
     return STORY_PATTERNS.some(function(p) { return p.test(url); });
   }
 
+  // Returns true if the current URL is a specific Facebook video/reel page
+  // (not the homepage, feed, groups, or /reels/ browse page).
+  function isFacebookVideoPage(url) {
+    try {
+      var u    = new URL(url);
+      var host = u.hostname;
+      if (!host.includes('facebook.com') && !host.includes('fb.watch')) return false;
+      if (host.includes('fb.watch')) return true;   // fb.watch/XXXX short links
+      var path = u.pathname;
+      return (
+        /[?&]v=\d+/.test(u.search)           ||  // /watch?v=123
+        /\/reel\/[A-Za-z0-9_\-]+/.test(path) ||  // /reel/ID
+        /\/videos\/\d+/.test(path)            ||  // /username/videos/ID
+        /\/share\/[vr]\//.test(path)              // /share/v/ID or /share/r/ID
+      );
+    } catch(e) { return false; }
+  }
+
   // Overlay suppression rules for social platforms
   // Returns true if overlay should be suppressed on this page
   function isSuppressedPage(url) {
     if (isStoryUrl(url)) return true;
-    // facebook.com/reels/ is a feed page (login redirect) -- not downloadable
-    // facebook.com/reel/ID is a specific reel -- yt-dlp handles it, show overlay
-    if (/facebook\.com\/reels\/?$/.test(url)) return true;
-    if (/facebook\.com\/reels\/\?/.test(url)) return true;
+    // Facebook: only show capture button on specific video/reel pages.
+    // Suppress homepage, feed, groups, /reels/ browse — anything not a video page.
+    try {
+      var h = new URL(url).hostname;
+      if (h.includes('facebook.com')) {
+        if (!isFacebookVideoPage(url)) return true;
+      }
+      // MEGA: player uses blob: URLs backed by client-side decryption;
+      // neither direct capture nor yt-dlp can handle it.
+      if (h.endsWith('mega.nz') || h.endsWith('mega.co.nz')) return true;
+    } catch(e) {}
     return false;
   }
 
+  // YouTube homepage/browse — suppress overlay per-video (not in isSuppressedPage,
+  // because YouTube SPA may mutate DOM before URL updates, blocking attachToVideos).
+  function isYouTubeNonVideo() {
+    const host = window.location.hostname.replace('www.', '');
+    return YOUTUBE_HOSTS.some(h => host.includes(h)) && !isYouTubePage();
+  }
+
   // Social domains — use CDN store + yt-dlp fallback, not direct page URL
-  var SOCIAL_DOMAINS = ['facebook.com', 'fb.watch', 'twitter.com', 'x.com', 'instagram.com'];
+  var SOCIAL_DOMAINS = ['facebook.com', 'fb.watch', 'twitter.com', 'x.com', 'instagram.com', 'tiktok.com'];
   function isSocialDomain(url) {
     try { var h = new URL(url).hostname; return SOCIAL_DOMAINS.some(function(d) { return h.includes(d); }); }
     catch(e) { return false; }
@@ -158,7 +190,7 @@
     if (!patterns.length) return null;
     var el = videoEl.parentElement;
     var depth = 0;
-    while (el && depth < 20) {
+    while (el && depth < 40) {
       var links = el.querySelectorAll('a[href]');
       for (var i = 0; i < links.length; i++) {
         var href = links[i].getAttribute('href') || '';
@@ -192,16 +224,23 @@
       return relayToBridge(pageUrl, 'stream_hls', filename);
     }
 
-    // Social domains (Facebook, Instagram, Twitter)
+    // Facebook video page: address bar URL → yt-dlp directly.
+    // Button only appears on video pages (isSuppressedPage blocks the feed),
+    // so window.location.href is always a valid permalink here.
+    if (isFacebookVideoPage(pageUrl)) {
+      const filename = resolveFilename(pageUrl, document.title);
+      return Promise.resolve(relayToBridge(pageUrl, 'stream_hls', filename));
+    }
+
+    // Social domains (Instagram, Twitter, TikTok — not Facebook feed, handled above)
     if (isSocialDomain(pageUrl)) {
       return new Promise((resolve, reject) => {
         // Priority 1: CDN entry on THIS video element (set at play time)
         // Most accurate for feed pages with multiple videos
         if (videoEl && videoEl._ldmCdnEntry) {
           const entry    = videoEl._ldmCdnEntry;
-          const type     = entry.isTwimg ? 'stream_hls' : 'video_stream';
           const filename = resolveSocialFilename(entry, pageUrl);
-          resolve(relayToBridge(entry.cdnUrl, type, filename));
+          resolve(relayToBridge(entry.cdnUrl, 'stream_hls', filename));
           return;
         }
         // Priority 2: DOM traversal -- find post permalink from feed article
@@ -219,13 +258,11 @@
           (resp) => {
             if (!chrome.runtime.lastError && resp && resp.entry) {
               const entry    = resp.entry;
-              const type     = entry.isTwimg ? 'stream_hls' : 'video_stream';
               const filename = resolveSocialFilename(entry, pageUrl);
-              resolve(relayToBridge(entry.cdnUrl, type, filename));
+              resolve(relayToBridge(entry.cdnUrl, 'stream_hls', filename));
               return;
             }
             // Priority 4: page URL -> yt-dlp
-            // StreamDialog handles the Facebook feed hint message.
             const url4     = postUrl || pageUrl;
             const filename = resolveFilename(url4, document.title);
             resolve(relayToBridge(url4, 'stream_hls', filename));
@@ -244,9 +281,8 @@
         }
         const result = detectStream();
         if (result.url) {
-          const type     = result.isHLS ? 'stream_hls' : 'video_stream';
           const filename = resolveFilename(result.url, document.title);
-          resolve(relayToBridge(result.url, type, filename));
+          resolve(relayToBridge(result.url, 'stream_hls', filename));
           return;
         }
         const filename = resolveFilename(pageUrl, document.title);
@@ -263,6 +299,10 @@
       if (host.includes('twitter.com') || host.includes('x.com')) {
         var sid = getTwitterStatusId(pageUrl);
         return sid ? 'twitter_' + sid + '.mp4' : 'twitter_' + ts + '.mp4';
+      }
+      if (host.includes('tiktok.com')) {
+        var m = pageUrl.match(/\/video\/(\d+)/);
+        return m ? 'tiktok_' + m[1] + '.mp4' : 'tiktok_' + ts + '.mp4';
       }
       if (entry.videoId) {
         if (host.includes('instagram')) return 'instagram_' + entry.videoId + '.mp4';
@@ -304,6 +344,9 @@
 
     // Suppress overlay on story pages, Facebook dedicated reel pages etc.
     if (isSuppressedPage(window.location.href)) return;
+
+    // YouTube: only show on /watch and /shorts, not homepage/browse/search
+    if (isYouTubeNonVideo()) return;
 
     // Suppress on videos too small to be meaningful (ads, thumbnails)
     const r0 = video.getBoundingClientRect();
@@ -421,20 +464,15 @@
     wrapper.appendChild(badge);
     wrapper.appendChild(btn);
     wrapper.appendChild(closeBtn);
-    document.body.appendChild(wrapper);
+
+    // Isolate from page CSS (e.g. bunkr rules that override flex-row layout).
+    var host = document.createElement('div');
+    host.attachShadow({ mode: 'open' }).appendChild(wrapper);
+    document.body.appendChild(host);
 
     positionOverlay(video, wrapper);
-    const reposition = () => positionOverlay(video, wrapper);
-    window.addEventListener('scroll', reposition, { passive: true });
-    window.addEventListener('resize', reposition, { passive: true });
-    const ro = new ResizeObserver(() => positionOverlay(video, wrapper));
-    ro.observe(video);
-    wrapper._cleanup = () => {
-      ro.disconnect();
-      window.removeEventListener('scroll', reposition);
-      window.removeEventListener('resize', reposition);
-    };
-    video._ldmBtn = wrapper;
+    video._ldmBtn  = wrapper;
+    video._ldmHost = host;
   }
 
   function positionOverlay(video, wrapper) {
@@ -442,8 +480,6 @@
     if (r.width < 100 || r.height < 60) { wrapper.style.display = 'none'; return; }
     wrapper.style.display = 'flex';
     const btnH = wrapper.offsetHeight || 28;
-    // IDM style: sit just ABOVE the video top-right corner
-    // If too close to top of viewport, place inside instead
     if (r.top > btnH + 4) {
       wrapper.style.top  = `${r.top - btnH - 4}px`;
     } else {
@@ -453,9 +489,9 @@
   }
 
   function removeOverlay(video) {
-    if (video._ldmBtn) {
-      if (video._ldmBtn._cleanup) video._ldmBtn._cleanup();
-      video._ldmBtn.remove();
+    if (video._ldmHost) {
+      video._ldmHost.remove();
+      delete video._ldmHost;
       delete video._ldmBtn;
     }
     // Only remove overlay attribute if not permanently dismissed —
@@ -485,11 +521,41 @@
     video.addEventListener('playing', function() { fetchAndStoreCdnEntry(video); }, { passive: true });
   }
 
+  // IntersectionObserver: detect when videos scroll into/out of view.
+  // Threshold 0.8 = video must be 80% visible before showing button,
+  // so it fires after TikTok's swipe animation settles.
+  const videoVisibilityObserver = new IntersectionObserver(function(entries) {
+    entries.forEach(function(entry) {
+      const v = entry.target;
+      if (entry.isIntersecting) {
+        if (!v.hasAttribute('data-ldm-dismissed')) {
+          // Small delay to let swipe animations finish before positioning
+          setTimeout(function() {
+            if (v.hasAttribute('data-ldm-overlay') && v._ldmBtn) {
+              // Already has overlay — just reposition it
+              positionOverlay(v, v._ldmBtn);
+            } else if (!v.hasAttribute('data-ldm-overlay')) {
+              createOverlay(v);
+              attachPlayTracker(v);
+            }
+          }, 200);
+        }
+      } else if (v._ldmBtn) {
+        removeOverlay(v);
+      }
+    });
+  }, { threshold: 0.8 });
+
   function attachToVideos() {
     if (isSuppressedPage(window.location.href)) return;
     document.querySelectorAll('video').forEach(function(v) {
       createOverlay(v);
       attachPlayTracker(v);
+      // Observe visibility for scroll-based feeds (TikTok, etc.)
+      if (!v._ldmVisibilityTracked) {
+        v._ldmVisibilityTracked = true;
+        videoVisibilityObserver.observe(v);
+      }
       if (!v._ldmHoverTracked) {
         v._ldmHoverTracked = true;
         v.addEventListener('mouseenter', function() {
