@@ -337,6 +337,21 @@
     return true;
   });
 
+  // ── Active overlay registry ────────────────────────────────────────────────
+  // Declared here — before createOverlay/removeOverlay — so there are no var-
+  // hoisting surprises if call order ever changes.
+  var _ldmActiveOverlays = [];
+
+  function _cleanOrphanedOverlays() {
+    _ldmActiveOverlays = _ldmActiveOverlays.filter(function(item) {
+      if (!item.video.isConnected) {
+        try { item.host.remove(); } catch(e) {}
+        return false;
+      }
+      return true;
+    });
+  }
+
   // ── Floating overlay ──────────────────────────────────────────────────────
   function createOverlay(video) {
     if (video.hasAttribute('data-ldm-overlay')) return;
@@ -360,11 +375,11 @@
     const label   = isYT ? '&#9654; YouTube' : '&#11015;&#65038; Capture';
     const hoverBg = isYT ? 'rgba(220,38,38,0.18)' : 'rgba(56,189,248,0.18)';
 
-    // ── Wrapper ───────────────────────────────────────────────────────────────
+    // ── Wrapper (layout only — no positioning here) ───────────────────────────
+    // Positioning lives on `host` (light DOM) so the containing block is always
+    // document.body regardless of what any site does to inner elements.
     const wrapper = document.createElement('div');
     Object.assign(wrapper.style, {
-      position:      'fixed',
-      zIndex:        '2147483647',
       display:       'flex',
       alignItems:    'stretch',
       pointerEvents: 'all',
@@ -465,32 +480,54 @@
     wrapper.appendChild(btn);
     wrapper.appendChild(closeBtn);
 
-    // Isolate from page CSS (e.g. bunkr rules that override flex-row layout).
+    // ── Host: the positioned element in the light DOM ─────────────────────────
+    // Isolate from page CSS via Shadow DOM, but keep the *positioning* on host
+    // (light DOM, direct child of document.body) so that `position: absolute`
+    // always resolves against document.body's containing block — not against
+    // whatever random positioned ancestor a site's inner elements might have.
     var host = document.createElement('div');
+    Object.assign(host.style, {
+      position: 'absolute',
+      zIndex:   '2147483647',
+      top:      '0',
+      left:     '0',
+    });
     host.attachShadow({ mode: 'open' }).appendChild(wrapper);
     document.body.appendChild(host);
 
-    positionOverlay(video, wrapper);
+    positionOverlay(video, host);
     video._ldmBtn  = wrapper;
     video._ldmHost = host;
+    _ldmActiveOverlays.push({ host: host, video: video });
   }
 
-  function positionOverlay(video, wrapper) {
+  // positionOverlay(video, host) — sets top/left on the light-DOM host element.
+  // host is always a direct child of document.body, so coordinates are simply
+  // viewport-relative + scroll offset = document-relative. No containing-block
+  // ambiguity from page CSS.
+  function positionOverlay(video, host) {
     const r = video.getBoundingClientRect();
-    if (r.width < 100 || r.height < 60) { wrapper.style.display = 'none'; return; }
-    wrapper.style.display = 'flex';
-    const btnH = wrapper.offsetHeight || 28;
-    if (r.top > btnH + 4) {
-      wrapper.style.top  = `${r.top - btnH - 4}px`;
-    } else {
-      wrapper.style.top  = `${r.top + 6}px`;
+    const wrapper = host.shadowRoot && host.shadowRoot.firstChild;
+    if (r.width < 100 || r.height < 60) {
+      if (wrapper) wrapper.style.display = 'none';
+      return;
     }
-    wrapper.style.left = `${r.right - 160}px`;
+    if (wrapper) wrapper.style.display = 'flex';
+    const btnH   = (wrapper && wrapper.offsetHeight) || 28;
+    const scrollX = window.scrollX || window.pageXOffset || 0;
+    const scrollY = window.scrollY || window.pageYOffset || 0;
+    if (r.top > btnH + 4) {
+      host.style.top  = `${r.top + scrollY - btnH - 4}px`;
+    } else {
+      host.style.top  = `${r.top + scrollY + 6}px`;
+    }
+    host.style.left = `${r.right + scrollX - 160}px`;
   }
 
   function removeOverlay(video) {
     if (video._ldmHost) {
       video._ldmHost.remove();
+      _ldmActiveOverlays = _ldmActiveOverlays.filter(function(item) { return item.video !== video; });
       delete video._ldmHost;
       delete video._ldmBtn;
     }
@@ -521,37 +558,38 @@
     video.addEventListener('playing', function() { fetchAndStoreCdnEntry(video); }, { passive: true });
   }
 
-  // IntersectionObserver: detect when videos scroll into/out of view.
-  // Threshold 0.8 = video must be 80% visible before showing button,
-  // so it fires after TikTok's swipe animation settles.
+  // IntersectionObserver: create overlay on first entry; reposition on re-entry
+  // (handles lazy-load layout shifts). No removeOverlay on exit — with
+  // position:absolute on host, the button is at a document coordinate and
+  // scrolls off-screen naturally when its video does.
   const videoVisibilityObserver = new IntersectionObserver(function(entries) {
     entries.forEach(function(entry) {
       const v = entry.target;
       if (entry.isIntersecting) {
         if (!v.hasAttribute('data-ldm-dismissed')) {
-          // Small delay to let swipe animations finish before positioning
+          // Small delay to let swipe animations finish (TikTok) before positioning
           setTimeout(function() {
-            if (v.hasAttribute('data-ldm-overlay') && v._ldmBtn) {
-              // Already has overlay — just reposition it
-              positionOverlay(v, v._ldmBtn);
+            if (v.hasAttribute('data-ldm-overlay') && v._ldmHost) {
+              // Already has overlay — reposition in case of layout shift
+              positionOverlay(v, v._ldmHost);
             } else if (!v.hasAttribute('data-ldm-overlay')) {
               createOverlay(v);
               attachPlayTracker(v);
             }
           }, 200);
         }
-      } else if (v._ldmBtn) {
-        removeOverlay(v);
       }
+      // Intentionally no removeOverlay on !isIntersecting — see note above.
     });
   }, { threshold: 0.8 });
 
   function attachToVideos() {
     if (isSuppressedPage(window.location.href)) return;
+    // Purge hosts whose video was removed by React/SPA re-renders
+    _cleanOrphanedOverlays();
     document.querySelectorAll('video').forEach(function(v) {
       createOverlay(v);
       attachPlayTracker(v);
-      // Observe visibility for scroll-based feeds (TikTok, etc.)
       if (!v._ldmVisibilityTracked) {
         v._ldmVisibilityTracked = true;
         videoVisibilityObserver.observe(v);
@@ -565,10 +603,32 @@
     });
   }
 
-  new MutationObserver(attachToVideos).observe(
+  // Debounce MutationObserver so rapid React/SPA DOM bursts don't hammer
+  // attachToVideos hundreds of times per render cycle.
+  var _ldmAttachTimer = null;
+  function _debouncedAttach() {
+    clearTimeout(_ldmAttachTimer);
+    _ldmAttachTimer = setTimeout(attachToVideos, 120);
+  }
+
+  new MutationObserver(_debouncedAttach).observe(
     document.body || document.documentElement,
     { childList: true, subtree: true }
   );
+
+  // Reposition all active overlays on window resize (viewport width change
+  // shifts every video's document coordinates).
+  var _ldmResizeTimer = null;
+  window.addEventListener('resize', function() {
+    clearTimeout(_ldmResizeTimer);
+    _ldmResizeTimer = setTimeout(function() {
+      _ldmActiveOverlays.forEach(function(item) {
+        if (item.video.isConnected) {
+          positionOverlay(item.video, item.host);
+        }
+      });
+    }, 150);
+  }, { passive: true });
 
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', attachToVideos);
@@ -577,3 +637,4 @@
   }
 
 })();
+

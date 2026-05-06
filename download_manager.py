@@ -3,7 +3,22 @@
 # Copyright (c) 2026 Tanjim — tpodbcs@gmail.com
 # All rights reserved. See LICENSE.txt for details.
 
-import sys, requests, time, os, threading, queue, subprocess, re, shutil, json
+import sys, time, os, threading, queue, subprocess, re, shutil, json, glob
+
+# curl_cffi gives Firefox TLS fingerprinting — required for Lulu CDN
+try:
+    from curl_cffi import requests
+    _CURL_CFFI = True
+except ImportError:
+    import requests
+    _CURL_CFFI = False
+
+# AES-128 decryption for encrypted HLS segments
+try:
+    from Crypto.Cipher import AES as _AES
+    _HAS_AES = True
+except ImportError:
+    _HAS_AES = False
 import yt_dlp
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import parse_qs, urlparse, unquote
@@ -11,18 +26,31 @@ from PyQt6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLineEdit,
     QPushButton, QTableWidget, QTableWidgetItem, QHeaderView, QMenu,
     QMessageBox, QListWidget, QListWidgetItem, QLabel, QAbstractItemView,
-    QStyledItemDelegate, QStyle, QMenuBar,
+    QStyledItemDelegate, QStyle, QMenuBar, QMainWindow,
     QDialog, QComboBox, QRadioButton, QGroupBox,
     QProgressBar, QTextEdit, QSizePolicy,
-    QGraphicsOpacityEffect, QGraphicsDropShadowEffect
+    QGraphicsOpacityEffect, QGraphicsDropShadowEffect, QStackedWidget
 )
-from PyQt6.QtCore import QThread, pyqtSignal, QTimer, Qt, QSize, QRect
+from PyQt6.QtCore import QThread, pyqtSignal, QTimer, Qt, QSize, QRect, QPointF, QRectF
 from PyQt6.QtGui import (
     QIcon, QColor, QFont, QPainter, QAction, QPixmap,
-    QLinearGradient, QPalette
+    QLinearGradient, QPalette, QPainterPath, QBrush, QFontDatabase, QFontMetrics
 )
 
 HOME = os.path.expanduser("~")
+
+def get_firefox_profile():
+    """Auto-detect Firefox profile directory across different Linux setups."""
+    candidates = [
+        os.path.join(HOME, '.mozilla', 'firefox'),
+        os.path.join(HOME, '.var', 'app', 'org.mozilla.firefox', 'config', 'mozilla', 'firefox'),
+        os.path.join(HOME, '.var', 'app', 'org.mozilla.firefox', '.mozilla', 'firefox'),
+        os.path.join(HOME, 'snap', 'firefox', 'common', '.mozilla', 'firefox'),
+    ]
+    for path in candidates:
+        if os.path.exists(path):
+            return path
+    return os.path.join(HOME, '.mozilla', 'firefox')  # fallback
 CONFIG_DIR = os.path.join(HOME, ".config", "ldm")
 HISTORY_FILE = os.path.join(CONFIG_DIR, "history.json")
 SETTINGS_FILE = os.path.join(CONFIG_DIR, "settings.json")
@@ -215,7 +243,7 @@ url_queue = queue.Queue()
 def open_and_select(path):
     """
     Open the file manager and select the specific file.
-    Uses DBus FileManager1 interface (works on Zorin/GNOME/Nautilus).
+    Uses DBus FileManager1 interface (works on GNOME/KDE/XFCE/Nautilus/Dolphin/Thunar).
     Falls back to xdg-open on the folder if DBus is unavailable.
     """
     if not path:
@@ -244,10 +272,24 @@ def normalize_stream_url(url):
     """
     Strip embed path prefixes (/e/, /embed/) that iframe players add.
     e.g. https://luluvdo.com/e/abc123 → https://luluvdo.com/abc123
+    Also rewrite Dailymotion geo-player URLs to the canonical video URL
+    that yt-dlp's extractor recognizes.
     """
     try:
         from urllib.parse import urlparse, urlunparse
         p = urlparse(url)
+        host = p.netloc.lower()
+        # Dailymotion geo player:
+        #   https://geo.dailymotion.com/player/<player_skin>.html?video=<vid>
+        # → https://www.dailymotion.com/video/<vid>
+        # The path basename is the player skin ID, NOT the video ID — two
+        # different videos sharing one skin would dedup against each other,
+        # so only rewrite when the real video ID is present in the query.
+        if "geo.dailymotion.com" in host:
+            qs = parse_qs(p.query)
+            video_id = (qs.get("video") or [None])[0]
+            if video_id:
+                return f"https://www.dailymotion.com/video/{video_id}"
         # Replace /e/ID or /embed/ID with /ID
         clean = re.sub(r'^/e/', '/', p.path)
         clean = re.sub(r'^/embed/', '/', clean)
@@ -256,6 +298,79 @@ def normalize_stream_url(url):
     except Exception:
         pass
     return url
+
+
+def _unpack_packed_js(packed_args_str):
+    """Decode a Dean-Edwards p,a,c,k,e,d packed JavaScript payload.
+    Input is everything between the outer `(` and `)` of the packer call."""
+    m = re.match(
+        r"\s*'((?:[^'\\]|\\.)*)'\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*"
+        r"'((?:[^'\\]|\\.)*)'\.split\('\|'\)",
+        packed_args_str,
+        re.DOTALL,
+    )
+    if not m:
+        return None
+    p_raw, a_str, c_str, k_str = m.groups()
+    a, c = int(a_str), int(c_str)
+    p = re.sub(r"\\(.)", lambda mo: mo.group(1), p_raw)
+    k = k_str.split('|')
+    digits = "0123456789abcdefghijklmnopqrstuvwxyz"
+    def encode(n):
+        s = ""
+        if n == 0:
+            return digits[0]
+        while n > 0:
+            s = digits[n % a] + s
+            n //= a
+        return s
+    for i in range(c - 1, -1, -1):
+        if i < len(k) and k[i]:
+            token = encode(i)
+            p = re.sub(rf"\b{re.escape(token)}\b", lambda _m, v=k[i]: v, p)
+    return p
+
+
+def resolve_luluvdo_url(url):
+    """Luluvdo / Lulustream pages hide the m3u8 inside packed JS — yt-dlp
+    has no extractor for them. Fetch the embed page, decode the packer,
+    and return (direct_m3u8_url, page_origin) so the caller can hand the
+    HLS stream to yt-dlp's generic extractor with the right Referer."""
+    m = re.match(
+        r'(https?://(?:luluvdo|lulustream)\.com)/(?:e/)?([A-Za-z0-9]+)',
+        url,
+    )
+    if not m:
+        return None
+    base, vid = m.groups()
+    embed_url = f"{base}/e/{vid}"
+    headers = {
+        'User-Agent': HEADERS['User-Agent'],
+        'Referer': base + '/',
+    }
+    try:
+        resp = requests.get(embed_url, headers=headers, timeout=15)
+        if resp.status_code != 200:
+            return None
+        html = resp.text
+    except Exception:
+        return None
+    pm = re.search(
+        r"function\(p,a,c,k,e,d\)\{.*?\}\((.+\.split\('\|'\)\))\)",
+        html,
+        re.DOTALL,
+    )
+    if not pm:
+        return None
+    unpacked = _unpack_packed_js(pm.group(1))
+    if not unpacked:
+        return None
+    sm = re.search(r'(https?://[^\s"\']+\.m3u8[^\s"\']*)', unpacked)
+    if not sm:
+        return None
+    # The CDN expects the bare origin as Referer (verified against Firefox traffic).
+    return sm.group(1), base + '/'
+
 
 class BridgeHandler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -327,6 +442,140 @@ def needs_curl(url):
     return any(d in lower for d in CURL_DOMAINS)
 
 
+# ── Gradient text label (wordmark) ───────────────────────────────────────────
+class GradientTextLabel(QLabel):
+    """QLabel that paints its text with a vertical gradient derived from an accent
+    color, plus a soft drop-shadow effect. Theme-aware — call set_accent() on
+    dark/light toggle to re-sample stops."""
+
+    def __init__(self, text="", family="Sans", size=18, weight=QFont.Weight.ExtraBold,
+                 letter_spacing=4, parent=None):
+        super().__init__(text, parent)
+        self._accent = QColor("#3b82f6")
+        self._family = family
+        self._size = size
+        self._weight = weight
+        self._letter_spacing = letter_spacing
+        shadow = QGraphicsDropShadowEffect(self)
+        shadow.setBlurRadius(8)
+        shadow.setOffset(0, 1)
+        shadow.setColor(QColor(0, 0, 0, 70))
+        self.setGraphicsEffect(shadow)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self._refresh_size()
+
+    def set_accent(self, color_hex):
+        self._accent = QColor(color_hex)
+        self.update()
+
+    def set_family(self, family):
+        self._family = family
+        self._refresh_size()
+        self.update()
+
+    def _make_font(self):
+        font = QFont(self._family)
+        font.setPixelSize(self._size)
+        font.setWeight(self._weight)
+        font.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, self._letter_spacing)
+        return font
+
+    def _refresh_size(self):
+        # Use tight glyph bounds (no descent waste) for accurate visual sizing.
+        font = self._make_font()
+        path = QPainterPath()
+        path.addText(QPointF(0, 0), font, self.text())
+        br = path.boundingRect()
+        w = int(br.width() + self._letter_spacing * max(0, len(self.text()) - 1) + 10)
+        h = int(br.height() + 10)  # small vertical padding for shadow halo
+        self.setFixedSize(w, h)
+
+    @staticmethod
+    def _shift_lightness(color, amt):
+        h, s, l, a = color.getHslF()
+        return QColor.fromHslF(h, s, max(0.0, min(1.0, l + amt)), a)
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        p.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+        font = self._make_font()
+        path = QPainterPath()
+        path.addText(QPointF(4, 0), font, self.text())
+        br = path.boundingRect()
+        # Vertically center the glyph bounds inside the widget.
+        offset_y = (self.height() - br.height()) / 2.0 - br.top()
+        p.translate(0, offset_y)
+        grad = QLinearGradient(0, br.top(), 0, br.bottom())
+        grad.setColorAt(0.0, self._shift_lightness(self._accent,  0.08))
+        grad.setColorAt(1.0, self._shift_lightness(self._accent, -0.10))
+        p.fillPath(path, QBrush(grad))
+
+
+# ── Numeric column delegate (font override only) ─────────────────────────────
+class NumericFontDelegate(QStyledItemDelegate):
+    """Applies a given font family/weight to its column without changing
+    colors, selection, or any other native rendering."""
+
+    def __init__(self, family="Sans", weight=QFont.Weight.Medium, parent=None):
+        super().__init__(parent)
+        self._family = family
+        self._weight = weight
+
+    def initStyleOption(self, option, index):
+        super().initStyleOption(option, index)
+        f = QFont(option.font)
+        f.setFamily(self._family)
+        f.setWeight(self._weight)
+        option.font = f
+
+
+class FilenameFontDelegate(QStyledItemDelegate):
+    """Keeps the primary Latin font but appends every installed non-Latin
+    family as a fallback. Qt picks a fallback per-glyph only when the
+    primary font lacks the glyph, so Latin rendering is unchanged and
+    any script (Bengali, CJK, Arabic, Devanagari, Thai, Hebrew, …) gets
+    a real glyph instead of tofu."""
+
+    _fallbacks_cached = None
+
+    @classmethod
+    def _fallbacks(cls):
+        if cls._fallbacks_cached is not None:
+            return cls._fallbacks_cached
+        try:
+            WS = QFontDatabase.WritingSystem
+            # Latin is covered by the primary font; Any/Symbol aren't scripts.
+            skip = {WS.Any, WS.Latin, WS.Symbol}
+            seen = set()
+            ordered = []
+            # Pin Noto Sans Bengali UI first when present (matches Firefox's pick).
+            for f in QFontDatabase.families(WS.Bengali) or []:
+                if 'Noto Sans Bengali UI' in f and f not in seen:
+                    seen.add(f)
+                    ordered.append(f)
+            for ws in WS:
+                if ws in skip:
+                    continue
+                for f in QFontDatabase.families(ws) or []:
+                    if f not in seen:
+                        seen.add(f)
+                        ordered.append(f)
+            cls._fallbacks_cached = ordered
+        except Exception:
+            cls._fallbacks_cached = []
+        return cls._fallbacks_cached
+
+    def initStyleOption(self, option, index):
+        super().initStyleOption(option, index)
+        fallbacks = self._fallbacks()
+        if not fallbacks:
+            return
+        f = QFont(option.font)
+        f.setFamilies([f.family()] + fallbacks)
+        option.font = f
+
+
 # ── Progress bar delegate ────────────────────────────────────────────────────
 class ProgressDelegate(QStyledItemDelegate):
     def __init__(self, parent=None):
@@ -351,47 +600,45 @@ class ProgressDelegate(QStyledItemDelegate):
             bg_odd   = QColor("#0f172a")
             sel_color = QColor(59, 130, 246, 38)
             track_color = QColor(255, 255, 255, 15)
-            pill_bg = QColor(59, 130, 246, 38)
-            pill_text = QColor("#60a5fa")
-            done_pill_bg = QColor(74, 222, 128, 26)
-            done_pill_text = QColor("#4ade80")
         else:
             bg_even  = QColor("#ffffff")
             bg_odd   = QColor("#f8fafc")
             sel_color = QColor("#eff6ff")
             track_color = QColor("#f1f5f9")
-            pill_bg = QColor("#eff6ff")
-            pill_text = QColor("#2563eb")
-            done_pill_bg = QColor("#f0fdf4")
-            done_pill_text = QColor("#16a34a")
 
         if option.state & QStyle.StateFlag.State_Selected:
             painter.fillRect(option.rect, sel_color)
         else:
             painter.fillRect(option.rect, bg_even if index.row() % 2 == 0 else bg_odd)
 
-        bar_rect = option.rect.adjusted(8, 8, -60, -8)
+        # Thin 6 px bar, centered vertically, full width — blue = in-progress, green = done
+        bar_h = 6
+        bar_rect = QRect(
+            option.rect.x() + 12,
+            option.rect.y() + (option.rect.height() - bar_h) // 2,
+            option.rect.width() - 24,
+            bar_h,
+        )
+        radius = bar_h // 2
 
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(track_color)
-        painter.drawRoundedRect(bar_rect, 6, 6)
+        painter.drawRoundedRect(bar_rect, radius, radius)
 
         finished = value >= 100
         if value > 0:
             filled_w = int(bar_rect.width() * value / 100)
             filled_rect = QRect(bar_rect.x(), bar_rect.y(), filled_w, bar_rect.height())
+            grad = QLinearGradient(bar_rect.x(), 0, bar_rect.right(), 0)
             if finished:
-                grad = QLinearGradient(bar_rect.x(), 0, bar_rect.right(), 0)
                 grad.setColorAt(0.0, QColor("#16a34a"))
                 grad.setColorAt(1.0, QColor("#4ade80"))
             else:
-                grad = QLinearGradient(bar_rect.x(), 0, bar_rect.right(), 0)
                 grad.setColorAt(0.0, QColor("#3b82f6"))
                 grad.setColorAt(1.0, QColor("#60a5fa"))
             painter.setBrush(grad)
-            painter.drawRoundedRect(filled_rect, 6, 6)
+            painter.drawRoundedRect(filled_rect, radius, radius)
 
-            # Shimmer on active downloads
             if 0 < value < 100 and filled_w > 0:
                 phase = (time.time() % 1.2) / 1.2
                 shimmer_w = max(30, filled_w // 3)
@@ -401,27 +648,7 @@ class ProgressDelegate(QStyledItemDelegate):
                 shimmer_grad.setColorAt(0.5, QColor(255, 255, 255, 70))
                 shimmer_grad.setColorAt(1.0, QColor(255, 255, 255, 0))
                 painter.setBrush(shimmer_grad)
-                painter.drawRoundedRect(filled_rect, 6, 6)
-
-        # Status pill on the right
-        pill_x = bar_rect.right() + 8
-        pill_y = option.rect.y() + (option.rect.height() - 18) // 2
-        pill_rect = QRect(pill_x, pill_y, 46, 18)
-
-        if finished:
-            painter.setBrush(done_pill_bg)
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.drawRoundedRect(pill_rect, 6, 6)
-            painter.setPen(done_pill_text)
-            painter.setFont(QFont("sans-serif", 7, QFont.Weight.Bold))
-            painter.drawText(pill_rect, Qt.AlignmentFlag.AlignCenter, "Done \u2713")
-        else:
-            painter.setBrush(pill_bg)
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.drawRoundedRect(pill_rect, 6, 6)
-            painter.setPen(pill_text)
-            painter.setFont(QFont("sans-serif", 7, QFont.Weight.Bold))
-            painter.drawText(pill_rect, Qt.AlignmentFlag.AlignCenter, f"{value}%")
+                painter.drawRoundedRect(filled_rect, radius, radius)
 
     def sizeHint(self, option, index):
         return QSize(180, 36)
@@ -471,7 +698,7 @@ class FetchFormatsThread(QThread):
                 'no_warnings': True,
                 'noplaylist': True,
                 'http_headers': {'User-Agent': HEADERS['User-Agent']},
-                'cookiesfrombrowser': ('firefox', os.path.join(HOME, '.config', 'mozilla', 'firefox')),
+                'cookiesfrombrowser': ('firefox', get_firefox_profile()),
             }
             print("[YT-FETCH] Calling extract_info...", flush=True)
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -506,7 +733,7 @@ class YouTubeDownloadThread(QThread):
         try:
             self.ydl_opts['progress_hooks'] = [self.hook]
             self.ydl_opts['noplaylist'] = True
-            self.ydl_opts['cookiesfrombrowser'] = ('firefox', os.path.join(HOME, '.config', 'mozilla', 'firefox'))
+            self.ydl_opts['cookiesfrombrowser'] = ('firefox', get_firefox_profile())
             with yt_dlp.YoutubeDL(self.ydl_opts) as ydl:
                 info = ydl.extract_info(self.url, download=True)
                 if info is None:
@@ -684,14 +911,33 @@ def make_dialog_style(dark=True):
 DIALOG_STYLE = make_dialog_style(dark=True)
 
 
+def make_close_btn_style(dark=True):
+    if dark:
+        return (
+            "QPushButton { background-color: #21262d; color: #e6edf3; border: 1px solid #30363d; }"
+            "QPushButton:hover { background-color: #30363d; }"
+        )
+    return (
+        "QPushButton { background-color: #f1f5f9; color: #475569; border: 1px solid #e2e8f0; }"
+        "QPushButton:hover { background-color: #e2e8f0; }"
+    )
+
+
 # ── YouTube dialog ───────────────────────────────────────────────────────────
 class YouTubeDialog(QDialog):
-    download_started  = pyqtSignal(str, str, str)
-    download_progress = pyqtSignal(str, int, str, str, str)
-    download_finished = pyqtSignal(str, str)
+    download_started    = pyqtSignal(str, str, str)
+    download_progress   = pyqtSignal(str, int, str, str, str)
+    download_finished   = pyqtSignal(str, str)
+    yt_settings_captured = pyqtSignal(str, dict)  # url, {mode, quality, audio_fmt}
 
-    def __init__(self, parent=None, prefill_url="", dark=True):
+    def __init__(self, parent=None, prefill_url="", dark=True, skip_fetch=False):
         super().__init__(parent)
+        self.setWindowFlags(
+            Qt.WindowType.Window |
+            Qt.WindowType.WindowMinimizeButtonHint |
+            Qt.WindowType.WindowMaximizeButtonHint |
+            Qt.WindowType.WindowCloseButtonHint
+        )
         self.setWindowTitle("LDM YouTube Downloader")
         self.setMinimumWidth(540)
         self.setMinimumHeight(552)
@@ -707,7 +953,8 @@ class YouTubeDialog(QDialog):
         self._build_ui()
         if prefill_url:
             self.url_input.setText(prefill_url)
-            self.fetch_formats()
+            if not skip_fetch:
+                self.fetch_formats()
 
     def _build_ui(self):
         layout = QVBoxLayout(self)
@@ -821,10 +1068,7 @@ class YouTubeDialog(QDialog):
         self.download_btn.clicked.connect(self.start_download)
 
         self.close_btn = QPushButton("Close")
-        self.close_btn.setStyleSheet(
-            "QPushButton { background-color: #f1f5f9; color: #475569; border: 1px solid #e2e8f0; }"
-            "QPushButton:hover { background-color: #e2e8f0; }"
-        )
+        self.close_btn.setStyleSheet(make_close_btn_style(self._dark))
         self.close_btn.clicked.connect(self.close)
 
         self.open_file_btn = QPushButton("Open")
@@ -880,28 +1124,12 @@ class YouTubeDialog(QDialog):
         self.fetch_btn.setEnabled(True)
         self.fetch_btn.setText("Fetch")
 
-    def start_download(self):
-        url = self.url_input.text().strip()
-        if not url:
-            return
-        self._current_url = url
-        self.download_btn.setEnabled(False)
-        self.fetch_btn.setEnabled(False)
-        self.cancel_dl_btn.setVisible(True)
-        self.progress_bar.setValue(0)
-        self.progress_bar.setVisible(True)
-        self.info_label.setVisible(True)
-        self.log_box.setVisible(True)
-        self.log_box.clear()
-        self._last_size = ""
-        self._last_speed = ""
-        self._last_eta = ""
-
-        safe_title = re.sub(r'[^\w\s\-.]', '', self.video_title)[:80].strip() or "video"
-        quality = self.quality_combo.currentText()
-
-        if self.radio_audio.isChecked():
-            audio_fmt = self.audio_fmt_combo.currentText()
+    def _build_yt_params(self, settings, safe_title):
+        """Return (ydl_opts, folder, display_name) for the given settings."""
+        mode      = settings.get("mode", "combined")
+        quality   = settings.get("quality", "Best")
+        audio_fmt = settings.get("audio_fmt", "mp3")
+        if mode == "audio":
             folder = os.path.join(HOME, "Downloads", "Music")
             os.makedirs(folder, exist_ok=True)
             display_name = f"{safe_title}.{audio_fmt}"
@@ -912,7 +1140,7 @@ class YouTubeDialog(QDialog):
                 'quiet': True, 'no_warnings': True,
                 'http_headers': {'User-Agent': HEADERS['User-Agent']},
             }
-        elif self.radio_video_only.isChecked():
+        elif mode == "video_only":
             folder = os.path.join(HOME, "Downloads", "Videos")
             os.makedirs(folder, exist_ok=True)
             display_name = f"{safe_title}.mp4"
@@ -935,13 +1163,44 @@ class YouTubeDialog(QDialog):
                 'quiet': True, 'no_warnings': True,
                 'http_headers': {'User-Agent': HEADERS['User-Agent']},
             }
+        return ydl_opts, folder, display_name
 
+    def _current_settings(self):
+        if self.radio_audio.isChecked():
+            mode = "audio"
+        elif self.radio_video_only.isChecked():
+            mode = "video_only"
+        else:
+            mode = "combined"
+        return {
+            "mode":      mode,
+            "quality":   self.quality_combo.currentText(),
+            "audio_fmt": self.audio_fmt_combo.currentText(),
+        }
+
+    def _kick_off(self, url, settings, safe_title):
+        """Build opts, show progress UI, and launch the yt-dlp thread."""
+        self._current_url = url
+        self.download_btn.setEnabled(False)
+        self.fetch_btn.setEnabled(False)
+        self.cancel_dl_btn.setVisible(True)
+        self.progress_bar.setValue(0)
+        self.progress_bar.setVisible(True)
+        self.info_label.setVisible(True)
+        self.log_box.setVisible(True)
+        self.log_box.clear()
+        self._last_size = ""
+        self._last_speed = ""
+        self._last_eta = ""
+
+        ydl_opts, folder, display_name = self._build_yt_params(settings, safe_title)
         self._dl_folder = folder
         self._dl_base   = safe_title
         self.open_file_btn.setVisible(False)
         self.open_folder_btn.setVisible(False)
         self.download_btn.setVisible(True)
         self.download_started.emit(url, display_name, folder)
+        self.yt_settings_captured.emit(url, settings)
         self.dl_thread = YouTubeDownloadThread(url, ydl_opts)
         self.dl_thread.progress.connect(self._on_progress)
         self.dl_thread.speed.connect(self._on_speed)
@@ -951,6 +1210,35 @@ class YouTubeDialog(QDialog):
         self.dl_thread.finished.connect(self.on_download_finished)
         self.dl_thread.start()
         self.log_box.append("Starting download...")
+
+    def start_download(self):
+        url = self.url_input.text().strip()
+        if not url:
+            return
+        safe_title = re.sub(r'[<>:"/\\|?*\x00-\x1F]', '', self.video_title)[:80].strip() or "video"
+        self._kick_off(url, self._current_settings(), safe_title)
+
+    def start_with_saved_settings(self, url, settings, safe_title):
+        """Resume path: skip format fetch, jump straight to downloading."""
+        self.url_input.setText(url)
+        mode = settings.get("mode", "combined")
+        if mode == "audio":
+            self.radio_audio.setChecked(True)
+        elif mode == "video_only":
+            self.radio_video_only.setChecked(True)
+        else:
+            self.radio_video.setChecked(True)
+        q = settings.get("quality", "Best")
+        idx = self.quality_combo.findText(q)
+        if idx >= 0:
+            self.quality_combo.setCurrentIndex(idx)
+        af = settings.get("audio_fmt", "mp3")
+        idx = self.audio_fmt_combo.findText(af)
+        if idx >= 0:
+            self.audio_fmt_combo.setCurrentIndex(idx)
+        self.video_title = safe_title
+        self.title_label.setText(f"Resuming: {safe_title}")
+        self._kick_off(url, settings, safe_title)
 
     def _on_progress(self, pct):
         self.progress_bar.setValue(pct)
@@ -1034,6 +1322,12 @@ class StreamDialog(QDialog):
 
     def __init__(self, parent=None, url="", filename="", page_referer="", dark=True):
         super().__init__(parent)
+        self.setWindowFlags(
+            Qt.WindowType.Window |
+            Qt.WindowType.WindowMinimizeButtonHint |
+            Qt.WindowType.WindowMaximizeButtonHint |
+            Qt.WindowType.WindowCloseButtonHint
+        )
         self.setWindowTitle("LDM Stream Downloader")
         self.setMinimumWidth(520)
         self.setMinimumHeight(460)
@@ -1048,6 +1342,7 @@ class StreamDialog(QDialog):
         self.dl_thread     = None
         self._retried      = False
         self._force_retry  = False
+        self._finished_reported = False   # guards closeEvent from stomping Finished with Cancelled
         self._build_ui()
 
     def _build_ui(self):
@@ -1057,10 +1352,12 @@ class StreamDialog(QDialog):
         title = QLabel("Stream Downloader")
         title.setStyleSheet(f"font-size: 15px; font-weight: 700; color: {'#58a6ff' if self._dark else '#0969da'};")
         layout.addWidget(title)
-        url_short = (self._url[:80] + "...") if len(self._url) > 80 else self._url
-        self.url_label = QLabel(url_short)
-        self.url_label.setStyleSheet(f"color: {'#8b949e' if self._dark else '#656d76'}; font-size: 12px;")
-        self.url_label.setWordWrap(True)
+        self.url_label = QLineEdit(self._url)
+        self.url_label.setReadOnly(True)
+        self.url_label.setStyleSheet(
+            f"color: {'#8b949e' if self._dark else '#656d76'}; font-size: 12px;"
+            " border: none; background: transparent; padding: 0;"
+        )
         layout.addWidget(self.url_label)
         self.file_label = QLabel(f"Saving as: {self._filename}")
         self.file_label.setStyleSheet(f"font-size: 13px; font-weight: 600; color: {'#e6edf3' if self._dark else '#1f2328'};")
@@ -1070,7 +1367,7 @@ class StreamDialog(QDialog):
         self.progress_bar.setValue(0)
         layout.addWidget(self.progress_bar)
         self.info_label = QLabel("")
-        self.info_label.setStyleSheet("color: #64748b; font-size: 12px;")
+        self.info_label.setStyleSheet(f"color: {'#8b949e' if self._dark else '#64748b'}; font-size: 12px;")
         layout.addWidget(self.info_label)
         self.log_box = QTextEdit()
         self.log_box.setReadOnly(True)
@@ -1092,10 +1389,7 @@ class StreamDialog(QDialog):
         self.cancel_btn.setEnabled(False)
         self.cancel_btn.clicked.connect(self._cancel)
         self.close_btn = QPushButton("Close")
-        self.close_btn.setStyleSheet(
-            "QPushButton { background-color: #f1f5f9; color: #475569; border: 1px solid #e2e8f0; }"
-            "QPushButton:hover { background-color: #e2e8f0; }"
-        )
+        self.close_btn.setStyleSheet(make_close_btn_style(self._dark))
         self.close_btn.clicked.connect(self.close)
         # Hidden paste row — shown when Facebook URL needs manual paste
         self.paste_row = QWidget()
@@ -1108,8 +1402,10 @@ class StreamDialog(QDialog):
         paste_layout.addWidget(self.paste_hint)
         self.paste_input = QLineEdit()
         self.paste_input.setPlaceholderText("Paste the copied link here...")
+        _paste_bg = "#0d1117" if self._dark else "#f8fafc"
+        _paste_fg = "#e6edf3" if self._dark else "#1e293b"
         self.paste_input.setStyleSheet(
-            "QLineEdit { background-color: #f8fafc; color: #1e293b;"
+            f"QLineEdit {{ background-color: {_paste_bg}; color: {_paste_fg};"
             "  border: 1px solid #f97316; border-radius: 5px;"
             "  padding: 6px 10px; font-size: 12px; }"
             "QLineEdit:focus { border: 1px solid #ea580c; }"
@@ -1196,8 +1492,7 @@ class StreamDialog(QDialog):
                 self._url = pasted
                 self._page_referer = pasted
                 self.paste_row.setVisible(False)
-                url_short = (pasted[:80] + '...') if len(pasted) > 80 else pasted
-                self.url_label.setText(url_short)
+                self.url_label.setText(pasted)
         self.start_btn.setEnabled(False)
         self.cancel_btn.setEnabled(True)
         self.close_btn.setEnabled(True)
@@ -1267,8 +1562,21 @@ class StreamDialog(QDialog):
                             pass
                 return f'facebook_{ts}.mp4'
 
-            # Generic
-            safe = re.sub(r'[^\w\s\.\-]', '', filename)[:80].strip()
+            # pvvstream / pvvstream CDN  —  URL pattern:
+            #   /videos/{VIDEO_ID}/{RES_ID}/vid_{quality}.mp4
+            # Extract both IDs + quality so every video gets a unique name,
+            # e.g.  pvv_-174844737_456240335_480p.mp4
+            _pv = re.search(
+                r'/videos/([^/]+)/([^/]+)/vid_(\w+)\.mp4', url, re.I
+            )
+            if _pv:
+                vid_id, res_id, quality = _pv.group(1), _pv.group(2), _pv.group(3)
+                return f'pvv_{vid_id}_{res_id}_{quality}.mp4'
+
+            # Generic — strip only filesystem-unsafe chars. A whitelist on
+            # \w would drop Unicode combining marks (Bengali vowel signs,
+            # candrabindu, halant etc. are category M, not L).
+            safe = re.sub(r'[<>:"/\\|?*\x00-\x1F]', '', filename)[:80].strip()
             blocked = {'stream', 'download', 'video', 'instagram',
                        'facebook', 'twitter', 'index', 'media'}
             if safe and safe.lower().split('.')[0] not in blocked:
@@ -1282,11 +1590,26 @@ class StreamDialog(QDialog):
     def _start_download(self):
         folder = os.path.join(HOME, "Downloads", "Videos")
         os.makedirs(folder, exist_ok=True)
+        # Luluvdo / Lulustream: handled by a dedicated downloader (see
+        # LuluHLSDownloadThread). yt-dlp/ffmpeg both 403 against this CDN.
+        _is_lulu_page = bool(re.search(
+            r'(?:luluvdo|lulustream)\.com', self._url, re.I
+        ))
         display_name = self._resolve_display_name(self._url, self._filename)
         base, ext = os.path.splitext(display_name)
         if not ext:
             ext = ".mp4"
             display_name = f"{base}{ext}"
+        # If a file with this name already exists on disk it almost certainly
+        # contains a *different* video (CDNs like pvvstream reuse generic names
+        # such as vid_480p.mp4 for every video).  Increment (1), (2), … until
+        # we find a free slot so we never silently overwrite existing content.
+        _base, _ext = os.path.splitext(display_name)
+        _counter = 1
+        while os.path.exists(os.path.join(folder, display_name)):
+            display_name = f"{_base} ({_counter}){_ext}"
+            _counter += 1
+        base = os.path.splitext(display_name)[0]   # keep base in sync for outtmpl below
         # Update the dialog label to show the resolved filename
         self.file_label.setText(f"Saving as: {display_name}")
         http_hdrs = {'User-Agent': HEADERS['User-Agent']}
@@ -1295,19 +1618,56 @@ class StreamDialog(QDialog):
             http_hdrs['Referer'] = 'https://www.tiktok.com/'
         if self._page_referer:
             http_hdrs['Referer'] = self._page_referer
+        # Lulustream/Luluvdo CDNs (e.g. *.tnmr.org) reject requests without
+        # an Origin and Sec-Fetch-* set — match what Firefox sends.
+        _is_lulu = bool(re.search(
+            r'(?:luluvdo|lulustream)\.com|\btnmr\.org',
+            self._url + ' ' + (self._page_referer or ''),
+            re.I,
+        ))
+        if _is_lulu:
+            http_hdrs.update({
+                'User-Agent': ('Mozilla/5.0 (X11; Linux x86_64; rv:151.0) '
+                               'Gecko/20100101 Firefox/151.0'),
+                'Referer':         'https://luluvdo.com/',
+                'Origin':          'https://luluvdo.com',
+                'Accept':          '*/*',
+                'Accept-Language': 'en-US,en;q=0.9',
+                'Sec-Fetch-Dest':  'empty',
+                'Sec-Fetch-Mode':  'cors',
+                'Sec-Fetch-Site':  'cross-site',
+            })
+        self._dl_path = os.path.join(folder, display_name)
+        self.open_file_btn.setVisible(False)
+        self.open_folder_btn.setVisible(False)
+        self.download_started.emit(self._url, display_name, folder)
+        # Lulustream / Luluvdo page URL: dedicated downloader fetches the
+        # whole HLS via Python requests and muxes locally.
+        if _is_lulu_page:
+            self._retried = True  # don't auto-retry through page-URL fallback
+            self.dl_thread = LuluHLSDownloadThread(self._url, self._dl_path)
+            self.dl_thread.progress.connect(self._on_progress)
+            self.dl_thread.speed.connect(self._on_speed)
+            self.dl_thread.size_info.connect(self._on_size)
+            self.dl_thread.eta.connect(self._on_eta)
+            self.dl_thread.log.connect(lambda msg: self.log_box.append(msg))
+            self.dl_thread.finished.connect(self._on_finished)
+            self.dl_thread.start()
+            return
         ydl_opts = {
             'format':              'bestvideo+bestaudio/best',
             'outtmpl':             os.path.join(folder, f"{base}.%(ext)s"),
             'merge_output_format': 'mp4',
             'quiet':               True,
             'no_warnings':         True,
-            'cookiesfrombrowser':  ('firefox', os.path.join(HOME, '.config', 'mozilla', 'firefox')),
+            'cookiesfrombrowser':  ('firefox', get_firefox_profile()),
             'http_headers':        http_hdrs,
+            # Survive transient packet drops (BD ISP-level SNI/DPI filtering on
+            # adult/social CDNs occasionally kills mid-segment fetches).
+            'retries':             10,
+            'fragment_retries':    10,
+            'socket_timeout':      30,
         }
-        self._dl_path = os.path.join(folder, display_name)
-        self.open_file_btn.setVisible(False)
-        self.open_folder_btn.setVisible(False)
-        self.download_started.emit(self._url, display_name, folder)
         self.dl_thread = YouTubeDownloadThread(self._url, ydl_opts)
         self.dl_thread.progress.connect(self._on_progress)
         self.dl_thread.speed.connect(self._on_speed)
@@ -1335,7 +1695,7 @@ class StreamDialog(QDialog):
 
     def closeEvent(self, event):
         """Handle window X button — cancel thread and save to history."""
-        if self.dl_thread and self.dl_thread.isRunning():
+        if self.dl_thread and self.dl_thread.isRunning() and not self._finished_reported:
             self.dl_thread.running = False
             self.dl_thread.terminate()
             self.download_finished.emit(self._url, "Cancelled")
@@ -1437,6 +1797,7 @@ class StreamDialog(QDialog):
                 self._dl_path = os.path.join(folder, resolved)
                 self.file_label.setText(f"Saving as: {resolved}")
                 self.download_name_updated.emit(self._url, resolved, self._dl_path)
+            self._finished_reported = True
             self.download_finished.emit(self._url, msg)
             return
         # Auto-retry with page URL on 403 — needed when direct m3u8 requires
@@ -1479,6 +1840,242 @@ class StreamDialog(QDialog):
         else:
             self.info_label.setText(label_msg)
             self.download_finished.emit(self._url, msg)
+
+class LuluHLSDownloadThread(QThread):
+    """Download a Luluvdo / Lulustream HLS video entirely via Python
+    requests within one session, then mux locally with ffmpeg.
+
+    Why not yt-dlp or ffmpeg's network: the Lulu CDN (*.tnmr.org) returns
+    403 to ffmpeg, yt-dlp, and even fresh Python requests calls if there
+    is too much delay or session reuse mismatch between resolving the
+    page and fetching the manifest. Doing the embed-page fetch and the
+    manifest/segment fetch back-to-back in the same requests.Session
+    keeps the CDN happy. ffmpeg is only invoked at the end to remux the
+    concatenated .ts file into .mp4 — no network involved."""
+
+    progress  = pyqtSignal(int)
+    speed     = pyqtSignal(str)
+    size_info = pyqtSignal(str)
+    eta       = pyqtSignal(str)
+    log       = pyqtSignal(str)
+    finished  = pyqtSignal(str)
+
+    UA = ('Mozilla/5.0 (X11; Linux x86_64; rv:151.0) '
+          'Gecko/20100101 Firefox/151.0')
+
+    def __init__(self, page_url, output_path):
+        super().__init__()
+        self.page_url = page_url
+        self.output_path = output_path
+        self.running = True
+
+    def _make_session(self):
+        if _CURL_CFFI:
+            return requests.Session(impersonate="firefox")
+        s = requests.Session()
+        s.headers.clear()
+        s.headers.update({'User-Agent': self.UA})
+        return s
+
+    def _cdn_headers(self, base):
+        return {
+            'Referer':         base + '/',
+            'Origin':          base,
+            'Accept':          '*/*',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Sec-Fetch-Dest':  'empty',
+            'Sec-Fetch-Mode':  'cors',
+            'Sec-Fetch-Site':  'cross-site',
+        }
+
+    def _resolve(self, session, base, vid):
+        embed_url = f'{base}/e/{vid}'
+        r = session.get(embed_url, headers={'Referer': base + '/'}, timeout=15)
+        r.raise_for_status()
+        pm = re.search(
+            r"function\(p,a,c,k,e,d\)\{.*?\}\((.+\.split\('\|'\)\))\)",
+            r.text, re.DOTALL,
+        )
+        if not pm:
+            raise Exception("Player config not found on embed page")
+        unp = _unpack_packed_js(pm.group(1))
+        if not unp:
+            raise Exception("Failed to decode packed JS")
+        sm = re.search(r'(https?://[^\s"\']+\.m3u8[^\s"\']*)', unp)
+        if not sm:
+            raise Exception("No m3u8 URL in player config")
+        return sm.group(1)
+
+    def _select_variant(self, master_text, master_url):
+        from urllib.parse import urljoin
+        # Prefer highest BANDWIDTH; fall back to first non-comment line.
+        best_url, best_bw = None, -1
+        lines = master_text.splitlines()
+        for i, ln in enumerate(lines):
+            if ln.startswith('#EXT-X-STREAM-INF'):
+                m = re.search(r'BANDWIDTH=(\d+)', ln)
+                bw = int(m.group(1)) if m else 0
+                # The URL is the next non-comment line
+                for j in range(i + 1, len(lines)):
+                    nxt = lines[j].strip()
+                    if nxt and not nxt.startswith('#'):
+                        if bw > best_bw:
+                            best_bw, best_url = bw, urljoin(master_url, nxt)
+                        break
+        if best_url:
+            return best_url
+        # No variants — master is itself a media playlist
+        return master_url
+
+    def run(self):
+        try:
+            m = re.match(
+                r'(https?://(?:luluvdo|lulustream)\.com)/(?:e/)?([A-Za-z0-9]+)',
+                self.page_url,
+            )
+            if not m:
+                raise Exception("Not a Luluvdo / Lulustream URL")
+            base, vid = m.groups()
+            session = self._make_session()
+            cdn = self._cdn_headers(base)
+
+            # 1) Resolve packed-JS → master.m3u8
+            self.log.emit("Resolving stream URL...")
+            master_url = self._resolve(session, base, vid)
+
+            # 2) Fetch master playlist
+            self.log.emit("Fetching master playlist...")
+            r = session.get(master_url, headers=cdn, timeout=20)
+            if r.status_code != 200:
+                raise Exception(
+                    f"Master playlist returned HTTP {r.status_code}"
+                )
+            master_text = r.text
+
+            # 3) Pick best variant
+            variant_url = self._select_variant(master_text, master_url)
+
+            # 4) Fetch variant playlist (or treat master as media playlist)
+            if variant_url != master_url:
+                r = session.get(variant_url, headers=cdn, timeout=20)
+                if r.status_code != 200:
+                    raise Exception(
+                        f"Variant playlist returned HTTP {r.status_code}"
+                    )
+                playlist_text = r.text
+            else:
+                playlist_text = master_text
+
+            # 5) Parse segment URLs + encryption keys
+            from urllib.parse import urljoin
+            seg_entries = []  # (url, key_bytes_or_None, iv_bytes_or_None, seq)
+            cur_key, cur_iv = None, None
+            seq = 0
+            for ln in playlist_text.splitlines():
+                ln = ln.strip()
+                if ln.startswith('#EXT-X-KEY'):
+                    method_m = re.search(r'METHOD=([^,\s]+)', ln)
+                    if method_m and method_m.group(1) == 'NONE':
+                        cur_key, cur_iv = None, None
+                    else:
+                        uri_m = re.search(r'URI="([^"]+)"', ln)
+                        iv_m  = re.search(r'IV=0x([0-9a-fA-F]+)', ln)
+                        if uri_m:
+                            key_r = session.get(uri_m.group(1), headers=cdn, timeout=10)
+                            cur_key = key_r.content
+                        cur_iv = bytes.fromhex(iv_m.group(1).zfill(32)) if iv_m else None
+                elif ln and not ln.startswith('#'):
+                    seg_entries.append((urljoin(variant_url, ln), cur_key, cur_iv, seq))
+                    seq += 1
+
+            if not seg_entries:
+                raise Exception("No segments in playlist")
+            encrypted = any(e[1] is not None for e in seg_entries)
+            if encrypted and not _HAS_AES:
+                raise Exception(
+                    "Stream is AES-128 encrypted but pycryptodome is not installed. "
+                    "Run:  pip install pycryptodome --break-system-packages"
+                )
+            self.log.emit(f"Downloading {len(seg_entries)} segments "
+                          f"({'encrypted' if encrypted else 'plain'})...")
+
+            # 6) Download + decrypt segments to a temp .ts file with progress
+            tmp_ts = self.output_path + '.lulu.tmp.ts'
+            total_bytes = 0
+            t0 = time.time()
+            with open(tmp_ts, 'wb') as fh:
+                for i, (seg_url, seg_key, seg_iv, seg_seq) in enumerate(seg_entries):
+                    if not self.running:
+                        try: os.remove(tmp_ts)
+                        except Exception: pass
+                        self.finished.emit("Cancelled")
+                        return
+                    last_err = None
+                    for attempt in range(5):
+                        try:
+                            r = session.get(seg_url, headers=cdn, timeout=30)
+                            if r.status_code == 200:
+                                last_err = None
+                                break
+                            last_err = f"HTTP {r.status_code}"
+                        except Exception as exc:
+                            last_err = str(exc)
+                        if attempt < 4:
+                            time.sleep(min(2 ** attempt, 8))
+                    if last_err is not None:
+                        raise Exception(
+                            f"Segment {i+1}/{len(seg_entries)} failed "
+                            f"after 5 attempts: {last_err}"
+                        )
+                    data = r.content
+                    if seg_key is not None:
+                        iv = seg_iv if seg_iv is not None else seg_seq.to_bytes(16, 'big')
+                        data = _AES.new(seg_key, _AES.MODE_CBC, iv).decrypt(data)
+                    fh.write(data)
+                    total_bytes += len(data)
+                    pct = int(100 * (i + 1) / len(seg_entries))
+                    self.progress.emit(pct)
+                    self.size_info.emit(format_size(total_bytes))
+                    elapsed = max(time.time() - t0, 0.001)
+                    bps = total_bytes / elapsed
+                    self.speed.emit(f"{format_size(int(bps))}/s")
+                    if i + 1 < len(seg_entries):
+                        rem = (len(seg_entries) - (i + 1)) * (elapsed / (i + 1))
+                        self.eta.emit(format_eta(int(rem)))
+                    else:
+                        self.eta.emit("—")
+
+            # 7) Remux to MP4 via ffmpeg locally (no network)
+            self.log.emit("Muxing to MP4...")
+            try:
+                subprocess.run(
+                    ['ffmpeg', '-y', '-i', tmp_ts,
+                     '-c', 'copy', '-bsf:a', 'aac_adtstoasc',
+                     self.output_path],
+                    check=True, capture_output=True, timeout=300,
+                )
+                try: os.remove(tmp_ts)
+                except Exception: pass
+            except subprocess.CalledProcessError as e:
+                err = (e.stderr or b'').decode('utf-8', 'replace').strip()
+                self.log.emit(f"ffmpeg mux failed: {err[:200]}")
+                # Even if mux fails, keep the .ts file as a fallback.
+                if os.path.exists(tmp_ts):
+                    os.replace(tmp_ts, self.output_path)
+
+            self.progress.emit(100)
+            self.finished.emit("Finished")
+
+        except FileNotFoundError:
+            self.finished.emit("Error: ffmpeg not installed")
+        except Exception as e:
+            if any(x in type(e).__module__ for x in ('requests', 'curl')):
+                self.finished.emit(f"Error: network error — {str(e)[:120]}")
+                return
+        except Exception as e:
+            self.finished.emit(f"Error: {str(e)[:160]}")
+
+
 
 class DownloadThread(QThread):
     progress   = pyqtSignal(int)
@@ -1628,6 +2225,43 @@ class DownloadThread(QThread):
                             candidate = m.group(1).strip().strip("'\"")
                             if candidate.lower() not in ("utf-8", "utf8", "ascii", "iso-8859-1"):
                                 self.filename = candidate
+                # Fix 6: Some servers put the real filename in a ?name= query
+                # parameter (e.g. upfiles.download) rather than Content-Disposition.
+                # Only use it when our current filename still has no extension.
+                if not os.path.splitext(self.filename)[1]:
+                    try:
+                        qs_name = parse_qs(urlparse(self.url).query).get("name", [None])[0]
+                        if qs_name and os.path.splitext(qs_name)[1]:
+                            self.filename = qs_name
+                    except Exception:
+                        pass
+                # Fix 7: If the filename STILL has no extension, sniff from
+                # Content-Type.  Handles opaque force-download tokens (krakencloud
+                # etc.) where the URL path is a hash with no extension at all.
+                # application/octet-stream defaults to .mp4 only for video CDNs;
+                # real binary types like zip are already caught by Content-Disposition.
+                if not os.path.splitext(self.filename)[1]:
+                    ct = head.headers.get("Content-Type", "").split(";")[0].strip().lower()
+                    _ct_ext = {
+                        "video/mp4": ".mp4", "video/webm": ".webm",
+                        "video/x-matroska": ".mkv", "video/x-msvideo": ".avi",
+                        "video/quicktime": ".mov", "video/x-flv": ".flv",
+                        "video/mp2t": ".ts", "video/m4v": ".m4v",
+                        "application/zip": ".zip",
+                        "application/x-zip-compressed": ".zip",
+                        "application/x-rar-compressed": ".rar",
+                        "application/x-7z-compressed": ".7z",
+                        "application/x-tar": ".tar",
+                        "application/gzip": ".gz",
+                        "application/pdf": ".pdf",
+                        "application/vnd.android.package-archive": ".apk",
+                        "application/octet-stream": ".mp4",   # last-resort for video CDNs
+                    }
+                    ext = _ct_ext.get(ct, "")
+                    if not ext and ct.startswith("video/"):
+                        ext = ".mp4"
+                    if ext:
+                        self.filename += ext
             except Exception:
                 pass
 
@@ -1658,47 +2292,89 @@ class DownloadThread(QThread):
                     _uc += 1
                 self.filename = _un
             filepath = os.path.join(folder, self.filename)
-            mode = "ab" if self.resume_from > 0 else "wb"
-            with session.get(self.url, stream=True, allow_redirects=True, timeout=30, verify=False) as r:
-                if self.resume_from > 0 and r.status_code == 416:
-                    # Range not satisfiable — file already complete
-                    self.finished.emit("Finished")
-                    return
-                if r.status_code not in (200, 206):
-                    r.raise_for_status()
-                total_from_header = int(r.headers.get("content-length", 0) or 0)
-                total = total_from_header + self.resume_from if total_from_header > 0 else 0
-                downloaded_bytes = self.resume_from
-                start_time = time.time()
-                with open(filepath, mode) as f:
-                    for chunk in r.iter_content(chunk_size=65536):
+            # Some CDNs cap concurrent connections per-IP and reject the
+            # second handshake with SSL EOF. Retry with backoff so a queued
+            # download just waits for a slot instead of hard-failing.
+            MAX_ATTEMPTS = 60
+            RETRY_DELAY  = 5
+            current_resume = self.resume_from
+            attempt = 0
+            while True:
+                attempt += 1
+                if current_resume > 0:
+                    session.headers["Range"] = f"bytes={current_resume}-"
+                    mode = "ab"
+                else:
+                    session.headers.pop("Range", None)
+                    mode = "wb"
+                downloaded_bytes = current_resume
+                try:
+                    # curl_cffi Response has no __enter__/__exit__, so
+                    # `with session.get(...) as r` crashes immediately.
+                    # Plain assignment + try/finally works for both libraries.
+                    r = session.get(self.url, stream=True, allow_redirects=True, timeout=30, verify=False)
+                    try:
+                        if current_resume > 0 and r.status_code == 416:
+                            # Range not satisfiable — file already complete
+                            self.finished.emit("Finished")
+                            return
+                        if r.status_code not in (200, 206):
+                            r.raise_for_status()
+                        total_from_header = int(r.headers.get("content-length", 0) or 0)
+                        total = total_from_header + current_resume if total_from_header > 0 else 0
+                        start_time = time.time()
+                        with open(filepath, mode) as f:
+                            for chunk in r.iter_content(chunk_size=65536):
+                                if not self.running:
+                                    self.finished.emit("Cancelled")
+                                    return
+                                if chunk:
+                                    f.write(chunk)
+                                    downloaded_bytes += len(chunk)
+                                    if total > 0:
+                                        pct = int(downloaded_bytes * 100 / total)
+                                        self.progress.emit(pct)
+                                        self.downloaded.emit(f"{format_size(downloaded_bytes)} / {format_size(total)}")
+                                        elapsed = time.time() - start_time
+                                        downloaded_since_start = downloaded_bytes - current_resume
+                                        if elapsed > 0 and downloaded_since_start > 0:
+                                            rate = downloaded_since_start / elapsed
+                                            remaining_bytes = total - downloaded_bytes
+                                            self.eta.emit(format_eta(remaining_bytes / rate))
+                                    else:
+                                        self.downloaded.emit(format_size(downloaded_bytes))
+                                        self.eta.emit("—")
+                                    elapsed = time.time() - start_time
+                                    downloaded_since_start = downloaded_bytes - current_resume
+                                    if elapsed > 0:
+                                        spd = downloaded_since_start / elapsed
+                                        if spd >= 1024 * 1024:
+                                            self.speed.emit(f"{spd / (1024 * 1024):.2f} MB/s")
+                                        else:
+                                            self.speed.emit(f"{spd / 1024:.1f} KB/s")
+                    finally:
+                        try:
+                            r.close()
+                        except Exception:
+                            pass
+                    break  # full stream consumed without error
+                except (requests.exceptions.SSLError,
+                        requests.exceptions.ConnectionError,
+                        requests.exceptions.ChunkedEncodingError) as e:
+                    if not self.running:
+                        self.finished.emit("Cancelled")
+                        return
+                    if attempt >= MAX_ATTEMPTS:
+                        raise
+                    # Pick up where we left off on the next attempt.
+                    current_resume = downloaded_bytes
+                    self.eta.emit(f"Waiting for slot (retry {attempt})")
+                    self.speed.emit("—")
+                    for _ in range(RETRY_DELAY):
                         if not self.running:
                             self.finished.emit("Cancelled")
                             return
-                        if chunk:
-                            f.write(chunk)
-                            downloaded_bytes += len(chunk)
-                            if total > 0:
-                                pct = int(downloaded_bytes * 100 / total)
-                                self.progress.emit(pct)
-                                self.downloaded.emit(f"{format_size(downloaded_bytes)} / {format_size(total)}")
-                                elapsed = time.time() - start_time
-                                downloaded_since_start = downloaded_bytes - self.resume_from
-                                if elapsed > 0 and downloaded_since_start > 0:
-                                    rate = downloaded_since_start / elapsed
-                                    remaining_bytes = total - downloaded_bytes
-                                    self.eta.emit(format_eta(remaining_bytes / rate))
-                            else:
-                                self.downloaded.emit(format_size(downloaded_bytes))
-                                self.eta.emit("—")
-                            elapsed = time.time() - start_time
-                            downloaded_since_start = downloaded_bytes - self.resume_from
-                            if elapsed > 0:
-                                spd = downloaded_since_start / elapsed
-                                if spd >= 1024 * 1024:
-                                    self.speed.emit(f"{spd / (1024 * 1024):.2f} MB/s")
-                                else:
-                                    self.speed.emit(f"{spd / 1024:.1f} KB/s")
+                        time.sleep(1)
             self.eta.emit("—")
             self.finished.emit("Finished")
         except requests.exceptions.SSLError:
@@ -1733,6 +2409,12 @@ class CoreDownloaderDialog(QDialog):
 
     def __init__(self, parent=None, url="", filename="", referer="", dark=True):
         super().__init__(parent)
+        self.setWindowFlags(
+            Qt.WindowType.Window |
+            Qt.WindowType.WindowMinimizeButtonHint |
+            Qt.WindowType.WindowMaximizeButtonHint |
+            Qt.WindowType.WindowCloseButtonHint
+        )
         self.setWindowTitle("LDM Core Downloader")
         self.setMinimumWidth(520)
         self.setMinimumHeight(320)
@@ -1751,17 +2433,22 @@ class CoreDownloaderDialog(QDialog):
         layout.setContentsMargins(20, 20, 20, 20)
 
         title = QLabel("Core Downloader")
-        title.setStyleSheet("font-size: 16px; font-weight: bold; color: #0369a1;")
+        title.setStyleSheet(f"font-size: 16px; font-weight: bold; color: {'#58a6ff' if self._dark else '#0369a1'};")
         layout.addWidget(title)
 
-        url_short = (self._url[:80] + "...") if len(self._url) > 80 else self._url
-        url_label = QLabel(url_short)
-        url_label.setStyleSheet("color: #64748b; font-size: 11px;")
-        url_label.setWordWrap(True)
+        url_label = QLineEdit(self._url)
+        url_label.setReadOnly(True)
+        url_label.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
+        url_label.setStyleSheet(
+            f"color: {'#8b949e' if self._dark else '#64748b'}; font-size: 11px;"
+            " border: none; background: transparent; padding: 2px 4px;"
+            " selection-background-color: #1f6feb; selection-color: #ffffff;"
+        )
+        url_label.setCursorPosition(0)
         layout.addWidget(url_label)
 
         self.file_label = QLabel(f"Saving as: {self._filename}")
-        self.file_label.setStyleSheet("font-size: 13px; font-weight: bold; color: #1e293b;")
+        self.file_label.setStyleSheet(f"font-size: 13px; font-weight: bold; color: {'#e6edf3' if self._dark else '#1e293b'};")
         self.file_label.setWordWrap(True)
         layout.addWidget(self.file_label)
 
@@ -1770,7 +2457,7 @@ class CoreDownloaderDialog(QDialog):
         layout.addWidget(self.progress_bar)
 
         self.info_label = QLabel("")
-        self.info_label.setStyleSheet("color: #64748b; font-size: 12px;")
+        self.info_label.setStyleSheet(f"color: {'#8b949e' if self._dark else '#64748b'}; font-size: 12px;")
         layout.addWidget(self.info_label)
 
         layout.addStretch()
@@ -1811,10 +2498,7 @@ class CoreDownloaderDialog(QDialog):
         self.open_folder_btn.clicked.connect(self._open_folder)
 
         self.close_btn = QPushButton("Close")
-        self.close_btn.setStyleSheet(
-            "QPushButton { background-color: #f1f5f9; color: #475569; border: 1px solid #e2e8f0; }"
-            "QPushButton:hover { background-color: #e2e8f0; }"
-        )
+        self.close_btn.setStyleSheet(make_close_btn_style(self._dark))
         self.close_btn.clicked.connect(self.close)
 
         btn_row.addWidget(self.start_btn)
@@ -1903,17 +2587,11 @@ class CoreDownloaderDialog(QDialog):
 
 
 # ── Main window ──────────────────────────────────────────────────────────────
-class DownloadManager(QWidget):
+class DownloadManager(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setObjectName("mainWindow")
         self.setWindowTitle("Linux Download Manager")
-        self.setWindowFlags(
-            Qt.WindowType.Window |
-            Qt.WindowType.WindowMinimizeButtonHint |
-            Qt.WindowType.WindowMaximizeButtonHint |
-            Qt.WindowType.WindowCloseButtonHint
-        )
         self.resize(1200, 680)
         self.recent_urls = {}
         self.finished_urls = {}
@@ -1921,16 +2599,27 @@ class DownloadManager(QWidget):
         self.row_progress = {}
         self.yt_url_to_row = {}
         self.history = load_history()
+        # URL → {mode, quality, audio_fmt} for YT resume without re-fetching formats
+        self.yt_settings = {e["url"]: e["yt_settings"] for e in self.history
+                            if e.get("url") and e.get("yt_settings")}
         self._settings = load_settings()
         self.dark_mode = self._settings.get("dark_mode", False)
         self.notify_enabled = self._settings.get("notifications", True)
 
-        app_icon = QIcon.fromTheme("linux-downloader")
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        app_icon = QIcon()
+        for candidate in [
+            os.path.join(script_dir, "icons", "linux-downloader.svg"),
+            os.path.join(script_dir, "linux-downloader.svg"),
+        ]:
+            if os.path.exists(candidate):
+                app_icon = QIcon(candidate)
+                break
         if app_icon.isNull():
-            script_dir = os.path.dirname(os.path.abspath(__file__))
+            app_icon = QIcon.fromTheme("linux-downloader")
+        if app_icon.isNull():
             for candidate in [
                 os.path.join(script_dir, "icons", "linux-downloader-256.png"),
-                os.path.join(script_dir, "linux-downloader.svg"),
                 os.path.join(script_dir, "icons", "linux-downloader-128.png"),
             ]:
                 if os.path.exists(candidate):
@@ -1941,10 +2630,20 @@ class DownloadManager(QWidget):
             QApplication.setWindowIcon(app_icon)
         self.app_icon = app_icon
 
+        # Load bundled wordmark font (Rajdhani Bold); fall back silently if missing
+        self._title_font_family = "Sans"
+        rajdhani_path = os.path.join(script_dir, "fonts", "Rajdhani-Bold.ttf")
+        if os.path.exists(rajdhani_path):
+            fid = QFontDatabase.addApplicationFont(rajdhani_path)
+            fams = QFontDatabase.applicationFontFamilies(fid)
+            if fams:
+                self._title_font_family = fams[0]
+
         self._build_ui()
         self._load_history_into_table()
         self._apply_theme()
         self._update_category_counts()
+        self._update_empty_state()
         self.threads = []
         start_bridge_server()
         self.timer = QTimer()
@@ -1956,6 +2655,60 @@ class DownloadManager(QWidget):
 
     def _theme(self):
         return THEMES["dark"] if self.dark_mode else THEMES["light"]
+
+    def _show_toast(self, message, duration=2400):
+        """Show a floating toast notification that fades in then out."""
+        toast = QLabel(message, self)
+        toast.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        t = self._theme()
+        toast.setStyleSheet(f"""
+            QLabel {{
+                background-color: {t['sidebar']};
+                color: {t['text']};
+                border: 1px solid {t['border']};
+                border-radius: 20px;
+                padding: 0px 22px;
+                font-size: 13px;
+                font-weight: 500;
+            }}
+        """)
+        toast.setFixedHeight(40)
+        toast.adjustSize()
+        w = max(toast.sizeHint().width() + 48, 280)
+        toast.setFixedSize(w, 40)
+        toast.move((self.width() - w) // 2, self.height() - 80)
+
+        effect = QGraphicsOpacityEffect(toast)
+        toast.setGraphicsEffect(effect)
+        effect.setOpacity(0.0)
+        toast.show()
+        toast.raise_()
+
+        opacity = [0.0]
+
+        def fade_in():
+            opacity[0] = min(1.0, opacity[0] + 0.12)
+            effect.setOpacity(opacity[0])
+            if opacity[0] >= 1.0:
+                timer_in.stop()
+                QTimer.singleShot(duration, start_fade_out)
+
+        def start_fade_out():
+            opacity[0] = 1.0
+            timer_out.start(25)
+
+        def fade_out():
+            opacity[0] = max(0.0, opacity[0] - 0.08)
+            effect.setOpacity(opacity[0])
+            if opacity[0] <= 0.0:
+                timer_out.stop()
+                toast.deleteLater()
+
+        timer_in  = QTimer(self)
+        timer_out = QTimer(self)
+        timer_in.timeout.connect(fade_in)
+        timer_out.timeout.connect(fade_out)
+        timer_in.start(20)
 
     def _notify(self, title, message):
         if self.notify_enabled:
@@ -1980,15 +2733,24 @@ class DownloadManager(QWidget):
             if status == "Finished" and path and not os.path.exists(path):
                 status = "File Missing"
             elif status == "Downloading":
-                status = "Interrupted"
+                # Session may have ended right as the file finished writing,
+                # leaving the DB entry stuck as "Downloading". Promote to
+                # "Finished" when the file is actually present on disk.
+                if path and os.path.exists(path):
+                    status = "Finished"
+                else:
+                    status = "Interrupted"
 
             date     = entry.get("date", "")
             progress = entry.get("progress", None)
             row = self.table.rowCount()
             self.table.insertRow(row)
             self._insert_row_items(row, filename, path, url, status, size, category, date, progress)
-            if url:
-                self.finished_urls[url] = path
+            # Only mark as "already downloaded" if the download truly
+            # finished AND the file still exists on disk.  Interrupted /
+            # cancelled / file-missing entries must NOT block re-downloads.
+            if url and status == "Finished":
+                self.finished_urls[self._social_dedup_key(url)] = path
 
     def _insert_row_items(self, row, filename, path, url, status, size, category, date="", progress=None):
         name_item = QTableWidgetItem(f"  {filename}")
@@ -2040,16 +2802,25 @@ class DownloadManager(QWidget):
                  "status": status, "size": size, "category": category,
                  "date": time.strftime("%Y-%m-%d %H:%M"),
                  "progress": progress}
+        if self.yt_settings.get(url):
+            entry["yt_settings"] = self.yt_settings[url]
         self.history = [e for e in self.history if e.get("url") != url]
         self.history.append(entry)
         save_history(self.history)
 
     def _make_toolbar_svg_btn(self, svg_path_data, icon_color, tooltip, bg_colors, label_text):
-        """Create toolbar button with solid filled SVG icon, soft bg, label, and drop shadow."""
+        """Create toolbar button with gradient outline SVG icon, unified Slate·Blue palette."""
         from PyQt6.QtSvg import QSvgRenderer
         from PyQt6.QtCore import QByteArray
 
-        # Wrapper widget to hold shadow + button
+        # Slate·Blue gradient palette
+        GRAD_C1     = "#64748b"
+        GRAD_C2     = "#3b82f6"
+        LABEL_CLR   = "#3b82f6"
+        HOVER_LIGHT = "rgba(100, 116, 139, 0.10)"
+        HOVER_DARK  = "rgba(59, 130, 246, 0.13)"
+        hover_bg = HOVER_DARK if self.dark_mode else HOVER_LIGHT
+
         wrapper = QWidget()
         wrapper.setFixedSize(76, 74)
         wrapper.setStyleSheet("background: transparent;")
@@ -2062,10 +2833,19 @@ class DownloadManager(QWidget):
         btn.setToolTip(tooltip)
         btn.setCursor(Qt.CursorShape.PointingHandCursor)
 
-        # Render SVG at 3x for HiDPI crispness
+        # Render SVG at 3x for HiDPI — gradient outline style
         render_size = 128
         display_size = 38
-        svg = f'''<svg xmlns="http://www.w3.org/2000/svg" width="{render_size}" height="{render_size}" viewBox="0 0 24 24" fill="{icon_color}" stroke="none">{svg_path_data}</svg>'''
+        svg = f'''<svg xmlns="http://www.w3.org/2000/svg" width="{render_size}" height="{render_size}" viewBox="0 0 24 24"
+              fill="none" stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round">
+            <defs>
+                <linearGradient id="grad" gradientUnits="userSpaceOnUse" x1="2" y1="2" x2="22" y2="22">
+                    <stop offset="0%" stop-color="{GRAD_C1}"/>
+                    <stop offset="100%" stop-color="{GRAD_C2}"/>
+                </linearGradient>
+            </defs>
+            <g stroke="url(#grad)">{svg_path_data}</g>
+        </svg>'''
         renderer = QSvgRenderer(QByteArray(svg.encode()))
         pixmap = QPixmap(render_size, render_size)
         pixmap.fill(QColor(0, 0, 0, 0))
@@ -2088,7 +2868,9 @@ class DownloadManager(QWidget):
         text_lbl = QLabel(label_text)
         text_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         text_lbl.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-        text_lbl.setStyleSheet(f"background: transparent; border: none; color: {icon_color}; font-size: 9px; font-weight: 800; letter-spacing: 0.5px;")
+        text_lbl.setStyleSheet(
+            f"background: transparent; border: none; color: {LABEL_CLR};"
+            "font-size: 9px; font-weight: 800; letter-spacing: 0.5px;")
 
         vbox = QVBoxLayout(btn)
         vbox.setContentsMargins(0, 5, 0, 4)
@@ -2097,19 +2879,22 @@ class DownloadManager(QWidget):
         vbox.addWidget(icon_lbl)
         vbox.addWidget(text_lbl)
 
-        bg_base, bg_hover = bg_colors
         btn.setStyleSheet(f"""
             QPushButton {{
-                background-color: {bg_base};
+                background-color: transparent;
                 border: none;
                 border-radius: 16px;
             }}
             QPushButton:hover {{
-                background-color: {bg_hover};
+                background-color: {hover_bg};
             }}
             QPushButton:pressed {{
-                background-color: {bg_hover};
+                background-color: {hover_bg};
                 padding-top: 1px;
+            }}
+            QPushButton:disabled {{
+                background-color: transparent;
+                opacity: 0.4;
             }}
             QToolTip {{
                 background-color: #1e293b;
@@ -2122,18 +2907,11 @@ class DownloadManager(QWidget):
             }}
         """)
 
-        # Drop shadow for depth
-        shadow = QGraphicsDropShadowEffect(btn)
-        shadow.setBlurRadius(18)
-        shadow.setOffset(0, 4)
-        shadow.setColor(QColor(0, 0, 0, 40))
-        btn.setGraphicsEffect(shadow)
-
         wrapper_layout.addWidget(btn)
         wrapper._inner_btn = btn
         btn._icon_lbl = icon_lbl
         btn._text_lbl = text_lbl
-        btn._icon_color = icon_color
+        btn._icon_color = LABEL_CLR
         btn._svg_path = svg_path_data
         return wrapper
 
@@ -2153,7 +2931,10 @@ class DownloadManager(QWidget):
 
     def _build_ui(self):
         t = self._theme()
-        outer = QVBoxLayout(self)
+        central = QWidget()
+        central.setObjectName("mainWindow")
+        self.setCentralWidget(central)
+        outer = QVBoxLayout(central)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
 
@@ -2211,6 +2992,8 @@ class DownloadManager(QWidget):
         sidebar_layout.setContentsMargins(12, 0, 12, 12)
         sidebar_layout.setSpacing(0)
 
+        from PyQt6.QtWidgets import QFrame
+
         self._sidebar_title = QWidget()
         title_layout = QHBoxLayout(self._sidebar_title)
         title_layout.setContentsMargins(8, 16, 8, 16)
@@ -2227,13 +3010,22 @@ class DownloadManager(QWidget):
                 pix = QPixmap(png_path).scaled(36, 36, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
         if pix and not pix.isNull():
             icon_label.setPixmap(pix)
-        title_layout.addWidget(icon_label)
+        title_layout.addWidget(icon_label, 0, Qt.AlignmentFlag.AlignVCenter)
 
-        self._title_label = QLabel("LDM")
-        self._title_label.setStyleSheet("font-size: 18px; font-weight: 800; letter-spacing: 4px;")
-        title_layout.addWidget(self._title_label)
+        self._title_label = GradientTextLabel(
+            "LDM", family=self._title_font_family,
+            size=22, letter_spacing=5,
+        )
+        title_layout.addWidget(self._title_label, 0, Qt.AlignmentFlag.AlignVCenter)
         title_layout.addStretch()
         sidebar_layout.addWidget(self._sidebar_title)
+
+        self._sidebar_sep = QFrame()
+        self._sidebar_sep.setObjectName("sidebarSep")
+        self._sidebar_sep.setFixedHeight(1)
+        sidebar_layout.addSpacing(4)
+        sidebar_layout.addWidget(self._sidebar_sep)
+        sidebar_layout.addSpacing(10)
 
         self._cat_section_label = QLabel("CATEGORIES")
         self._cat_section_label.setObjectName("catSectionLabel")
@@ -2247,6 +3039,7 @@ class DownloadManager(QWidget):
 
         self._cat_buttons = []
         self._cat_badges = []
+        self._cat_accents = []
         self._current_cat_row = 0
         for i, (label, emoji, color) in enumerate(CATEGORIES):
             btn = QWidget()
@@ -2255,8 +3048,15 @@ class DownloadManager(QWidget):
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
             btn.setFixedHeight(40)
             btn_layout = QHBoxLayout(btn)
-            btn_layout.setContentsMargins(18, 0, 14, 0)
+            btn_layout.setContentsMargins(0, 0, 14, 0)
             btn_layout.setSpacing(0)
+
+            accent = QWidget()
+            accent.setObjectName(f"catAccent_{i}")
+            accent.setFixedWidth(3)
+            accent.setFixedHeight(22)
+            btn_layout.addWidget(accent)
+            btn_layout.addSpacing(15)
 
             text_label = QLabel(f"{emoji}  {label}")
             text_label.setObjectName(f"catText_{i}")
@@ -2275,6 +3075,7 @@ class DownloadManager(QWidget):
             cat_layout.addWidget(btn)
             self._cat_buttons.append(btn)
             self._cat_badges.append(badge)
+            self._cat_accents.append(accent)
 
         cat_layout.addStretch()
         sidebar_layout.addWidget(self._cat_scroll, 1)
@@ -2307,34 +3108,35 @@ class DownloadManager(QWidget):
         toolbar_layout.setContentsMargins(8, 8, 8, 8)
         toolbar_layout.setSpacing(6)
 
-        # Toolbar buttons — each returns a wrapper; ._inner_btn is the clickable QPushButton
+        # Toolbar buttons — stroke outline icons, unified Slate·Blue gradient palette
+        # icon_color and bg_colors args are ignored by the new method but kept for API compat
         self._start_wrap = self._make_toolbar_svg_btn(
-            '<rect x="9" y="2" width="6" height="12" rx="1.5"/><path d="M5.5 13L12 20l6.5-7h-4V13h-5v0h-4z"/><rect x="4" y="20" width="16" height="3" rx="1.5"/>',
-            "#16a34a", "Start Download", ("#f0fdf4", "#dcfce7"), "START")
+            '<line x1="12" y1="3" x2="12" y2="15"/><polyline points="8,11 12,15 16,11"/><line x1="4" y1="20" x2="20" y2="20"/>',
+            "", "Start Download", ("", ""), "START")
         self._resume_wrap = self._make_toolbar_svg_btn(
-            '<path d="M5 3.5a1.5 1.5 0 012.3-1.3l13 8a1.5 1.5 0 010 2.6l-13 8A1.5 1.5 0 015 19.5V3.5z"/>',
-            "#3b82f6", "Resume Download", ("#eff6ff", "#dbeafe"), "RESUME")
+            '<polygon points="6,4 20,12 6,20"/>',
+            "", "Resume Download", ("", ""), "RESUME")
         self._cancel_wrap = self._make_toolbar_svg_btn(
-            '<path d="M12 2a10 10 0 100 20 10 10 0 000-20zm4.7 13.3a1 1 0 01-1.4 1.4L12 13.4l-3.3 3.3a1 1 0 01-1.4-1.4L10.6 12 7.3 8.7a1 1 0 011.4-1.4L12 10.6l3.3-3.3a1 1 0 011.4 1.4L13.4 12l3.3 3.3z"/>',
-            "#ef4444", "Cancel Download", ("#fef2f2", "#fecaca"), "CANCEL")
+            '<circle cx="12" cy="12" r="9"/><line x1="9" y1="9" x2="15" y2="15"/><line x1="15" y1="9" x2="9" y2="15"/>',
+            "", "Cancel Download", ("", ""), "CANCEL")
         self._clear_item_wrap = self._make_toolbar_svg_btn(
-            '<path d="M7 4a1 1 0 011-1h8a1 1 0 011 1v1h3a1 1 0 110 2h-1l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7H4a1 1 0 110-2h3V4z"/>',
-            "#f97316", "Remove Item", ("#fff7ed", "#fed7aa"), "REMOVE")
+            '<polyline points="3,6 21,6"/><path d="M8 6V4h8v2"/><path d="M19 6l-1 14H6L5 6"/><line x1="10" y1="11" x2="10" y2="17"/><line x1="14" y1="11" x2="14" y2="17"/>',
+            "", "Remove Item", ("", ""), "REMOVE")
         self._clear_wrap = self._make_toolbar_svg_btn(
-            '<path d="M7 4a1 1 0 011-1h8a1 1 0 011 1v1h3a1 1 0 110 2h-1l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7H4a1 1 0 110-2h3V4z"/><line x1="4" y1="20" x2="20" y2="4" stroke="#ea580c" stroke-width="2.5"/>',
-            "#ea580c", "Clear All", ("#fff7ed", "#fed7aa"), "CLEAR")
+            '<polyline points="3,6 21,6"/><path d="M8 6V4h8v2"/><path d="M19 6l-1 14H6L5 6"/><line x1="10" y1="11" x2="10" y2="17"/><line x1="14" y1="11" x2="14" y2="17"/><line x1="3" y1="3" x2="21" y2="21"/>',
+            "", "Clear All", ("", ""), "CLEAR")
         self._open_folder_wrap = self._make_toolbar_svg_btn(
-            '<path d="M2 6a2 2 0 012-2h5.586a1 1 0 01.707.293L12 6h8a2 2 0 012 2v10a2 2 0 01-2 2H4a2 2 0 01-2-2V6z"/>',
-            "#d97706", "Open Folder", ("#fffbeb", "#fde68a"), "OPEN")
+            '<path d="M3 7a2 2 0 012-2h3.586a1 1 0 01.707.293L11 7h9a2 2 0 012 2v10a2 2 0 01-2 2H5a2 2 0 01-2-2V7z"/>',
+            "", "Open Folder", ("", ""), "OPEN")
         self._yt_wrap = self._make_toolbar_svg_btn(
-            '<path d="M23 7l-7 5 7 5V7zM14 5H3a2 2 0 00-2 2v10a2 2 0 002 2h11a2 2 0 002-2V7a2 2 0 00-2-2z"/>',
-            "#ef4444", "YouTube Downloader", ("#fef2f2", "#fecaca"), "YOUTUBE")
+            '<rect x="2" y="6" width="14" height="12" rx="2"/><polyline points="16,9.5 22,6 22,18 16,14.5"/>',
+            "", "YouTube Downloader", ("", ""), "YOUTUBE")
         self._about_wrap = self._make_toolbar_svg_btn(
-            '<path d="M12 2a10 10 0 100 20 10 10 0 000-20zm-.5 5h1a.5.5 0 01.5.5v1a.5.5 0 01-.5.5h-1a.5.5 0 01-.5-.5v-1a.5.5 0 01.5-.5zm-.5 4h2v6h-2z"/>',
-            "#64748b", "About", ("#f8fafc", "#f1f5f9"), "ABOUT")
+            '<circle cx="12" cy="12" r="9"/><line x1="12" y1="8" x2="12" y2="8.01" stroke-width="2.2"/><line x1="12" y1="11.5" x2="12" y2="16.5"/>',
+            "", "About", ("", ""), "ABOUT")
         self._donate_wrap = self._make_toolbar_svg_btn(
             '<path d="M20.84 4.61a5.5 5.5 0 00-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 00-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 000-7.78z"/>',
-            "#ec4899", "Support Development", ("#fdf2f8", "#fce7f3"), "DONATE")
+            "", "Support Development", ("", ""), "DONATE")
 
         # Extract inner buttons for signal connections
         self.start_btn = self._start_wrap._inner_btn
@@ -2355,8 +3157,6 @@ class DownloadManager(QWidget):
         toolbar_layout.addStretch()
 
         self.start_btn.clicked.connect(self.start_manual)
-        self.resume_btn.setEnabled(False)
-        self._set_btn_opacity(self.resume_btn, 0.3)
         self.resume_btn.clicked.connect(self._resume_selected)
         self.cancel_btn.clicked.connect(self.cancel_last)
         self.clear_item_btn.clicked.connect(self.clear_item)
@@ -2401,10 +3201,49 @@ class DownloadManager(QWidget):
         self.table.horizontalHeader().sectionResized.connect(self._on_column_resized)
         self.progress_delegate = ProgressDelegate(self.table)
         self.table.setItemDelegateForColumn(1, self.progress_delegate)
+        self._filename_delegate = FilenameFontDelegate(parent=self.table)
+        self.table.setItemDelegateForColumn(0, self._filename_delegate)  # File Name (Bangla fallback)
+        self._numeric_delegate = NumericFontDelegate(
+            family=self._title_font_family, weight=QFont.Weight.Medium, parent=self.table)
+        self.table.setItemDelegateForColumn(2, self._numeric_delegate)  # Downloaded
+        self.table.setItemDelegateForColumn(3, self._numeric_delegate)  # Speed
+        self.table.setItemDelegateForColumn(4, self._numeric_delegate)  # ETA
         self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self.show_context_menu)
-        content_layout.addWidget(self.table)
+
+        self._table_stack = QStackedWidget()
+        self._table_stack.addWidget(self.table)
+
+        self._empty_state = QWidget()
+        self._empty_state.setObjectName("emptyState")
+        empty_layout = QVBoxLayout(self._empty_state)
+        empty_layout.setContentsMargins(20, 20, 20, 20)
+        empty_layout.setSpacing(12)
+        empty_layout.addStretch()
+
+        self._empty_icon = QLabel("⬇")
+        self._empty_icon.setObjectName("emptyIcon")
+        self._empty_icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        empty_layout.addWidget(self._empty_icon)
+
+        self._empty_title = QLabel("No downloads yet")
+        self._empty_title.setObjectName("emptyTitle")
+        self._empty_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        empty_layout.addWidget(self._empty_title)
+
+        self._empty_hint = QLabel("Paste a URL above or use the browser extension")
+        self._empty_hint.setObjectName("emptyHint")
+        self._empty_hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._empty_hint.setWordWrap(True)
+        empty_layout.addWidget(self._empty_hint)
+
+        empty_layout.addStretch()
+        self._table_stack.addWidget(self._empty_state)
+
+        content_layout.addWidget(self._table_stack)
         self.table.itemSelectionChanged.connect(self._on_selection_changed)
+        self.table.model().rowsInserted.connect(lambda *_: self._update_empty_state())
+        self.table.model().rowsRemoved.connect(lambda *_: self._update_empty_state())
 
         # Status bar
         self._status_bar = QLabel("Ready")
@@ -2474,13 +3313,9 @@ class DownloadManager(QWidget):
         accent = t.get("accent", "#2f81f7")
 
         # ── Main window ───────────────────────────────────────────────────────
-        self.setStyleSheet(f"""
+        self.centralWidget().setStyleSheet(f"""
             QWidget#mainWindow {{
                 background-color: {t['bg']};
-                color: {t['text']};
-                font-family: -apple-system, 'Segoe UI', Ubuntu, sans-serif;
-            }}
-            QWidget#mainWindow * {{
                 color: {t['text']};
                 font-family: -apple-system, 'Segoe UI', Ubuntu, sans-serif;
             }}
@@ -2500,12 +3335,16 @@ class DownloadManager(QWidget):
             background-color: transparent;
             border-bottom: none;
         """)
-        self._title_label.setStyleSheet(f"""
-            color: {accent};
-            font-size: 18px;
-            font-weight: 800;
-            letter-spacing: 4px;
-            background: transparent;
+        self._title_label.set_accent(accent)
+
+        # Subtle separator between wordmark and categories
+        sep_color = t.get("border", "#cbd5e1")
+        self._sidebar_sep.setStyleSheet(f"""
+            QFrame#sidebarSep {{
+                background-color: {sep_color};
+                border: none;
+                margin: 0 10px;
+            }}
         """)
 
         self._cat_section_label.setStyleSheet(f"""
@@ -2514,7 +3353,7 @@ class DownloadManager(QWidget):
                 font-size: 10px;
                 font-weight: 600;
                 letter-spacing: 1.5px;
-                padding: 16px 20px 6px 20px;
+                padding: 4px 20px 6px 20px;
                 background: transparent;
             }}
         """)
@@ -2522,6 +3361,7 @@ class DownloadManager(QWidget):
             QWidget#catScroll {{ background: transparent; }}
         """)
         self._style_cat_buttons()
+        self._style_empty_state()
 
         # ── Content area ───────────────────────────────────────────────────────
         self._content_widget.setStyleSheet(f"background-color: {t['bg']};")
@@ -2726,6 +3566,7 @@ class DownloadManager(QWidget):
         for i, (label, emoji, color) in enumerate(CATEGORIES):
             btn = self._cat_buttons[i]
             badge = self._cat_badges[i]
+            accent = self._cat_accents[i]
             is_sel = (i == self._current_cat_row)
             if is_sel:
                 r, g, b = int(color[1:3], 16), int(color[3:5], 16), int(color[5:7], 16)
@@ -2733,13 +3574,18 @@ class DownloadManager(QWidget):
                     QWidget#catBtn_{i} {{
                         background: rgba({r},{g},{b}, 0.15);
                         border-radius: 12px;
-                        border-left: 3px solid {color};
                     }}
                     QLabel#catText_{i} {{
                         color: {color};
                         font-size: 14px;
                         font-weight: 700;
                         background: transparent;
+                    }}
+                """)
+                accent.setStyleSheet(f"""
+                    QWidget#catAccent_{i} {{
+                        background-color: {color};
+                        border-radius: 1px;
                     }}
                 """)
                 badge.setStyleSheet(f"""
@@ -2757,13 +3603,17 @@ class DownloadManager(QWidget):
                     QWidget#catBtn_{i} {{
                         background: transparent;
                         border-radius: 12px;
-                        border-left: 3px solid transparent;
                     }}
                     QLabel#catText_{i} {{
                         color: {t['muted']};
                         font-size: 14px;
                         font-weight: 500;
                         background: transparent;
+                    }}
+                """)
+                accent.setStyleSheet(f"""
+                    QWidget#catAccent_{i} {{
+                        background-color: transparent;
                     }}
                 """)
                 badge.setStyleSheet(f"""
@@ -2776,6 +3626,27 @@ class DownloadManager(QWidget):
                         padding: 0px 6px;
                     }}
                 """)
+
+    def _update_empty_state(self):
+        if not hasattr(self, "_table_stack"):
+            return
+        is_empty = self.table.rowCount() == 0
+        self._table_stack.setCurrentIndex(1 if is_empty else 0)
+
+    def _style_empty_state(self):
+        if not hasattr(self, "_empty_state"):
+            return
+        t = THEMES["dark" if self.dark_mode else "light"]
+        self._empty_state.setStyleSheet(f"QWidget#emptyState {{ background-color: {t['bg']}; }}")
+        self._empty_icon.setStyleSheet(
+            f"QLabel#emptyIcon {{ color: {t['faint']}; font-size: 56px; background: transparent; }}"
+        )
+        self._empty_title.setStyleSheet(
+            f"QLabel#emptyTitle {{ color: {t['muted']}; font-size: 16px; font-weight: 600; background: transparent; }}"
+        )
+        self._empty_hint.setStyleSheet(
+            f"QLabel#emptyHint {{ color: {t['faint']}; font-size: 13px; background: transparent; }}"
+        )
 
     def filter_by_search(self, text):
         text = text.lower().strip()
@@ -2960,19 +3831,38 @@ class DownloadManager(QWidget):
             btn.setStyleSheet("QPushButton { background-color: #2563eb; color: white; } QPushButton:hover { background-color: #1d4ed8; }")
         ))
 
-    def open_youtube_dialog(self, prefill_url=""):
-        dialog = YouTubeDialog(self, prefill_url=prefill_url, dark=self.dark_mode)
+    def open_youtube_dialog(self, prefill_url="", skip_fetch=False):
+        dialog = YouTubeDialog(self, prefill_url=prefill_url, dark=self.dark_mode, skip_fetch=skip_fetch)
         dialog.download_started.connect(self._on_yt_download_started)
         dialog.download_progress.connect(self._on_yt_progress)
         dialog.download_finished.connect(self._on_yt_finished)
+        dialog.yt_settings_captured.connect(self._on_yt_settings)
         if not hasattr(self, '_yt_dialogs'):
             self._yt_dialogs = []
         self._yt_dialogs.append(dialog)
         self._yt_dialogs = [d for d in self._yt_dialogs if d.isVisible() or d is dialog]
         dialog.finished.connect(lambda: self._yt_dialogs.remove(dialog) if dialog in self._yt_dialogs else None)
         dialog.show()
+        return dialog
+
+    def _on_yt_settings(self, url, settings):
+        self.yt_settings[url] = dict(settings)
+        # If this URL already has a history row, update it so resume survives restart
+        for e in self.history:
+            if e.get("url") == url:
+                e["yt_settings"] = dict(settings)
+        save_history(self.history)
 
     def open_stream_dialog(self, url="", filename="", page_referer=""):
+        # If already downloaded, show the same "Already Downloaded" dialog the
+        # core downloader uses — let the user choose to skip or download with a
+        # new name.  "rename" → proceed with a unique filename; anything else →
+        # abort so the user isn't surprised by a silent duplicate.
+        existing_path = self.check_already_finished(url)
+        if existing_path:
+            if self._show_already_downloaded_dialog(existing_path) != "rename":
+                return
+            filename = self._resolve_unique_name(filename or os.path.basename(url.split("?")[0]) or "video.mp4")
         dialog = StreamDialog(self, url=url, filename=filename, page_referer=page_referer, dark=self.dark_mode)
         dialog.download_started.connect(self._on_yt_download_started)
         dialog.download_progress.connect(self._on_yt_progress)
@@ -3009,15 +3899,9 @@ class DownloadManager(QWidget):
     def open_core_dialog(self, url="", filename="", referer=""):
         existing_path = self.check_already_finished(url)
         if existing_path:
-            msg = QMessageBox(self)
-            msg.setWindowTitle("Already Downloaded")
-            msg.setText(f"<b>{os.path.basename(existing_path)}</b> has already been downloaded.")
-            msg.setInformativeText("Do you want to download it again?")
-            msg.setIcon(QMessageBox.Icon.Question)
-            msg.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel)
-            msg.setDefaultButton(QMessageBox.StandardButton.Cancel)
-            if msg.exec() != QMessageBox.StandardButton.Yes:
+            if self._show_already_downloaded_dialog(existing_path) != "rename":
                 return
+            # "Download with New Name" chosen -- proceed with a unique filename below
         # Pre-resolve a globally unique name (disk + in-progress table rows)
         unique_filename = self._resolve_unique_name(filename)
         dialog = CoreDownloaderDialog(self, url=url, filename=unique_filename, referer=referer, dark=self.dark_mode)
@@ -3035,6 +3919,28 @@ class DownloadManager(QWidget):
     def _on_yt_download_started(self, url, display_name, folder):
         full_path = os.path.join(folder, display_name)
         category = get_category(display_name)
+
+        # Resume path (or repeat-download of same URL): an existing row is
+        # already registered — reuse it instead of inserting a duplicate.
+        existing = self.yt_url_to_row.get(url)
+        if existing is not None and 0 <= existing < self.table.rowCount():
+            row = existing
+            name_item = self.table.item(row, 0)
+            if name_item:
+                name_item.setText(f"  {display_name}")
+                name_item.setIcon(get_file_icon(display_name))
+                name_item.setData(Qt.ItemDataRole.UserRole, full_path)
+            stat_item = self.table.item(row, 5)
+            if stat_item:
+                stat_item.setText("Downloading")
+                stat_item.setForeground(QColor("#f85149"))
+            self.row_progress[row] = 0
+            self._update_progress(row, 0)
+            self._update_cell(row, 2, "—")
+            self._update_cell(row, 3, "—")
+            self._update_cell(row, 4, "—")
+            return
+
         row = self.table.rowCount()
         self.table.insertRow(row)
         _now = time.strftime("%Y-%m-%d %H:%M")
@@ -3072,6 +3978,12 @@ class DownloadManager(QWidget):
                 name_item = self.table.item(row, 0)
                 filename = name_item.text().strip() if name_item else ""
                 path = name_item.data(Qt.ItemDataRole.UserRole) if name_item else ""
+                # yt-dlp reports per-stream bytes during progress (audio track
+                # alone for a/v merges), so the final merged size is only known
+                # after the file is written — read it off disk now.
+                if path and os.path.exists(path):
+                    disk_size = format_size(os.path.getsize(path))
+                    self._update_cell(row, 2, f"{disk_size} / {disk_size}")
                 size = self.table.item(row, 2).text() if self.table.item(row, 2) else "—"
                 category = get_category(filename)
                 self._add_to_history(url, filename, path, "Finished", size, category)
@@ -3169,13 +4081,124 @@ class DownloadManager(QWidget):
             if any(d in host for d in ('twitter.com', 'x.com')):
                 m = re.search(r'/status/(\d+)', url)
                 if m: return f'tw_{m.group(1)}'
+            # pvvstream CDN — same video is re-issued with a fresh ?secure= token
+            # on every page load.  Key on VIDEO_ID + RES_ID so recaptures of the
+            # same video are correctly recognised across token refreshes.
+            _pv = re.search(r'/videos/([^/]+)/([^/]+)/vid_\w+\.mp4', url, re.I)
+            if _pv:
+                return f'pvv_{_pv.group(1)}_{_pv.group(2)}'
         except Exception:
             pass
         return url
 
     def check_already_finished(self, url):
         key = self._social_dedup_key(url)
-        return self.finished_urls.get(key, None)
+        path = self.finished_urls.get(key)
+        if path is None:
+            return None
+        # If the file no longer exists on disk (deleted, moved, renamed),
+        # treat it as never downloaded and remove the stale entry so it
+        # never causes a false-positive again.
+        if not os.path.exists(path):
+            del self.finished_urls[key]
+            return None
+        return path
+
+    def _show_already_downloaded_dialog(self, existing_path):
+        """
+        Show a themed dialog when a URL was already downloaded.
+        Returns 'rename'  → proceed with a new auto-generated filename.
+        Returns 'skip'    → do nothing.
+        """
+        t = self._theme()
+        accent = t.get("accent", "#2563eb")
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Already Downloaded")
+        dialog.setFixedWidth(400)
+        dialog.setStyleSheet(f"""
+            QDialog {{
+                background-color: {t['surface']};
+                color: {t['text']};
+            }}
+            QLabel {{ color: {t['text']}; background: transparent; }}
+            QPushButton {{
+                border-radius: 10px;
+                font-size: 13px;
+                font-weight: 600;
+                padding: 9px 22px;
+                border: none;
+            }}
+        """)
+
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(28, 24, 28, 20)
+        layout.setSpacing(10)
+
+        # -- Icon + title row
+        title_row = QHBoxLayout()
+        icon_lbl = QLabel("\u26a0\ufe0f")
+        icon_lbl.setStyleSheet("font-size: 26px; background: transparent;")
+        title_lbl = QLabel("Already Downloaded")
+        title_lbl.setStyleSheet(f"font-size: 16px; font-weight: 700; color: {t['text']};")
+        title_row.addWidget(icon_lbl)
+        title_row.addSpacing(8)
+        title_row.addWidget(title_lbl)
+        title_row.addStretch()
+        layout.addLayout(title_row)
+
+        # -- Body
+        fname = os.path.basename(existing_path)
+        body = QLabel(
+            f"<b>{fname}</b> has already been downloaded.<br>"
+            f"<span style='color:{t['muted']};font-size:12px;'>"
+            f"What would you like to do with this new download?</span>"
+        )
+        body.setWordWrap(True)
+        body.setStyleSheet(f"font-size: 13px; color: {t['text']};")
+        layout.addWidget(body)
+
+        layout.addSpacing(6)
+
+        # -- Buttons
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(10)
+
+        btn_rename = QPushButton("\u2b07  Download with New Name")
+        btn_rename.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {accent};
+                color: #ffffff;
+            }}
+            QPushButton:hover {{
+                background-color: {accent}cc;
+            }}
+        """)
+
+        btn_skip = QPushButton("Skip")
+        btn_skip.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {t['bg']};
+                color: {t['muted']};
+                border: 1px solid {t['border']};
+            }}
+            QPushButton:hover {{
+                background-color: {t['category_hover']};
+                color: {t['text']};
+            }}
+        """)
+
+        result = ["skip"]
+        btn_rename.clicked.connect(lambda: (result.__setitem__(0, "rename"), dialog.accept()))
+        btn_skip.clicked.connect(dialog.reject)
+
+        btn_row.addStretch()
+        btn_row.addWidget(btn_skip)
+        btn_row.addWidget(btn_rename)
+        layout.addLayout(btn_row)
+
+        dialog.exec()
+        return result[0]
 
     def show_context_menu(self, pos):
         row = self.table.rowAt(pos.y())
@@ -3404,21 +4427,81 @@ class DownloadManager(QWidget):
         if not url:
             return
 
-        # Check for partial file
-        resume_from = 0
-        if path and os.path.exists(path):
-            resume_from = os.path.getsize(path)
-
         # Reset row status
         stat_item = self.table.item(row, 5)
         if stat_item:
             stat_item.setText("Downloading")
             stat_item.setForeground(QColor("#2f81f7"))
-        self._update_progress(row, 0 if resume_from == 0 else int(resume_from / max(resume_from + 1, 1) * 100))
         self._update_cell(row, 3, "—")
         self._update_cell(row, 4, "—")
-
         category = get_category(filename)
+
+        # YouTube: restart from scratch via the full YT dialog.
+        # Saved settings (if any) let us skip the Fetch/quality step.
+        if is_youtube_url(url):
+            folder = os.path.dirname(path) if path else os.path.join(HOME, "Downloads", "Videos")
+            os.makedirs(folder, exist_ok=True)
+            base = os.path.splitext(os.path.basename(path or filename))[0] or "video"
+            # Scrub partial files so yt-dlp truly starts fresh.
+            for partial in glob.glob(os.path.join(folder, glob.escape(base) + ".*")):
+                try:
+                    os.remove(partial)
+                except OSError:
+                    pass
+
+            self.row_progress[row] = 0
+            self._update_progress(row, 0)
+            self._update_cell(row, 2, "—")
+            self.yt_url_to_row[url] = row
+
+            # Close any leftover YT dialog (and Stream dialog) for this URL so
+            # the user isn't juggling the old cancelled window alongside the new one.
+            for d in list(getattr(self, "_yt_dialogs", [])):
+                try:
+                    d_url = getattr(d, "_current_url", "") or d.url_input.text().strip()
+                    if d_url == url:
+                        d.close()
+                except Exception:
+                    pass
+            for d in list(getattr(self, "_stream_dialogs", [])):
+                try:
+                    if getattr(d, "_url", "") == url:
+                        d.close()
+                except Exception:
+                    pass
+
+            settings = self.yt_settings.get(url)
+            dialog = self.open_youtube_dialog(prefill_url=url, skip_fetch=bool(settings))
+            if settings:
+                dialog.start_with_saved_settings(url, settings, base)
+            return
+
+        # HLS/DASH manifests can't be byte-resumed — the URL points to a
+        # playlist, not the media. Curling it would save the manifest text
+        # as the .mp4 (pseudo file). Re-run through the stream downloader
+        # from scratch instead, after scrubbing any garbage left behind.
+        url_path_lower = url.split("?", 1)[0].lower()
+        if url_path_lower.endswith(".m3u8") or url_path_lower.endswith(".mpd"):
+            if path and os.path.exists(path):
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+            self.row_progress[row] = 0
+            self._update_progress(row, 0)
+            self._update_cell(row, 2, "—")
+            self.open_stream_dialog(
+                url=url,
+                filename=filename or "stream.mp4",
+                page_referer="",
+            )
+            return
+
+        # HTTP download: use byte-offset resume
+        resume_from = 0
+        if path and os.path.exists(path):
+            resume_from = os.path.getsize(path)
+        self._update_progress(row, 0 if resume_from == 0 else int(resume_from / max(resume_from + 1, 1) * 100))
         thread = DownloadThread(url, filename, False, "", resume_from)
         self.threads.append(thread)
         thread.progress.connect(  lambda v, r=row: self._update_progress(r, v))
@@ -3478,13 +4561,15 @@ class DownloadManager(QWidget):
         name  = path.split("/")[-1] or ""
         ext   = name.split(".")[-1].lower() if "." in name else ""
         page_exts  = {"html", "htm", "php", "asp", "aspx", "jsp"}
-        video_exts = {"mp4", "mkv", "webm", "avi", "mov", "ts", "flv", "m4v"}
         # No extension or page extension = video hosting page, try yt-dlp
         if not ext or ext in page_exts:
             ts = time.strftime("%Y-%m-%d_%H-%M-%S")
-            self.open_stream_dialog(url=url, filename=f"video_{ts}.mp4")
+            self.open_stream_dialog(url=normalize_stream_url(url), filename=f"video_{ts}.mp4")
             return
-        is_video = ext in video_exts or ".m3u8" in lurl or "vimeo" in lurl
+        # Direct video files (mp4/mkv/...) download via HTTP — yt-dlp's generic
+        # extractor fetches the URL as a webpage first, which adds no value here
+        # and breaks on CDNs with non-clean TLS shutdowns (SSL EOF).
+        is_video = ".m3u8" in lurl or "vimeo" in lurl
         if not name:
             name = "download"
         self._check_and_enqueue(url, name, is_video, "")
@@ -3492,15 +4577,9 @@ class DownloadManager(QWidget):
     def _check_and_enqueue(self, url, filename, is_video=False, referer=""):
         existing_path = self.check_already_finished(url)
         if existing_path:
-            msg = QMessageBox(self)
-            msg.setWindowTitle("Already Downloaded")
-            msg.setText(f"<b>{os.path.basename(existing_path)}</b> has already been downloaded.")
-            msg.setInformativeText("Do you want to download it again?")
-            msg.setIcon(QMessageBox.Icon.Question)
-            msg.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel)
-            msg.setDefaultButton(QMessageBox.StandardButton.Cancel)
-            if msg.exec() != QMessageBox.StandardButton.Yes:
+            if self._show_already_downloaded_dialog(existing_path) != "rename":
                 return
+            # "Download with New Name" chosen -- _enqueue auto-resolves a unique filename
         self._enqueue(url, filename, is_video, referer)
 
     def _enqueue(self, url, filename, is_video=False, referer=""):
@@ -3573,6 +4652,12 @@ class DownloadManager(QWidget):
                 self._update_progress(row, 100)
                 self._update_cell(row, 4, "—")
                 self.finished_urls[self._social_dedup_key(url)] = path
+                # Use the actual on-disk size; multi-stream YT downloads report
+                # per-stream bytes during progress, so the final merged size is
+                # only known after the file is written.
+                if path and os.path.exists(path):
+                    disk_size = format_size(os.path.getsize(path))
+                    self._update_cell(row, 2, f"{disk_size} / {disk_size}")
                 size = self.table.item(row, 2).text() if self.table.item(row, 2) else "—"
                 self._add_to_history(url, filename, path, "Finished", size, category)
                 self._notify("Download Complete", f"{filename} finished downloading.")
@@ -3587,59 +4672,23 @@ class DownloadManager(QWidget):
 
     def _resume_selected(self):
         row = self.table.currentRow()
-        if row >= 0:
-            self._resume_download(row)
-            
-    def _on_selection_changed(self):
-        row = self.table.currentRow()
         if row < 0:
-            self.resume_btn.setEnabled(False)
-            self._set_btn_opacity(self.resume_btn, 0.3)
+            self._show_toast("Select a download to resume")
             return
         stat_item = self.table.item(row, 5)
         status = stat_item.text() if stat_item else ""
-        resumable = status not in ("Finished", "File Missing", "Downloading", "")
-        self.resume_btn.setEnabled(resumable)
-        self._set_btn_opacity(self.resume_btn, 1.0 if resumable else 0.3)
+        if status == "Downloading":
+            self._show_toast("Already downloading")
+        elif status in ("Finished", "File Missing"):
+            self._show_toast("Nothing to resume — download is already finished")
+        elif status == "":
+            self._show_toast("Select an interrupted download to resume")
+        else:
+            self._resume_download(row)
+
+    def _on_selection_changed(self):
+        pass
     
-    def _set_btn_opacity(self, btn, opacity):
-        dimmed = opacity < 1.0
-        if hasattr(btn, '_icon_lbl'):
-            icon_color = getattr(btn, '_icon_color', '#3b82f6')
-            if dimmed:
-                # Convert hex to faded version
-                r, g, b = int(icon_color[1:3], 16), int(icon_color[3:5], 16), int(icon_color[5:7], 16)
-                faded = f"rgba({r},{g},{b},0.25)"
-                btn._icon_lbl.setStyleSheet(f"background: transparent; border: none; opacity: 0.3;")
-                btn._text_lbl.setStyleSheet(f"background: transparent; border: none; color: {faded}; font-size: 9px; font-weight: 800; letter-spacing: 0.5px;")
-                # Re-render icon with faded color
-                self._recolor_btn_icon(btn, faded)
-            else:
-                btn._icon_lbl.setStyleSheet("background: transparent; border: none;")
-                btn._text_lbl.setStyleSheet(f"background: transparent; border: none; color: {icon_color}; font-size: 9px; font-weight: 800; letter-spacing: 0.5px;")
-                self._recolor_btn_icon(btn, icon_color)
-
-    def _recolor_btn_icon(self, btn, color):
-        if not hasattr(btn, '_svg_path') or not hasattr(btn, '_icon_lbl'):
-            return
-        from PyQt6.QtSvg import QSvgRenderer
-        from PyQt6.QtCore import QByteArray
-        render_size = 128
-        display_size = 38
-        svg = f'<svg xmlns="http://www.w3.org/2000/svg" width="{render_size}" height="{render_size}" viewBox="0 0 24 24" fill="{color}" stroke="none">{btn._svg_path}</svg>'
-        renderer = QSvgRenderer(QByteArray(svg.encode()))
-        pixmap = QPixmap(render_size, render_size)
-        pixmap.fill(QColor(0, 0, 0, 0))
-        p = QPainter(pixmap)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
-        renderer.render(p)
-        p.end()
-        display_pixmap = pixmap.scaled(display_size, display_size,
-                                       Qt.AspectRatioMode.KeepAspectRatio,
-                                       Qt.TransformationMode.SmoothTransformation)
-        btn._icon_lbl.setPixmap(display_pixmap)
-
     def _open_donate(self):
         t = self._theme()
         accent = t.get("accent", "#2563eb")
@@ -3724,16 +4773,51 @@ class DownloadManager(QWidget):
                 t.stop()
                 break
 
+    def _delete_partials_for_row(self, row):
+        """Delete any on-disk partial files for an unfinished download row."""
+        name_item = self.table.item(row, 0)
+        stat_item = self.table.item(row, 5)
+        if not name_item or not stat_item:
+            return
+        status = stat_item.text()
+        if status == "Finished":
+            return
+        path = name_item.data(Qt.ItemDataRole.UserRole)
+        url  = name_item.data(Qt.ItemDataRole.UserRole + 2)
+        if not path:
+            return
+        folder = os.path.dirname(path)
+        if url and is_youtube_url(url) and folder and os.path.isdir(folder):
+            # yt-dlp produces <base>.mp4, <base>.f137.mp4, <base>.f251.m4a,
+            # <base>.*.part, <base>.*.ytdl ...  — glob-clean the lot.
+            base = os.path.splitext(os.path.basename(path))[0]
+            if base:
+                for f in glob.glob(os.path.join(folder, glob.escape(base) + ".*")):
+                    try:
+                        os.remove(f)
+                    except OSError:
+                        pass
+            return
+        # Plain HTTP download: the file and any sibling .part
+        for candidate in (path, path + ".part"):
+            if os.path.exists(candidate):
+                try:
+                    os.remove(candidate)
+                except OSError:
+                    pass
+
     def clear_item(self):
         row = self.table.currentRow()
         if row >= 0:
+            self._delete_partials_for_row(row)
             name_item = self.table.item(row, 0)
             if name_item:
                 url = name_item.data(Qt.ItemDataRole.UserRole + 2)
                 if url:
                     self.history = [e for e in self.history if e.get("url") != url]
                     save_history(self.history)
-                    self.finished_urls.pop(url, None)
+                    self.finished_urls.pop(self._social_dedup_key(url), None)
+                    self.yt_settings.pop(url, None)
             self.table.removeRow(row)
             self.row_progress.pop(row, None)
             self.all_rows = [r for r in self.all_rows if r["row"] != row]
@@ -3748,9 +4832,12 @@ class DownloadManager(QWidget):
             self._update_category_counts()
 
     def clear_list(self):
+        for row in range(self.table.rowCount()):
+            self._delete_partials_for_row(row)
         self.history = []
         save_history(self.history)
         self.finished_urls = {}
+        self.yt_settings = {}
         self.table.setRowCount(0)
         self.all_rows = []
         self.row_progress = {}
