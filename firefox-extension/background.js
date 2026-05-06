@@ -133,6 +133,7 @@ var skipExts = [
   ".json", ".xml", ".yaml", ".yml", ".toml", ".ini", ".cfg",
   ".md", ".rst", ".tex", ".csv", ".log", ".env",
   ".c", ".cpp", ".h", ".java", ".rb", ".go", ".rs", ".php",
+  ".wasm", ".map",
   // HLS / DASH stream segments — never intercept these individually
   ".enc", ".key", ".aes", ".m4s", ".frag", ".chunk"
 ];
@@ -161,39 +162,81 @@ function isVideoAudio(url, contentType) {
   return false;
 }
 
+// Domains that must never be intercepted — captcha providers, auth/security
+// APIs, browser infrastructure, CDN control planes, and other non-download
+// endpoints that happen to return binary Content-Types.
+var skipDomains = [
+  // LDM own UI / AI tools
+  "claude.ai", "anthropic.com",
+  "chatgpt.com", "chat.openai.com",
+  // Captcha providers — challenge blobs are application/octet-stream
+  "hcaptcha.com",          // api.hcaptcha.com/getcaptcha/...
+  "recaptcha.net",
+  "challenges.cloudflare.com",
+  "turnstile.cloudflare.com",
+  "captcha.com",
+  "funcaptcha.com", "arkoselabs.com",
+  "mtcaptcha.com",
+  "geetest.com",
+  // Auth / SSO / fingerprinting
+  "accounts.google.com", "oauth2.googleapis.com",
+  "auth0.com", "okta.com",
+  "login.microsoftonline.com",
+  // Google infrastructure
+  "google.com", "googleapis.com", "gstatic.com",
+  "googleusercontent.com", "googlevideo.com",
+  "lh3.google", "lh4.google", "lh5.google", "lh6.google",
+  "youtube.com", "youtu.be",
+  // Developer / paste tools
+  "stackoverflow.com", "codepen.io", "jsfiddle.net",
+  "pastebin.com", "gist.github.com",
+  // Facebook infrastructure (social video stored via isSocialCDN, not intercepted)
+  "edge-chat.facebook.com", "mqtt",
+  // Cloud storage control planes (actual file downloads handled separately)
+  "mega.co.nz", "mega.nz",
+  // Analytics / CDN infrastructure
+  "cloudflare.com",
+  "fastly.com",
+  "akamaihd.net",
+];
+
 browser.webRequest.onHeadersReceived.addListener(
   function(details) {
     if (!interceptEnabled) return {};
     var url = details.url;
     var lowerUrl = url.toLowerCase();
     console.log("LDM intercept check:", url);
-    if (
-      lowerUrl.includes("claude.ai") ||
-      lowerUrl.includes("anthropic.com") ||
-      lowerUrl.includes("chatgpt.com") ||
-      lowerUrl.includes("chat.openai.com") ||
-      lowerUrl.includes("stackoverflow.com") ||
-      lowerUrl.includes("codepen.io") ||
-      lowerUrl.includes("jsfiddle.net") ||
-      lowerUrl.includes("pastebin.com") ||
-      lowerUrl.includes("gist.github.com") ||
-      lowerUrl.includes("googlevideo.com") ||
-      lowerUrl.includes("youtube.com") ||
-      lowerUrl.includes("youtu.be") ||
-      lowerUrl.includes("google.com") ||
-      lowerUrl.includes("googleapis.com") ||
-      lowerUrl.includes("gstatic.com") ||
-      lowerUrl.includes("googleusercontent.com") ||
-      lowerUrl.includes("lh3.google") ||
-      lowerUrl.includes("lh4.google") ||
-      lowerUrl.includes("lh5.google") ||
-      lowerUrl.includes("lh6.google") ||
-      lowerUrl.includes("edge-chat.facebook.com") ||
-      lowerUrl.includes("mqtt") ||
-      lowerUrl.includes("mega.co.nz") ||
-      lowerUrl.includes("mega.nz")
-    ) return {};
+    // Skip all domains that should never be intercepted
+    for (var sd = 0; sd < skipDomains.length; sd++) {
+      if (lowerUrl.includes(skipDomains[sd])) return {};
+    }
     if (lowerUrl.startsWith("blob:") || lowerUrl.startsWith("data:")) return {};
+    // Tracking / fingerprinting / beacon endpoints occasionally ship a
+    // Content-Disposition: attachment to dodge caches — that triggers our
+    // download intercept on a request the user never asked to download.
+    // Filter by common host/path signals.
+    var trackingHostPrefixes = [
+      "privacy-", "privacy.", "metrics.", "analytics.", "telemetry.",
+      "tracking.", "beacon.", "pixel.", "tags.", "stats."
+    ];
+    var trackingPathPatterns = [
+      "/fp/", "/fp?", "/fingerprint", "/beacon", "/pixel",
+      "/telemetry", "/collect", "/track?", "/track/", "/r/collect",
+      // Captcha challenge endpoints
+      "/getcaptcha/", "/captcha/", "/challenge/", "/v2/anchor", "/v2/reload",
+      "/v3/", "/recaptcha/", "/hcaptcha/",
+    ];
+    try {
+      var u = new URL(url);
+      var host = u.hostname.toLowerCase();
+      var pathQ = (u.pathname + u.search).toLowerCase();
+      for (var tp = 0; tp < trackingHostPrefixes.length; tp++) {
+        if (host.startsWith(trackingHostPrefixes[tp])) return {};
+      }
+      for (var tq = 0; tq < trackingPathPatterns.length; tq++) {
+        if (pathQ.indexOf(trackingPathPatterns[tq]) !== -1) return {};
+      }
+    } catch (e) {}
     var allowedTypes = ["main_frame", "sub_frame", "other", "xmlhttprequest", "media"];
     if (allowedTypes.indexOf(details.type) === -1) return {};
     var headers = details.responseHeaders || [];
@@ -318,6 +361,7 @@ browser.webRequest.onHeadersReceived.addListener(
       if (ct.startsWith("text/")) return {};
       if (ct.includes("application/json")) return {};
       if (ct.includes("application/javascript")) return {};
+      if (ct.includes("application/wasm")) return {};
       if (ct.includes("application/xhtml")) return {};
       if (ct.includes("text/x-python")) return {};
       if (ct.includes("text/x-sh")) return {};
@@ -428,7 +472,10 @@ function sendToPython(url, filename, type, referer) {
 // Relay bridge calls from content scripts (avoids iframe CORS blocks)
 browser.runtime.onMessage.addListener(function(message, sender, sendResponse) {
   if (message.action === 'bridge') {
-    sendToPython(message.url, message.filename || 'download', message.type || 'file', '');
+    // Forward the originating tab URL as Referer — required by hotlink-protected
+    // CDNs (e.g. phncdn 404s segment requests without it).
+    var bridgeReferer = (sender.tab && sender.tab.url) || '';
+    sendToPython(message.url, message.filename || 'download', message.type || 'file', bridgeReferer);
     sendResponse({ ok: true });
   }
   // Return stored m3u8 for current tab (called from content.js Capture button)

@@ -18,35 +18,158 @@ echo "╚═══════════════════════�
 echo ""
 
 # ── Step 1: System packages ──────────────────────────────────────────────────
-echo "► [1/5] Installing system packages (ffmpeg, curl)..."
-sudo apt-get update -y -qq
-sudo apt-get install -y ffmpeg curl python3 python3-pip python3-pyqt6.qtsvg > /dev/null 2>&1
+echo "► [1/6] Detecting package manager..."
+
+PKG_MANAGER=""
+if command -v apt-get &>/dev/null; then
+    PKG_MANAGER="apt"
+    echo "  Detected: apt (Debian/Ubuntu/Mint)"
+elif command -v dnf &>/dev/null; then
+    PKG_MANAGER="dnf"
+    echo "  Detected: dnf (Fedora/RHEL)"
+elif command -v pacman &>/dev/null; then
+    PKG_MANAGER="pacman"
+    echo "  Detected: pacman (Arch/Manjaro)"
+elif command -v zypper &>/dev/null; then
+    PKG_MANAGER="zypper"
+    echo "  Detected: zypper (openSUSE)"
+else
+    echo "  ERROR: Unsupported package manager. Install dependencies manually."
+    exit 1
+fi
+
+echo "► [2/6] Installing system packages..."
+case $PKG_MANAGER in
+    apt)
+        sudo apt-get update -y -qq
+        sudo apt-get install -y \
+            ffmpeg curl \
+            python3 python3-pip python3-pyqt6.qtsvg \
+            libxcb-cursor0 libxcb-icccm4 libxcb-image0 \
+            libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 \
+            libxcb-xinerama0 libxcb-xkb1 libxkbcommon-x11-0 \
+            > /dev/null 2>&1
+        ;;
+    dnf)
+        sudo dnf install -y \
+            ffmpeg curl \
+            python3 python3-pip \
+            xcb-util-cursor xcb-util-icccm xcb-util-image \
+            xcb-util-keysyms xcb-util-renderutil xcb-util-wm \
+            libxkbcommon-x11 \
+            > /dev/null 2>&1
+        ;;
+    pacman)
+        sudo pacman -S --noconfirm \
+            ffmpeg curl \
+            python python-pip \
+            xcb-util-cursor xcb-util-icccm xcb-util-image \
+            xcb-util-keysyms xcb-util-renderutil xcb-util-wm \
+            libxkbcommon-x11 \
+            > /dev/null 2>&1
+        ;;
+    zypper)
+        sudo zypper install -y \
+            ffmpeg curl \
+            python3 python3-pip \
+            libxcb-cursor0 libxkbcommon-x11-0 \
+            > /dev/null 2>&1
+        ;;
+esac
 echo "  Done."
 
 # ── Step 2: Python packages ──────────────────────────────────────────────────
-echo "► [2/5] Installing Python packages (PyQt6, requests, yt-dlp)..."
-pip install PyQt6 requests yt-dlp browser-cookie3 --break-system-packages -q
+echo "► [3/6] Installing Python packages (PyQt6, requests, yt-dlp, curl_cffi)..."
+pip3 install PyQt6 requests yt-dlp browser-cookie3 curl_cffi pycryptodome --break-system-packages -q 2>/dev/null || \
+pip3 install PyQt6 requests yt-dlp browser-cookie3 curl_cffi pycryptodome -q
 echo "  Done."
 
 # ── Step 3: Deno (JavaScript runtime for YouTube) ────────────────────────────
-echo "► [3/5] Installing Deno (JavaScript runtime)..."
-if command -v deno &> /dev/null; then
+echo "► [4/6] Installing Deno (JavaScript runtime)..."
+if command -v deno &>/dev/null; then
     echo "  Deno already installed: $(deno --version | head -1)"
 else
     curl -fsSL https://deno.land/install.sh | sh -s -- --quiet
-    # Add to PATH for this session
     export DENO_INSTALL="$HOME/.deno"
     export PATH="$DENO_INSTALL/bin:$PATH"
-    # Link system-wide
-    sudo ln -sf "$HOME/.deno/bin/deno" /usr/local/bin/deno
+    # Add to shell profile permanently
+    SHELL_RC="$HOME/.bashrc"
+    [[ "$SHELL" == *"zsh"* ]] && SHELL_RC="$HOME/.zshrc"
+    if ! grep -q "DENO_INSTALL" "$SHELL_RC"; then
+        echo '' >> "$SHELL_RC"
+        echo '# Deno' >> "$SHELL_RC"
+        echo 'export DENO_INSTALL="$HOME/.deno"' >> "$SHELL_RC"
+        echo 'export PATH="$DENO_INSTALL/bin:$PATH"' >> "$SHELL_RC"
+    fi
+    sudo ln -sf "$HOME/.deno/bin/deno" /usr/local/bin/deno 2>/dev/null || true
     echo "  Done."
 fi
 
 # ── Step 4: App icons ────────────────────────────────────────────────────────
-echo "► [4/5] Installing icons..."
+echo "► [5/6] Installing icons..."
 
-# Generate icons using Python
-python3 << 'PYEOF'
+SVG_SRC=""
+for c in "$INSTALL_DIR/icons/linux-downloader.svg" "$INSTALL_DIR/linux-downloader.svg"; do
+    [ -f "$c" ] && SVG_SRC="$c" && break
+done
+
+# Pick a rasterizer (quality: rsvg-convert ≥ inkscape ≥ qt ≫ convert)
+# qt is preferred over convert because ImageMagick fails on SVG gradients/filters
+RASTERIZER=""
+if command -v rsvg-convert &>/dev/null; then
+    RASTERIZER="rsvg-convert"
+elif command -v inkscape &>/dev/null; then
+    RASTERIZER="inkscape"
+elif python3 -c "from PyQt6.QtSvg import QSvgRenderer" &>/dev/null; then
+    RASTERIZER="qt"
+elif command -v convert &>/dev/null; then
+    RASTERIZER="convert"
+fi
+
+mkdir -p "$INSTALL_DIR/icons"
+
+if [ -n "$SVG_SRC" ] && [ -n "$RASTERIZER" ]; then
+    echo "  Rasterizing SVG with $RASTERIZER..."
+    if [ "$RASTERIZER" = "qt" ]; then
+        SVG_SRC="$SVG_SRC" ICON_DIR="$INSTALL_DIR/icons" ICON_NAME="$ICON_NAME" python3 - << 'PYEOF'
+import os, sys
+from PyQt6.QtSvg import QSvgRenderer
+from PyQt6.QtGui import QPixmap, QPainter, QColor
+from PyQt6.QtCore import QByteArray, Qt
+from PyQt6.QtWidgets import QApplication
+app = QApplication(sys.argv)
+with open(os.environ['SVG_SRC'], 'rb') as f:
+    renderer = QSvgRenderer(QByteArray(f.read()))
+for size in [16, 32, 48, 64, 128, 256]:
+    over = size * 4
+    big = QPixmap(over, over); big.fill(QColor(0,0,0,0))
+    p = QPainter(big)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+    p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+    renderer.render(p); p.end()
+    out = big.scaled(size, size, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+    out.save(os.path.join(os.environ['ICON_DIR'], f"{os.environ['ICON_NAME']}-{size}.png"), 'PNG')
+PYEOF
+    else
+        for size in 16 32 48 64 128 256; do
+            OUT="$INSTALL_DIR/icons/${ICON_NAME}-${size}.png"
+            case "$RASTERIZER" in
+                rsvg-convert)
+                    rsvg-convert -w "$size" -h "$size" "$SVG_SRC" -o "$OUT" 2>/dev/null
+                    ;;
+                inkscape)
+                    inkscape -w "$size" -h "$size" "$SVG_SRC" -o "$OUT" >/dev/null 2>&1
+                    ;;
+                convert)
+                    convert -background none -density 384 -resize "${size}x${size}" "$SVG_SRC" "$OUT" 2>/dev/null
+                    ;;
+            esac
+        done
+    fi
+    echo "  Icons rasterized from SVG."
+else
+    # Fallback: generate crude geometric PNGs (no rasterizer or no SVG)
+    python3 << 'PYEOF'
 import struct, zlib, os, math
 
 def create_png(size):
@@ -90,30 +213,58 @@ def create_png(size):
     png+=chunk(b'IEND',b'')
     return png
 
-import os
 install_dir = os.path.expanduser("~/linux-downloader")
 icons_dir = os.path.join(install_dir, "icons")
 os.makedirs(icons_dir, exist_ok=True)
 for s in [16,32,48,64,128,256]:
     path = os.path.join(icons_dir, f"linux-downloader-{s}.png")
-    if not os.path.exists(path):
-        with open(path, 'wb') as f:
-            f.write(create_png(s))
-print("Icons generated.")
+    with open(path, 'wb') as f:
+        f.write(create_png(s))
+print("  Icons generated (fallback — install rsvg-convert for better quality).")
 PYEOF
+fi
 
-# Install icons to system theme
 for size in 16 32 48 64 128 256; do
     DEST="/usr/share/icons/hicolor/${size}x${size}/apps"
     sudo mkdir -p "$DEST"
     sudo cp "$INSTALL_DIR/icons/${ICON_NAME}-${size}.png" "$DEST/${ICON_NAME}.png" 2>/dev/null || true
 done
+
+# Install scalable SVG so DEs that prefer scalable can use it
+if [ -n "$SVG_SRC" ]; then
+    SCALABLE_DEST="/usr/share/icons/hicolor/scalable/apps"
+    sudo mkdir -p "$SCALABLE_DEST"
+    sudo cp "$SVG_SRC" "$SCALABLE_DEST/${ICON_NAME}.svg" 2>/dev/null || true
+fi
+
 sudo gtk-update-icon-cache -f /usr/share/icons/hicolor/ 2>/dev/null || true
 echo "  Done."
 
-# ── Step 5: Desktop entry ────────────────────────────────────────────────────
-echo "► [5/5] Creating desktop entry..."
+# ── Step 5: Firefox profile detection ───────────────────────────────────────
+echo "► [6/6] Detecting Firefox profile..."
 
+FF_PROFILE=""
+FF_CANDIDATES=(
+    "$HOME/.mozilla/firefox"
+    "$HOME/.var/app/org.mozilla.firefox/config/mozilla/firefox"
+    "$HOME/.var/app/org.mozilla.firefox/.mozilla/firefox"
+    "$HOME/snap/firefox/common/.mozilla/firefox"
+    "$HOME/.config/mozilla/firefox"
+)
+for path in "${FF_CANDIDATES[@]}"; do
+    if [ -d "$path" ]; then
+        FF_PROFILE="$path"
+        break
+    fi
+done
+
+if [ -n "$FF_PROFILE" ]; then
+    echo "  Firefox profile found: $FF_PROFILE"
+else
+    echo "  WARNING: Firefox profile not found — cookie-based downloads may not work."
+fi
+
+# ── Desktop entry ────────────────────────────────────────────────────────────
 mkdir -p "$HOME/.local/share/applications"
 
 cat > "$DESKTOP_FILE" << DESKTOP
@@ -129,14 +280,9 @@ StartupWMClass=download_manager.py
 DESKTOP
 
 update-desktop-database "$HOME/.local/share/applications/" 2>/dev/null || true
-
-# Also install system-wide
 sudo cp "$DESKTOP_FILE" /usr/share/applications/ 2>/dev/null || true
 sudo update-desktop-database /usr/share/applications/ 2>/dev/null || true
 
-echo "  Done."
-
-# ── Make executable ──────────────────────────────────────────────────────────
 chmod +x "$INSTALL_DIR/download_manager.py"
 
 # ── Done ─────────────────────────────────────────────────────────────────────
@@ -145,11 +291,13 @@ echo "╔═══════════════════════�
 echo "║         Installation Complete!             ║"
 echo "╚════════════════════════════════════════════╝"
 echo ""
-echo "  You can now launch Linux Download Manager"
-echo "  from your application menu or by running:"
+echo "  Launch from your app menu: Linux Download Manager"
+echo "  Or run: python3 $INSTALL_DIR/download_manager.py"
 echo ""
-echo "    python3 $INSTALL_DIR/download_manager.py"
-echo ""
-echo "  Log out and back in if the app icon"
-echo "  does not appear in the start menu."
+if [ -z "$FF_PROFILE" ]; then
+    echo "  ⚠  Install Firefox to enable cookie-based YouTube downloads."
+    echo ""
+fi
+echo "  Note: Log out and back in if the app icon"
+echo "        does not appear in the start menu."
 echo ""
