@@ -129,6 +129,16 @@ file_types = {
     "Programs":   ["exe", "bin", "appimage", "deb", "rpm"]
 }
 
+STATUS_COLORS = {
+    "Downloading":  "#2563eb",
+    "Finished":     "#16a34a",
+    "Paused":       "#d97706",
+    "Queued":       "#64748b",
+    "Cancelled":    "#dc2626",
+    "Error":        "#dc2626",
+    "File Missing": "#dc2626",
+}
+
 CATEGORIES = [
     ("All Downloads", "⬇", "#2563eb"),
     ("Videos",        "🎬", "#dc2626"),
@@ -300,6 +310,23 @@ def normalize_stream_url(url):
     return url
 
 
+def is_twimg_dash_segment(url):
+    """video.twimg.com serves DASH .m4s media segments — they advertise
+    content-type: video/mp4 and look downloadable, but contain only
+    styp/moof/mdat boxes (no ftyp/moov), so they're not playable on
+    their own. Detect them so we can route to the tweet status URL
+    (which yt-dlp's TwitterIE can extract properly) instead."""
+    try:
+        from urllib.parse import urlparse
+        p = urlparse(url)
+        return (
+            'video.twimg.com' in p.netloc.lower()
+            and p.path.lower().endswith('.m4s')
+        )
+    except Exception:
+        return False
+
+
 def _unpack_packed_js(packed_args_str):
     """Decode a Dean-Edwards p,a,c,k,e,d packed JavaScript payload.
     Input is everything between the outer `(` and `)` of the packer call."""
@@ -372,6 +399,75 @@ def resolve_luluvdo_url(url):
     return sm.group(1), base + '/'
 
 
+_PNG_SIG = b'\x89PNG\r\n\x1a\n'
+
+
+def _strip_png_disguised_segments(path):
+    """Some adult-stream CDNs (wishonly.site → tiktokcdn.com via qooglecdn.com)
+    serve every HLS segment with Content-Type: image/png and a 70-byte 1x1 PNG
+    prepended to the TS bytes — an ad-block evasion trick. yt-dlp downloads the
+    bytes verbatim and concatenates, so the final .mp4 is N tiny PNGs interleaved
+    with TS chunks. VLC sniffs the leading PNG, treats the file as a 1x1 image,
+    and reports a ~10s duration.
+
+    If the output starts with a PNG signature, walk the file: at each PNG, parse
+    chunks until IEND and discard them; keep the TS bytes between. Then remux
+    the cleaned .ts to .mp4 with ffmpeg -c copy. Replace the original on success.
+
+    Returns True if the file was rewritten, False if no PNG prefix was present.
+    """
+    try:
+        with open(path, 'rb') as f:
+            head = f.read(8)
+        if head != _PNG_SIG:
+            return False
+        with open(path, 'rb') as f:
+            data = f.read()
+    except OSError:
+        return False
+    out, i, n = bytearray(), 0, len(data)
+    while i < n:
+        if data[i:i+8] == _PNG_SIG:
+            j = i + 8
+            while j + 8 <= n:
+                clen = int.from_bytes(data[j:j+4], 'big')
+                ctype = data[j+4:j+8]
+                j += 8 + clen + 4
+                if ctype == b'IEND':
+                    break
+            i = j
+            continue
+        k = data.find(_PNG_SIG, i)
+        if k < 0:
+            out.extend(data[i:])
+            break
+        out.extend(data[i:k])
+        i = k
+    if not out or out[0] != 0x47:
+        return False  # not MPEG-TS — leave the file alone
+    ts_path = path + '.clean.ts'
+    mp4_path = path + '.clean.mp4'
+    try:
+        with open(ts_path, 'wb') as f:
+            f.write(bytes(out))
+        res = subprocess.run(
+            ['ffmpeg', '-y', '-fflags', '+genpts', '-i', ts_path,
+             '-c', 'copy', '-bsf:a', 'aac_adtstoasc', mp4_path],
+            capture_output=True,
+        )
+        if res.returncode != 0 or not os.path.exists(mp4_path):
+            return False
+        os.replace(mp4_path, path)
+        return True
+    finally:
+        for p in (ts_path, mp4_path):
+            try:
+                if os.path.exists(p):
+                    os.remove(p)
+            except OSError:
+                pass
+
+
 class BridgeHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         try:
@@ -440,6 +536,197 @@ CURL_DOMAINS = [
 def needs_curl(url):
     lower = url.lower()
     return any(d in lower for d in CURL_DOMAINS)
+
+
+# ── Gofile.io: guest-token auth ──────────────────────────────────────────────
+# Gofile's CDN rejects requests without an `accountToken` cookie — without
+# auth it serves an HTML landing page that the downloader would save as
+# `.mp4`. Three steps are required (mirrors yt-dlp's gofile extractor):
+#   1. POST /accounts → mint a guest token
+#   2. Fetch /dist/js/global.js → extract `appdata.wt` (website token)
+#   3. GET /contents/{contentId}?wt=… with Authorization: Bearer {token}
+#      — this is the step that AUTHORIZES the token for that content.
+# Skipping step 3 was the recent bug: the CDN served the landing page.
+_GOFILE_TOKEN = None
+_GOFILE_WT = None
+_GOFILE_AUTHED_CONTENT = set()
+_GOFILE_LAST_ERR = ""
+_GOFILE_LOCK = threading.Lock()
+
+def is_gofile_url(url):
+    try:
+        host = (urlparse(url).hostname or "").lower()
+    except Exception:
+        return False
+    return host == "gofile.io" or host.endswith(".gofile.io")
+
+def gofile_content_id(url):
+    """Extract the content ID from a Gofile URL. Handles both the CDN
+    download form `/download/web/{id}/{name}` and the landing form `/d/{id}`."""
+    try:
+        path = urlparse(url).path
+    except Exception:
+        return None
+    m = re.search(r"/download/web/([\w-]+)/", path)
+    if m:
+        return m.group(1)
+    m = re.match(r"^/d/([\w-]+)", path)
+    if m:
+        return m.group(1)
+    return None
+
+def _firefox_gofile_token():
+    """Pull the user's gofile accountToken from Firefox's localStorage.
+    The browser-stored token has already been associated with content the
+    user visited (the page's own /contents/ call did that), so it works
+    where a freshly-minted guest token gets 401-notPremium — especially
+    when Gofile is rate-limiting our IP. Returns None if not found."""
+    import glob, sqlite3, shutil, tempfile
+    # Firefox 150+ uses XDG paths (~/.config/mozilla/firefox); the legacy
+    # ~/.mozilla path is only present on older installs. Glob both, plus
+    # snap/flatpak variants, then pick the most-recently-modified match so
+    # an active session's profile beats a stale one (e.g. leftover Flatpak
+    # data after switching to apt).
+    patterns = [
+        os.path.expanduser("~/.config/mozilla/firefox/*/storage/default/https+++gofile.io/ls/data.sqlite"),
+        os.path.expanduser("~/.mozilla/firefox/*/storage/default/https+++gofile.io/ls/data.sqlite"),
+        os.path.expanduser("~/snap/firefox/common/.mozilla/firefox/*/storage/default/https+++gofile.io/ls/data.sqlite"),
+        os.path.expanduser("~/.var/app/org.mozilla.firefox/config/mozilla/firefox/*/storage/default/https+++gofile.io/ls/data.sqlite"),
+    ]
+    candidates = []
+    for pat in patterns:
+        for path in glob.glob(pat):
+            try:
+                candidates.append((os.path.getmtime(path), path))
+            except OSError:
+                pass
+    candidates.sort(reverse=True)
+    for _, path in candidates:
+        tmp = None
+        try:
+            # Copy out — Firefox holds a write lock while running.
+            tmp = tempfile.NamedTemporaryFile(suffix=".sqlite", delete=False).name
+            shutil.copy2(path, tmp)
+            con = sqlite3.connect(tmp)
+            row = con.execute(
+                "SELECT value FROM data WHERE key='appdataAccount'"
+            ).fetchone()
+            con.close()
+            if not row:
+                continue
+            raw = row[0]
+            blob = raw if isinstance(raw, (bytes, bytearray)) else raw.encode("latin-1", "replace")
+            # Firefox stores localStorage values in Snappy-compressed
+            # form. Rather than depend on a snappy lib, scan for the
+            # literal `…token":"<value>"` — the value is unique and is
+            # nearly always emitted as a literal run, not a back-ref.
+            m = re.search(rb'oken"\s*:\s*"([A-Za-z0-9]{20,})"', blob)
+            if m:
+                return m.group(1).decode("ascii")
+        except Exception:
+            pass
+        finally:
+            if tmp:
+                try: os.unlink(tmp)
+                except Exception: pass
+    return None
+
+def get_gofile_token(content_id=None):
+    """Return a Gofile guest token, pre-authorizing it for `content_id` so
+    the CDN serves the actual file rather than the landing page.
+
+    On failure, sets `_GOFILE_LAST_ERR` so the caller can surface the
+    specific step that broke (accounts API / global.js / contents API)."""
+    global _GOFILE_TOKEN, _GOFILE_WT, _GOFILE_LAST_ERR
+    ua = HEADERS["User-Agent"]
+    with _GOFILE_LOCK:
+        # Reset so a stale error from a prior content doesn't leak into the
+        # current attempt's "server returned HTML" detail.
+        _GOFILE_LAST_ERR = ""
+        token_from_browser = False
+        if not _GOFILE_TOKEN:
+            # 1) Prefer the user's Firefox-resident token — it works even
+            # when Gofile is rate-limiting fresh /accounts mints from this
+            # IP. Falls back to minting if no browser token found.
+            ff = _firefox_gofile_token()
+            if ff:
+                _GOFILE_TOKEN = ff
+                token_from_browser = True
+        if not _GOFILE_TOKEN:
+            try:
+                r = requests.post(
+                    "https://api.gofile.io/accounts",
+                    headers={"User-Agent": ua},
+                    timeout=15,
+                )
+                data = r.json()
+                if data.get("status") == "ok":
+                    _GOFILE_TOKEN = data["data"].get("token")
+                    if not _GOFILE_TOKEN:
+                        _GOFILE_LAST_ERR = "accounts API: no token in response"
+                else:
+                    _GOFILE_LAST_ERR = f"accounts API: status={data.get('status')!r}"
+            except Exception as e:
+                _GOFILE_LAST_ERR = f"accounts API: {type(e).__name__}: {str(e)[:80]}"
+        if not _GOFILE_TOKEN:
+            return None
+        if content_id and content_id not in _GOFILE_AUTHED_CONTENT:
+            if not _GOFILE_WT:
+                # Gofile moved `appdata.wt` from global.js to config.js
+                # (sometime before 2026). Probe both so a future move is
+                # easier to spot from the error log.
+                for js_path in ("/dist/js/config.js", "/dist/js/global.js"):
+                    try:
+                        gjs = requests.get(
+                            f"https://gofile.io{js_path}",
+                            headers={"User-Agent": ua},
+                            timeout=15,
+                        ).text
+                        m = re.search(r'appdata\.wt\s*=\s*["\']([^"\']+)', gjs)
+                        if m:
+                            _GOFILE_WT = m.group(1)
+                            break
+                    except Exception as e:
+                        _GOFILE_LAST_ERR = f"{js_path}: {type(e).__name__}: {str(e)[:80]}"
+                if not _GOFILE_WT and not _GOFILE_LAST_ERR:
+                    _GOFILE_LAST_ERR = "wt not found in config.js/global.js"
+            try:
+                r = requests.get(
+                    f"https://api.gofile.io/contents/{content_id}",
+                    params={"wt": _GOFILE_WT} if _GOFILE_WT else None,
+                    headers={
+                        "User-Agent": ua,
+                        "Authorization": f"Bearer {_GOFILE_TOKEN}",
+                    },
+                    timeout=15,
+                )
+                jd = r.json()
+                if jd.get("status") == "ok":
+                    pwd = (jd.get("data") or {}).get("passwordStatus")
+                    if pwd and pwd != "passwordOk":
+                        _GOFILE_LAST_ERR = f"content needs password ({pwd})"
+                    else:
+                        _GOFILE_AUTHED_CONTENT.add(content_id)
+                elif jd.get("status") == "error-notPremium" and token_from_browser:
+                    # /contents/ returns notPremium for files marked
+                    # premium-only — but the Firefox-resident token's
+                    # cookie often still downloads them via the CDN
+                    # (auth was established when the user loaded the d/
+                    # page). Trust the cookie and let HEAD/GET decide.
+                    _GOFILE_AUTHED_CONTENT.add(content_id)
+                elif jd.get("status") == "error-notPremium":
+                    _GOFILE_LAST_ERR = (
+                        "Premium-only file (guests can stream-preview "
+                        "but not download)"
+                    )
+                else:
+                    _GOFILE_LAST_ERR = (
+                        f"contents API: status={jd.get('status')!r}"
+                        f" wt={'set' if _GOFILE_WT else 'missing'}"
+                    )
+            except Exception as e:
+                _GOFILE_LAST_ERR = f"contents API: {type(e).__name__}: {str(e)[:80]}"
+        return _GOFILE_TOKEN
 
 
 # ── Gradient text label (wordmark) ───────────────────────────────────────────
@@ -651,7 +938,7 @@ class ProgressDelegate(QStyledItemDelegate):
                 painter.drawRoundedRect(filled_rect, radius, radius)
 
     def sizeHint(self, option, index):
-        return QSize(180, 36)
+        return QSize(180, 40)
 
 
 # ── Combo hover delegate (Linux Qt6 workaround) ─────────────────────────────
@@ -1667,6 +1954,12 @@ class StreamDialog(QDialog):
             'retries':             10,
             'fragment_retries':    10,
             'socket_timeout':      30,
+            # CDNs commonly ship a leaf cert without the intermediate chain
+            # (e.g. masahub.cc serves a valid Sectigo cert but omits the
+            # intermediate, breaking strict verification). Our requests path
+            # already uses verify=False — match that here so yt-dlp doesn't
+            # bail on the same servers we'd otherwise download from fine.
+            'nocheckcertificate':  True,
         }
         self.dl_thread = YouTubeDownloadThread(self._url, ydl_opts)
         self.dl_thread.progress.connect(self._on_progress)
@@ -1797,6 +2090,11 @@ class StreamDialog(QDialog):
                 self._dl_path = os.path.join(folder, resolved)
                 self.file_label.setText(f"Saving as: {resolved}")
                 self.download_name_updated.emit(self._url, resolved, self._dl_path)
+            try:
+                if _strip_png_disguised_segments(self._dl_path):
+                    self.log_box.append("Stripped PNG-disguised HLS segments and remuxed.")
+            except Exception as _e:
+                self.log_box.append(f"PNG-strip post-process failed: {_e}")
             self._finished_reported = True
             self.download_finished.emit(self._url, msg)
             return
@@ -2078,11 +2376,17 @@ class LuluHLSDownloadThread(QThread):
 
 
 class DownloadThread(QThread):
-    progress   = pyqtSignal(int)
-    speed      = pyqtSignal(str)
-    downloaded = pyqtSignal(str)
-    eta        = pyqtSignal(str)
-    finished   = pyqtSignal(str)
+    progress       = pyqtSignal(int)
+    speed          = pyqtSignal(str)
+    downloaded     = pyqtSignal(str)
+    eta            = pyqtSignal(str)
+    finished       = pyqtSignal(str)
+    # Emitted when the worker locks in the final on-disk filename/path
+    # (after Content-Disposition parsing, CT sniffing, and the second
+    # uniqueness check).  The row started with an enqueue-time guess;
+    # this signal lets the UI sync display name, icon, and stored path
+    # so Open File / Show in Folder / Resume use the truth.
+    name_finalized = pyqtSignal(str, str)  # filename, full_path
 
     def __init__(self, url, filename, is_video=False, referer="", resume_from=0):
         super().__init__()
@@ -2112,6 +2416,7 @@ class DownloadThread(QThread):
                 'no_warnings': False,
                 'ignoreerrors': False,
                 'http_headers': {'User-Agent': HEADERS['User-Agent']},
+                'nocheckcertificate': True,
             }
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(self.url, download=True)
@@ -2167,6 +2472,10 @@ class DownloadThread(QThread):
                 cmd += ["-e", self.referer]
             if self.resume_from > 0:
                 cmd += ["-C", str(self.resume_from)]
+            if is_gofile_url(self.url):
+                token = get_gofile_token(gofile_content_id(self.url))
+                if token:
+                    cmd += ["-b", f"accountToken={token}"]
             cmd.append(self.url)
             self._proc = subprocess.Popen(
                 cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
@@ -2210,21 +2519,62 @@ class DownloadThread(QThread):
                 session.cookies.update(cookies)
             except Exception:
                 pass
+            if is_gofile_url(self.url):
+                token = get_gofile_token(gofile_content_id(self.url))
+                if token:
+                    try:
+                        session.cookies.set("accountToken", token, domain=".gofile.io")
+                    except Exception:
+                        session.headers["Cookie"] = (
+                            (session.headers.get("Cookie", "") + "; " if session.headers.get("Cookie") else "")
+                            + f"accountToken={token}"
+                        )
+                else:
+                    reason = _GOFILE_LAST_ERR or "unknown"
+                    self.finished.emit(
+                        f"Error: Gofile auth failed — {reason}"
+                    )
+                    return
             try:
                 head = session.head(self.url, allow_redirects=True, timeout=10, verify=False)
+                # If the server hands us an HTML page for what should be a
+                # binary file, auth failed (e.g. Gofile token not authorized
+                # for this content). Bail instead of saving an 11KB landing
+                # page as `.mp4`.
+                _ct_head = head.headers.get("Content-Type", "").split(";")[0].strip().lower()
+                _url_ext = os.path.splitext(urlparse(self.url).path)[1].lower()
+                if _ct_head in ("text/html", "application/xhtml+xml") and _url_ext not in (".html", ".htm"):
+                    detail = (
+                        f" [{_GOFILE_LAST_ERR}]"
+                        if is_gofile_url(self.url) and _GOFILE_LAST_ERR
+                        else ""
+                    )
+                    self.finished.emit(
+                        f"Error: server returned HTML, not the file{detail}"
+                    )
+                    return
                 cd = head.headers.get("Content-Disposition", "")
-                if "filename=" in cd:
-                    m = re.search(r"filename\*=(?:UTF-8|utf-8)''([^;\n]+)", cd, re.I)
+                # `filename*=` (RFC 5987) does not contain the substring
+                # "filename=", so a plain `in` check would skip it. Match on
+                # the bare token instead and let the regexes pick the form.
+                if "filename" in cd.lower():
+                    m = re.search(r"filename\*\s*=\s*[\w-]+'[^']*'([^;\r\n]+)", cd, re.I)
                     if m:
                         self.filename = unquote(m.group(1).strip())
                     else:
-                        m = re.search(r'filename="([^"]+)"', cd, re.I)
+                        m = re.search(r'filename\s*=\s*"([^"]+)"', cd, re.I)
                         if not m:
-                            m = re.search(r"filename=([^;\s\"']+)", cd, re.I)
+                            m = re.search(r"filename\s*=\s*([^;\s\"']+)", cd, re.I)
                         if m:
                             candidate = m.group(1).strip().strip("'\"")
                             if candidate.lower() not in ("utf-8", "utf8", "ascii", "iso-8859-1"):
                                 self.filename = candidate
+                # Captured "UTF-8" from a broken Content-Disposition parser
+                # upstream — derive the real name from the URL path instead.
+                if self.filename.strip().lower() in ("utf-8", "utf8", "ascii", "iso-8859-1"):
+                    url_name = unquote(urlparse(self.url).path.rsplit("/", 1)[-1])
+                    if url_name:
+                        self.filename = url_name
                 # Fix 6: Some servers put the real filename in a ?name= query
                 # parameter (e.g. upfiles.download) rather than Content-Disposition.
                 # Only use it when our current filename still has no extension.
@@ -2292,6 +2642,15 @@ class DownloadThread(QThread):
                     _uc += 1
                 self.filename = _un
             filepath = os.path.join(folder, self.filename)
+            # Tell the UI the authoritative on-disk filename so the row,
+            # icon, and stored path match what we're about to write.  Must
+            # fire before the first byte hits disk; otherwise Open File /
+            # Show in Folder / clear_item all act on the stale enqueue-time
+            # path.
+            try:
+                self.name_finalized.emit(self.filename, filepath)
+            except Exception:
+                pass
             # Some CDNs cap concurrent connections per-IP and reject the
             # second handshake with SSL EOF. Retry with backoff so a queued
             # download just waits for a slot instead of hard-failing.
@@ -2752,6 +3111,18 @@ class DownloadManager(QMainWindow):
             if url and status == "Finished":
                 self.finished_urls[self._social_dedup_key(url)] = path
 
+    def _apply_status_style(self, item, status_text):
+        if item is None:
+            return
+        color = STATUS_COLORS.get(status_text)
+        if color is None:
+            color = self._theme().get("muted", "#64748b")
+        item.setForeground(QColor(color))
+        f = item.font()
+        f.setBold(True)
+        item.setFont(f)
+        item.setToolTip(status_text)
+
     def _insert_row_items(self, row, filename, path, url, status, size, category, date="", progress=None):
         name_item = QTableWidgetItem(f"  {filename}")
         name_item.setData(Qt.ItemDataRole.UserRole, path)
@@ -2775,12 +3146,7 @@ class DownloadManager(QMainWindow):
             item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
 
-        if status == "Finished":
-            stat_item.setForeground(QColor("#3fb950"))
-        elif status == "File Missing":
-            stat_item.setForeground(QColor("#e3b341"))
-        else:
-            stat_item.setForeground(QColor("#f85149"))
+        self._apply_status_style(stat_item, status)
 
         self.table.setItem(row, 0, name_item)
         self.table.setItem(row, 1, prog_item)
@@ -2792,7 +3158,7 @@ class DownloadManager(QMainWindow):
         date_item.setFlags(date_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
         self.table.setItem(row, 5, stat_item)
         self.table.setItem(row, 6, date_item)
-        self.table.setRowHeight(row, 38)
+        self.table.setRowHeight(row, 40)
 
         self.all_rows.append({"row": row, "category": category})
         self.row_progress[row] = _progress
@@ -2808,45 +3174,62 @@ class DownloadManager(QMainWindow):
         self.history.append(entry)
         save_history(self.history)
 
-    def _make_toolbar_svg_btn(self, svg_path_data, icon_color, tooltip, bg_colors, label_text):
-        """Create toolbar button with gradient outline SVG icon, unified Slate·Blue palette."""
-        from PyQt6.QtSvg import QSvgRenderer
-        from PyQt6.QtCore import QByteArray
+    def _load_svg_qt_compatible(self, path):
+        """Read an SVG and rewrite rgba() colors that Qt's SVG renderer can't parse.
 
-        # Slate·Blue gradient palette
-        GRAD_C1     = "#64748b"
-        GRAD_C2     = "#3b82f6"
+        Qt's QSvgRenderer treats `rgba(r,g,b,a)` as an invalid color and falls back
+        to opaque black, which makes white-with-alpha highlights render as black
+        blotches and silently drops detail strokes. Convert each rgba(...) value
+        on attributes Qt does understand (rgb() + a separate *-opacity attribute).
+        """
+        import re
+        from PyQt6.QtCore import QByteArray
+        with open(path, "rb") as f:
+            svg = f.read().decode("utf-8")
+
+        rgba_re = re.compile(
+            r'\b(fill|stroke|stop-color)\s*=\s*"\s*rgba\(\s*'
+            r'(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*([\d.]+)\s*\)\s*"'
+        )
+
+        def repl(m):
+            attr, r, g, b, a = m.group(1), m.group(2), m.group(3), m.group(4), m.group(5)
+            opacity_attr = "stop-opacity" if attr == "stop-color" else f"{attr}-opacity"
+            return f'{attr}="rgb({r},{g},{b})" {opacity_attr}="{a}"'
+
+        return QByteArray(rgba_re.sub(repl, svg).encode("utf-8"))
+
+    def _make_toolbar_svg_btn(self, icon_filename, tooltip, label_text,
+                              _unused_color=None, _unused_bg=None):
+        """Create a toolbar button that loads a full SVG icon file."""
+        from PyQt6.QtSvg import QSvgRenderer
+
         LABEL_CLR   = "#3b82f6"
         HOVER_LIGHT = "rgba(100, 116, 139, 0.10)"
         HOVER_DARK  = "rgba(59, 130, 246, 0.13)"
         hover_bg = HOVER_DARK if self.dark_mode else HOVER_LIGHT
 
+        icon_path = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            "assets", "toolbar_icons", icon_filename,
+        )
+
         wrapper = QWidget()
-        wrapper.setFixedSize(76, 74)
+        wrapper.setFixedSize(86, 84)
         wrapper.setStyleSheet("background: transparent;")
         wrapper_layout = QVBoxLayout(wrapper)
         wrapper_layout.setContentsMargins(2, 2, 2, 4)
         wrapper_layout.setSpacing(0)
 
         btn = QPushButton()
-        btn.setFixedSize(72, 70)
+        btn.setFixedSize(82, 80)
         btn.setToolTip(tooltip)
         btn.setCursor(Qt.CursorShape.PointingHandCursor)
 
-        # Render SVG at 3x for HiDPI — gradient outline style
-        render_size = 128
-        display_size = 38
-        svg = f'''<svg xmlns="http://www.w3.org/2000/svg" width="{render_size}" height="{render_size}" viewBox="0 0 24 24"
-              fill="none" stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round">
-            <defs>
-                <linearGradient id="grad" gradientUnits="userSpaceOnUse" x1="2" y1="2" x2="22" y2="22">
-                    <stop offset="0%" stop-color="{GRAD_C1}"/>
-                    <stop offset="100%" stop-color="{GRAD_C2}"/>
-                </linearGradient>
-            </defs>
-            <g stroke="url(#grad)">{svg_path_data}</g>
-        </svg>'''
-        renderer = QSvgRenderer(QByteArray(svg.encode()))
+        render_size  = 192
+        display_size = 48
+
+        renderer = QSvgRenderer(self._load_svg_qt_compatible(icon_path))
         pixmap = QPixmap(render_size, render_size)
         pixmap.fill(QColor(0, 0, 0, 0))
         p = QPainter(pixmap)
@@ -2854,9 +3237,11 @@ class DownloadManager(QMainWindow):
         p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
         renderer.render(p)
         p.end()
-        display_pixmap = pixmap.scaled(display_size, display_size,
-                                       Qt.AspectRatioMode.KeepAspectRatio,
-                                       Qt.TransformationMode.SmoothTransformation)
+        display_pixmap = pixmap.scaled(
+            display_size, display_size,
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
 
         icon_lbl = QLabel()
         icon_lbl.setPixmap(display_pixmap)
@@ -2894,7 +3279,6 @@ class DownloadManager(QMainWindow):
             }}
             QPushButton:disabled {{
                 background-color: transparent;
-                opacity: 0.4;
             }}
             QToolTip {{
                 background-color: #1e293b;
@@ -2911,18 +3295,24 @@ class DownloadManager(QMainWindow):
         wrapper._inner_btn = btn
         btn._icon_lbl = icon_lbl
         btn._text_lbl = text_lbl
-        btn._icon_color = LABEL_CLR
-        btn._svg_path = svg_path_data
+        btn._icon_path = icon_path
         return wrapper
 
     def _open_selected_folder(self):
         row = self.table.currentRow()
-        if row >= 0:
-            item = self.table.item(row, 0)
-            if item:
-                path = item.data(Qt.ItemDataRole.UserRole)
-                if path:
-                    open_and_select(path)
+        if row < 0:
+            return
+        item = self.table.item(row, 0)
+        if not item:
+            return
+        path = item.data(Qt.ItemDataRole.UserRole)
+        if path and os.path.exists(path):
+            open_and_select(path)
+        elif path and os.path.isdir(os.path.dirname(path)):
+            subprocess.Popen(['xdg-open', os.path.dirname(path)])
+            self._show_toast("File missing — opened its folder")
+        else:
+            self._show_toast("Folder not found on disk")
 
     def keyPressEvent(self, event):
         if event.key() == Qt.Key.Key_Delete and self.table.hasFocus():
@@ -3108,35 +3498,16 @@ class DownloadManager(QMainWindow):
         toolbar_layout.setContentsMargins(8, 8, 8, 8)
         toolbar_layout.setSpacing(6)
 
-        # Toolbar buttons — stroke outline icons, unified Slate·Blue gradient palette
-        # icon_color and bg_colors args are ignored by the new method but kept for API compat
-        self._start_wrap = self._make_toolbar_svg_btn(
-            '<line x1="12" y1="3" x2="12" y2="15"/><polyline points="8,11 12,15 16,11"/><line x1="4" y1="20" x2="20" y2="20"/>',
-            "", "Start Download", ("", ""), "START")
-        self._resume_wrap = self._make_toolbar_svg_btn(
-            '<polygon points="6,4 20,12 6,20"/>',
-            "", "Resume Download", ("", ""), "RESUME")
-        self._cancel_wrap = self._make_toolbar_svg_btn(
-            '<circle cx="12" cy="12" r="9"/><line x1="9" y1="9" x2="15" y2="15"/><line x1="15" y1="9" x2="9" y2="15"/>',
-            "", "Cancel Download", ("", ""), "CANCEL")
-        self._clear_item_wrap = self._make_toolbar_svg_btn(
-            '<polyline points="3,6 21,6"/><path d="M8 6V4h8v2"/><path d="M19 6l-1 14H6L5 6"/><line x1="10" y1="11" x2="10" y2="17"/><line x1="14" y1="11" x2="14" y2="17"/>',
-            "", "Remove Item", ("", ""), "REMOVE")
-        self._clear_wrap = self._make_toolbar_svg_btn(
-            '<polyline points="3,6 21,6"/><path d="M8 6V4h8v2"/><path d="M19 6l-1 14H6L5 6"/><line x1="10" y1="11" x2="10" y2="17"/><line x1="14" y1="11" x2="14" y2="17"/><line x1="3" y1="3" x2="21" y2="21"/>',
-            "", "Clear All", ("", ""), "CLEAR")
-        self._open_folder_wrap = self._make_toolbar_svg_btn(
-            '<path d="M3 7a2 2 0 012-2h3.586a1 1 0 01.707.293L11 7h9a2 2 0 012 2v10a2 2 0 01-2 2H5a2 2 0 01-2-2V7z"/>',
-            "", "Open Folder", ("", ""), "OPEN")
-        self._yt_wrap = self._make_toolbar_svg_btn(
-            '<rect x="2" y="6" width="14" height="12" rx="2"/><polyline points="16,9.5 22,6 22,18 16,14.5"/>',
-            "", "YouTube Downloader", ("", ""), "YOUTUBE")
-        self._about_wrap = self._make_toolbar_svg_btn(
-            '<circle cx="12" cy="12" r="9"/><line x1="12" y1="8" x2="12" y2="8.01" stroke-width="2.2"/><line x1="12" y1="11.5" x2="12" y2="16.5"/>',
-            "", "About", ("", ""), "ABOUT")
-        self._donate_wrap = self._make_toolbar_svg_btn(
-            '<path d="M20.84 4.61a5.5 5.5 0 00-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 00-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 000-7.78z"/>',
-            "", "Support Development", ("", ""), "DONATE")
+        # Toolbar buttons — squircle SVG icons loaded from assets/toolbar_icons/
+        self._start_wrap       = self._make_toolbar_svg_btn("start.svg",   "Start Download",      "START")
+        self._resume_wrap      = self._make_toolbar_svg_btn("resume.svg",  "Resume Download",     "RESUME")
+        self._cancel_wrap      = self._make_toolbar_svg_btn("cancel.svg",  "Cancel Download",     "CANCEL")
+        self._clear_item_wrap  = self._make_toolbar_svg_btn("remove.svg",  "Remove Item",         "REMOVE")
+        self._clear_wrap       = self._make_toolbar_svg_btn("clear.svg",   "Clear All",           "CLEAR")
+        self._open_folder_wrap = self._make_toolbar_svg_btn("folder.svg",  "Open Folder",         "OPEN")
+        self._yt_wrap          = self._make_toolbar_svg_btn("youtube.svg", "YouTube Downloader",  "YOUTUBE")
+        self._about_wrap       = self._make_toolbar_svg_btn("about.svg",   "About",               "ABOUT")
+        self._donate_wrap      = self._make_toolbar_svg_btn("donate.svg",  "Support Development", "DONATE")
 
         # Extract inner buttons for signal connections
         self.start_btn = self._start_wrap._inner_btn
@@ -3171,7 +3542,7 @@ class DownloadManager(QMainWindow):
         self.table = QTableWidget()
         self.table.setColumnCount(6)
         self.table.setColumnCount(7)
-        self.table.setHorizontalHeaderLabels(["File Name", "Progress", "Downloaded", "Speed", "ETA", "Status", "Date"])
+        self.table.setHorizontalHeaderLabels(["FILE NAME", "PROGRESS", "DOWNLOADED", "SPEED", "ETA", "STATUS", "DATE"])
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         for col in range(self.table.columnCount()):
@@ -3308,6 +3679,104 @@ class DownloadManager(QMainWindow):
             }}
         """)
 
+    def _apply_table_style(self):
+        t = self._theme()
+
+        self.table.setStyleSheet(f"""
+            QTableWidget {{
+                background-color: {t['surface']};
+                border: 1px solid {t['border']};
+                border-radius: 12px;
+                gridline-color: transparent;
+                outline: none;
+                selection-background-color: {t['selected']};
+                selection-color: {t['selected_text']};
+                font-size: 13px;
+                color: {t['text']};
+            }}
+            QTableWidget::item {{
+                padding: 10px 14px;
+                border: none;
+                border-bottom: 1px solid {t['grid']};
+            }}
+            QTableWidget::item:alternate {{
+                background-color: {t['alt_row']};
+            }}
+            QTableWidget::item:selected {{
+                background-color: {t['selected']};
+                color: {t['selected_text']};
+            }}
+            QHeaderView::section {{
+                background-color: {t['header']};
+                color: {t['muted']};
+                font-size: 11px;
+                font-weight: 700;
+                padding: 10px 14px;
+                border: none;
+                border-bottom: 1px solid {t['border']};
+            }}
+            QHeaderView::section:first {{
+                border-top-left-radius: 12px;
+            }}
+            QHeaderView::section:last {{
+                border-top-right-radius: 12px;
+            }}
+            QHeaderView::section:hover {{
+                background-color: {t['menu_hover']};
+                color: {t['menu_hover_text']};
+            }}
+            QHeaderView {{
+                background-color: {t['header']};
+            }}
+            QScrollBar:vertical {{
+                background: transparent;
+                width: 8px;
+                margin: 4px 2px;
+            }}
+            QScrollBar::handle:vertical {{
+                background: {t['scrollbar_handle']};
+                border-radius: 4px;
+                min-height: 30px;
+            }}
+            QScrollBar::handle:vertical:hover {{
+                background: {t['muted']};
+            }}
+            QScrollBar::add-line:vertical,
+            QScrollBar::sub-line:vertical {{
+                height: 0; border: none; background: none;
+            }}
+            QScrollBar:horizontal {{
+                background: transparent;
+                height: 8px;
+                margin: 2px 4px;
+            }}
+            QScrollBar::handle:horizontal {{
+                background: {t['scrollbar_handle']};
+                border-radius: 4px;
+                min-width: 30px;
+            }}
+            QScrollBar::handle:horizontal:hover {{
+                background: {t['muted']};
+            }}
+            QScrollBar::add-line:horizontal,
+            QScrollBar::sub-line:horizontal {{
+                width: 0; border: none; background: none;
+            }}
+        """)
+
+        self.table.setAlternatingRowColors(True)
+        self.table.setShowGrid(False)
+        self.table.verticalHeader().setVisible(False)
+        self.table.verticalHeader().setDefaultSectionSize(40)
+        self.table.setTextElideMode(Qt.TextElideMode.ElideRight)
+
+        # Qt CSS doesn't support letter-spacing reliably on headers — apply via QFont
+        header_font = QFont(self.font().family())
+        header_font.setPixelSize(11)
+        header_font.setBold(True)
+        header_font.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 0.5)
+        self.table.horizontalHeader().setFont(header_font)
+
     def _apply_theme(self):
         t = self._theme()
         accent = t.get("accent", "#2f81f7")
@@ -3410,83 +3879,7 @@ class DownloadManager(QMainWindow):
         self._sidebar.setGraphicsEffect(sidebar_shadow)
 
         # ── Table ──────────────────────────────────────────────────────────────
-        self.table.setStyleSheet(f"""
-            QTableWidget {{
-                background-color: {t['surface']};
-                alternate-background-color: {t['alt_row']};
-                color: {t['text']};
-                border: none;
-                border-radius: 16px;
-                font-size: 13px;
-                gridline-color: {t['grid']};
-                outline: none;
-            }}
-            QTableWidget::item {{
-                padding: 0px 10px;
-                border: none;
-            }}
-            QTableWidget::item:selected {{
-                background-color: {t['selected']};
-                color: {t['selected_text']};
-            }}
-            QHeaderView::section {{
-                background-color: {t['header']};
-                color: {t['faint']};
-                padding: 9px 10px;
-                border: none;
-                border-bottom: 1px solid {t['border']};
-                font-size: 11px;
-                font-weight: 700;
-                letter-spacing: 0.8px;
-                text-transform: uppercase;
-            }}
-            QHeaderView::section:first {{
-                border-top-left-radius: 14px;
-            }}
-            QHeaderView::section:last {{
-                border-top-right-radius: 14px;
-            }}
-            QHeaderView::section:hover {{
-                background-color: {t['menu_hover']};
-                color: {t['menu_hover_text']};
-            }}
-            QScrollBar:vertical {{
-                background: transparent;
-                width: 8px;
-                margin: 4px 2px;
-            }}
-            QScrollBar::handle:vertical {{
-                background: {t['scrollbar_handle']};
-                border-radius: 4px;
-                min-height: 24px;
-            }}
-            QScrollBar::handle:vertical:hover {{
-                background: {t['muted']};
-            }}
-            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
-                height: 0px;
-                border: none;
-                background: none;
-            }}
-            QScrollBar:horizontal {{
-                background: transparent;
-                height: 8px;
-                margin: 2px 4px;
-            }}
-            QScrollBar::handle:horizontal {{
-                background: {t['scrollbar_handle']};
-                border-radius: 4px;
-                min-width: 24px;
-            }}
-            QScrollBar::handle:horizontal:hover {{
-                background: {t['muted']};
-            }}
-            QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{
-                width: 0px;
-                border: none;
-                background: none;
-            }}
-        """)
+        self._apply_table_style()
 
         # ── Status bar ─────────────────────────────────────────────────────────
         self._status_bar.setStyleSheet(f"""
@@ -3933,7 +4326,7 @@ class DownloadManager(QMainWindow):
             stat_item = self.table.item(row, 5)
             if stat_item:
                 stat_item.setText("Downloading")
-                stat_item.setForeground(QColor("#f85149"))
+                self._apply_status_style(stat_item, "Downloading")
             self.row_progress[row] = 0
             self._update_progress(row, 0)
             self._update_cell(row, 2, "—")
@@ -3945,9 +4338,6 @@ class DownloadManager(QMainWindow):
         self.table.insertRow(row)
         _now = time.strftime("%Y-%m-%d %H:%M")
         self._insert_row_items(row, display_name, full_path, url, "Downloading", "—", category, _now)
-        stat_item = self.table.item(row, 5)
-        if stat_item:
-            stat_item.setForeground(QColor("#f85149"))
         self.row_progress[row] = 0
         self.yt_url_to_row[url] = row
         current_cat = CATEGORIES[self._current_cat_row][0]
@@ -3967,12 +4357,13 @@ class DownloadManager(QMainWindow):
     def _on_yt_finished(self, url, status):
         row = self.yt_url_to_row.get(url)
         if row is None:
+            print(f"[warn] _on_yt_finished dropped: no row for status={status} url={url[:120]}", flush=True)
             return
         stat_item = self.table.item(row, 5)
         if stat_item:
             stat_item.setText(status)
+            self._apply_status_style(stat_item, status)
             if status == "Finished":
-                stat_item.setForeground(QColor("#3fb950"))
                 self._update_progress(row, 100)
                 self._update_cell(row, 4, "—")
                 name_item = self.table.item(row, 0)
@@ -3990,7 +4381,6 @@ class DownloadManager(QMainWindow):
                 self.finished_urls[self._social_dedup_key(url)] = path
                 self._notify("Download Complete", f"{filename} finished downloading.")
             else:
-                stat_item.setForeground(QColor("#f85149"))
                 self._update_cell(row, 3, "—")
                 self._update_cell(row, 4, "—")
                 # save cancelled/failed so they survive restart
@@ -4015,9 +4405,55 @@ class DownloadManager(QMainWindow):
         stat_item = self.table.item(row, 5)
         if stat_item:
             stat_item.setText("Downloading")
-            stat_item.setForeground(QColor("#f85149"))
+            self._apply_status_style(stat_item, "Downloading")
+
+    def _on_worker_name_finalized(self, row, filename, path):
+        """Sync row display + stored path with the worker's authoritative
+        on-disk filename.  Called after the worker passes its final
+        uniqueness check, before the first byte is written."""
+        if row is None or row < 0 or row >= self.table.rowCount():
+            return
+        name_item = self.table.item(row, 0)
+        if name_item:
+            name_item.setText(f"  {filename}")
+            name_item.setIcon(get_file_icon(filename))
+            name_item.setData(Qt.ItemDataRole.UserRole, path)
+
+    def _reconcile_stalled_downloads(self):
+        # A row can be stuck on "Downloading" if the worker thread hung
+        # after writing the file, or if the finished signal was dropped
+        # (yt_url_to_row mapping missing). Reconcile from on-disk state.
+        for row_info in self.all_rows:
+            row = row_info["row"]
+            stat_item = self.table.item(row, 5)
+            if not stat_item or stat_item.text() != "Downloading":
+                continue
+            name_item = self.table.item(row, 0)
+            if not name_item:
+                continue
+            path = name_item.data(Qt.ItemDataRole.UserRole) or ""
+            url  = name_item.data(Qt.ItemDataRole.UserRole + 2) or ""
+            if not path or not os.path.exists(path) or os.path.getsize(path) <= 0:
+                continue
+            if any(getattr(t, "url", None) == url and t.isRunning() for t in self.threads):
+                continue
+            filename  = name_item.text().strip()
+            disk_size = format_size(os.path.getsize(path))
+            self._update_cell(row, 2, f"{disk_size} / {disk_size}")
+            self._update_cell(row, 3, "—")
+            self._update_cell(row, 4, "—")
+            stat_item.setText("Finished")
+            self._apply_status_style(stat_item, "Finished")
+            self._update_progress(row, 100)
+            if url:
+                self.finished_urls[self._social_dedup_key(url)] = path
+            self._add_to_history(url, filename, path, "Finished",
+                                 f"{disk_size} / {disk_size}",
+                                 get_category(filename))
+            print(f"[reconcile] Marked stalled download Finished: {filename}", flush=True)
 
     def _update_taskbar_progress(self):
+        self._reconcile_stalled_downloads()
         active = [t for t in self.threads if t.isRunning()]
         total_pct, count = 0, 0
         total_size = 0
@@ -4253,10 +4689,20 @@ class DownloadManager(QMainWindow):
         if action == open_act:
             if path and os.path.exists(path):
                 subprocess.Popen(['xdg-open', path])
+            else:
+                self._show_toast("File not found on disk")
 
         elif action == open_folder_act:
-            if path:
+            if path and os.path.exists(path):
                 open_and_select(path)
+            elif path and os.path.isdir(os.path.dirname(path)):
+                # File gone but its folder still exists — open the folder
+                # (no highlight is possible without the file) and tell the
+                # user why nothing got selected.
+                subprocess.Popen(['xdg-open', os.path.dirname(path)])
+                self._show_toast("File missing — opened its folder")
+            else:
+                self._show_toast("Folder not found on disk")
 
         elif action == rename_act:
             if path and os.path.exists(path):
@@ -4431,7 +4877,7 @@ class DownloadManager(QMainWindow):
         stat_item = self.table.item(row, 5)
         if stat_item:
             stat_item.setText("Downloading")
-            stat_item.setForeground(QColor("#2f81f7"))
+            self._apply_status_style(stat_item, "Downloading")
         self._update_cell(row, 3, "—")
         self._update_cell(row, 4, "—")
         category = get_category(filename)
@@ -4508,7 +4954,8 @@ class DownloadManager(QMainWindow):
         thread.downloaded.connect(lambda s, r=row: self._update_cell(r, 2, s))
         thread.speed.connect(     lambda s, r=row: self._update_cell(r, 3, s))
         thread.eta.connect(       lambda e, r=row: self._update_cell(r, 4, e))
-        thread.finished.connect(  lambda m, r=row, u=url, n=filename, p=path or "", c=category: self._on_finished(m, r, u, n, p, c))
+        thread.name_finalized.connect(lambda n, p, r=row: self._on_worker_name_finalized(r, n, p))
+        thread.finished.connect(  lambda m, r=row, u=url, c=category: self._on_finished(m, r, u, c))
         thread.start()
 
     def check_queue(self):
@@ -4531,6 +4978,16 @@ class DownloadManager(QMainWindow):
                 # Normalize embed URLs — strips /e/, /embed/ added by iframe players
                 norm_url     = normalize_stream_url(url)
                 norm_referer = normalize_stream_url(referer) if referer else ""
+                # video.twimg.com .m4s URLs are DASH media segments — even
+                # though they return content-type: video/mp4, they only
+                # contain styp/moof/mdat boxes, no ftyp/moov, so they're not
+                # playable standalone. The extension also forwards the tweet
+                # page URL as referer; yt-dlp's TwitterIE can extract the
+                # full video from that. Swap the .m4s for the status URL.
+                if is_twimg_dash_segment(norm_url) and re.search(
+                    r'(?:twitter\.com|x\.com)/[^/]+/status/\d+', norm_referer or ''
+                ):
+                    norm_url = norm_referer
                 self.open_stream_dialog(
                     url=norm_url,
                     filename=filename if filename else "stream.mp4",
@@ -4595,9 +5052,6 @@ class DownloadManager(QMainWindow):
         self.table.insertRow(row)
         _now = time.strftime("%Y-%m-%d %H:%M")
         self._insert_row_items(row, unique_name, full_path, url, "Downloading", "—", category, _now)
-        stat_item = self.table.item(row, 5)
-        if stat_item:
-            stat_item.setForeground(QColor("#2f81f7"))
         self.row_progress[row] = 0
 
         current_cat = CATEGORIES[self._current_cat_row][0]
@@ -4614,7 +5068,8 @@ class DownloadManager(QMainWindow):
         thread.downloaded.connect(lambda s, r=row: self._update_cell(r, 2, s))
         thread.speed.connect(     lambda s, r=row: self._update_cell(r, 3, s))
         thread.eta.connect(       lambda e, r=row: self._update_cell(r, 4, e))
-        thread.finished.connect(  lambda m, r=row, u=url, n=unique_name, p=full_path, c=category: self._on_finished(m, r, u, n, p, c))
+        thread.name_finalized.connect(lambda n, p, r=row: self._on_worker_name_finalized(r, n, p))
+        thread.finished.connect(  lambda m, r=row, u=url, c=category: self._on_finished(m, r, u, c))
         thread.start()
 
     def _update_progress(self, row, value):
@@ -4643,15 +5098,24 @@ class DownloadManager(QMainWindow):
                 new_item.setToolTip(text)
             self.table.setItem(row, col, new_item)
 
-    def _on_finished(self, msg, row, url, filename, path, category):
+    def _on_finished(self, msg, row, url, category):
+        # Read filename and path from the live row — the worker may have
+        # finalized a different name than what was captured at enqueue
+        # (Content-Disposition override, second uniqueness pass, etc).
+        # Using stale captured values caused Open File to silently open the
+        # wrong path and history to record bogus filenames.
+        name_item = self.table.item(row, 0)
+        filename  = name_item.text().strip() if name_item else ""
+        path      = name_item.data(Qt.ItemDataRole.UserRole) if name_item else ""
         item = self.table.item(row, 5)
         if item:
             item.setText(msg)
+            self._apply_status_style(item, msg)
             if msg == "Finished":
-                item.setForeground(QColor("#3fb950"))
                 self._update_progress(row, 100)
                 self._update_cell(row, 4, "—")
-                self.finished_urls[self._social_dedup_key(url)] = path
+                if path:
+                    self.finished_urls[self._social_dedup_key(url)] = path
                 # Use the actual on-disk size; multi-stream YT downloads report
                 # per-stream bytes during progress, so the final merged size is
                 # only known after the file is written.
@@ -4662,7 +5126,6 @@ class DownloadManager(QMainWindow):
                 self._add_to_history(url, filename, path, "Finished", size, category)
                 self._notify("Download Complete", f"{filename} finished downloading.")
             else:
-                item.setForeground(QColor("#f85149"))
                 self._update_cell(row, 3, "—")
                 self._update_cell(row, 4, "—")
                 # save cancelled/failed so they survive restart and can be resumed
@@ -4773,6 +5236,35 @@ class DownloadManager(QMainWindow):
                 t.stop()
                 break
 
+    def _other_row_owns_path(self, exclude_row, path):
+        """True if any other row stores the same on-disk path. Prevents
+        deleting a different row's properly-downloaded file when the user
+        clears an unrelated incomplete entry that happens to share filename
+        (e.g. enqueue computed a stale (1)/(2) suffix, or two history rows
+        point at the same name)."""
+        if not path:
+            return False
+        try:
+            norm = os.path.normpath(os.path.abspath(path))
+        except Exception:
+            norm = path
+        for r in range(self.table.rowCount()):
+            if r == exclude_row:
+                continue
+            it = self.table.item(r, 0)
+            if not it:
+                continue
+            p = it.data(Qt.ItemDataRole.UserRole)
+            if not p:
+                continue
+            try:
+                if os.path.normpath(os.path.abspath(p)) == norm:
+                    return True
+            except Exception:
+                if p == path:
+                    return True
+        return False
+
     def _delete_partials_for_row(self, row):
         """Delete any on-disk partial files for an unfinished download row."""
         name_item = self.table.item(row, 0)
@@ -4789,16 +5281,29 @@ class DownloadManager(QMainWindow):
         folder = os.path.dirname(path)
         if url and is_youtube_url(url) and folder and os.path.isdir(folder):
             # yt-dlp produces <base>.mp4, <base>.f137.mp4, <base>.f251.m4a,
-            # <base>.*.part, <base>.*.ytdl ...  — glob-clean the lot.
+            # <base>.*.part, <base>.*.ytdl ...  — glob-clean the lot, but skip
+            # any artefact another row claims as its final on-disk file.
             base = os.path.splitext(os.path.basename(path))[0]
             if base:
                 for f in glob.glob(os.path.join(folder, glob.escape(base) + ".*")):
+                    if self._other_row_owns_path(row, f):
+                        continue
                     try:
                         os.remove(f)
                     except OSError:
                         pass
             return
         # Plain HTTP download: the file and any sibling .part
+        if self._other_row_owns_path(row, path):
+            # Another row owns the same final path — only the .part is safe
+            # to remove (the completed file belongs to the other row).
+            part = path + ".part"
+            if os.path.exists(part):
+                try:
+                    os.remove(part)
+                except OSError:
+                    pass
+            return
         for candidate in (path, path + ".part"):
             if os.path.exists(candidate):
                 try:
@@ -4812,12 +5317,32 @@ class DownloadManager(QMainWindow):
             self._delete_partials_for_row(row)
             name_item = self.table.item(row, 0)
             if name_item:
-                url = name_item.data(Qt.ItemDataRole.UserRole + 2)
+                url  = name_item.data(Qt.ItemDataRole.UserRole + 2)
+                path = name_item.data(Qt.ItemDataRole.UserRole)
                 if url:
-                    self.history = [e for e in self.history if e.get("url") != url]
+                    # Filter history by (url, path) pair — a single URL can
+                    # legitimately have multiple history entries (re-download
+                    # after rename, "Download with New Name", etc).  Removing
+                    # by URL alone wiped the still-good sibling entry.
+                    before = len(self.history)
+                    self.history = [
+                        e for e in self.history
+                        if not (e.get("url") == url and e.get("path") == path)
+                    ]
+                    if len(self.history) == before and path:
+                        # No (url, path) match — fall back to URL-only so
+                        # legacy entries without a path field still clear.
+                        self.history = [e for e in self.history if e.get("url") != url]
                     save_history(self.history)
-                    self.finished_urls.pop(self._social_dedup_key(url), None)
-                    self.yt_settings.pop(url, None)
+                    # Only drop the cached "already finished" mapping if no
+                    # other row still owns that URL's final file.
+                    if not any(
+                        self.table.item(r, 0)
+                        and self.table.item(r, 0).data(Qt.ItemDataRole.UserRole + 2) == url
+                        for r in range(self.table.rowCount()) if r != row
+                    ):
+                        self.finished_urls.pop(self._social_dedup_key(url), None)
+                        self.yt_settings.pop(url, None)
             self.table.removeRow(row)
             self.row_progress.pop(row, None)
             self.all_rows = [r for r in self.all_rows if r["row"] != row]
