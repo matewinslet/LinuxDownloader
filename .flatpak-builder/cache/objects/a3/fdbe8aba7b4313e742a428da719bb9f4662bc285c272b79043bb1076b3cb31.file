@@ -1,4 +1,0 @@
-[Application]
-name=com.tanjim.LDM
-runtime=org.kde.Platform/x86_64/6.8
-sdk=org.kde.Sdk/x86_64/6.8

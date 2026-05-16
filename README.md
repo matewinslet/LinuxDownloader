@@ -150,27 +150,6 @@ git pull
 
 ---
 
-## File Structure
-
-```
-linux-downloader/
-├── download_manager.py     # Main application
-├── install.sh              # Installer script
-├── icons/                  # App icons
-├── screenshots/            # Screenshots
-├── LICENSE.txt             # License
-├── firefox-extension/      # Firefox extension source
-│   ├── manifest.json
-│   ├── background.js
-│   ├── popup.html
-│   ├── popup.js
-│   ├── popup.css
-│   └── content.js
-└── README.md
-```
-
----
-
 ## Dependencies
 
 | Package | Purpose |

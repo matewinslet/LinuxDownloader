@@ -1,2 +1,34 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# Wheels / pip packages
+*.whl
+pip-packages/
+
+# Flatpak build artifacts
 .flatpak-builder/
 build-dir/
+
+# Backups / scratch
+*.bak
+*.bak_*
+*~
+TXT.txt
+Image backup/
+
+# Firefox extension build output
+firefox-extension/web-ext-artifacts/
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+*.swp

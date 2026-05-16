@@ -1,2 +1,0 @@
-[console_scripts]
-browser-cookie = browser_cookie3.__main__:main
