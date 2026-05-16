@@ -1,0 +1,22 @@
+<svg width="192" height="192" viewBox="0 0 192 192" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg-gradient" x1="0" y1="0" x2="192" y2="192" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#22D3EE"/>
+      <stop offset="50%" stop-color="#3B82F6"/>
+      <stop offset="100%" stop-color="#2563EB"/>
+    </linearGradient>
+    <linearGradient id="shine-gradient" x1="0" y1="0" x2="192" y2="192" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#FFFFFF" stop-opacity="0.2"/>
+      <stop offset="100%" stop-color="#FFFFFF" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="192" height="192" rx="24" fill="url(#bg-gradient)"/>
+  <rect width="192" height="192" rx="24" fill="url(#shine-gradient)"/>
+
+  <rect x="32" y="48" width="128" height="80" rx="16" fill="White"/>
+
+  <path d="M96 110 L64 80 L96 80 L128 80 Z" fill="#3B82F6"/>
+
+  <rect x="64" y="152" width="64" height="6" rx="3" fill="#2563EB"/>
+</svg>

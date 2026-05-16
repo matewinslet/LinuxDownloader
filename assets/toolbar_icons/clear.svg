@@ -1,0 +1,60 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="80" height="80" viewBox="0 0 80 80">
+  <defs>
+    <linearGradient id="bg-clear" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#f43f5e"></stop>
+      <stop offset="1" stop-color="#9f1239"></stop>
+    </linearGradient>
+    <linearGradient id="hl-clear" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="white" stop-opacity="0.38"></stop>
+      <stop offset="0.5" stop-color="white" stop-opacity="0"></stop>
+    </linearGradient>
+    <radialGradient id="gloss-clear" cx="0.5" cy="0" r="0.9">
+      <stop offset="0" stop-color="white" stop-opacity="0.25"></stop>
+      <stop offset="1" stop-color="white" stop-opacity="0"></stop>
+    </radialGradient>
+  </defs>
+  <rect width="80" height="80" rx="22" fill="url(#bg-clear)"></rect>
+  <rect width="80" height="80" rx="22" fill="url(#gloss-clear)"></rect>
+  <rect width="80" height="80" rx="22" fill="url(#hl-clear)"></rect>
+  
+  <defs>
+    <linearGradient id="paper-1" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#ffffff"></stop><stop offset="1" stop-color="#e2e8f0"></stop></linearGradient>
+    <linearGradient id="paper-2" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#ffffff"></stop><stop offset="1" stop-color="#f1f5f9"></stop></linearGradient>
+    <linearGradient id="paper-3" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#ffffff"></stop><stop offset="1" stop-color="#f8fafc"></stop></linearGradient>
+  </defs>
+  
+  <g style="filter: drop-shadow(0 1.5px 1.5px rgba(80,0,15,0.5))">
+    <rect x="19.5" y="14" width="44" height="9" rx="1.6" fill="url(#paper-1)" stroke="rgba(0,0,0,0.22)" stroke-width="0.5"></rect>
+    <line x1="20.5" y1="14.6" x2="61.5" y2="14.6" stroke="rgba(255,255,255,0.7)" stroke-width="0.5"></line>
+    <rect x="23.5" y="17.5" width="22" height="1.6" rx="0.6" fill="rgba(100,116,139,0.55)"></rect>
+    <rect x="23.5" y="20" width="14" height="1.2" rx="0.5" fill="rgba(100,116,139,0.4)"></rect>
+  </g>
+  <g style="filter: drop-shadow(0 1.5px 1.5px rgba(80,0,15,0.5))">
+    <rect x="17" y="24" width="44" height="9" rx="1.6" fill="url(#paper-2)" stroke="rgba(0,0,0,0.22)" stroke-width="0.5"></rect>
+    <line x1="18" y1="24.6" x2="59" y2="24.6" stroke="rgba(255,255,255,0.7)" stroke-width="0.5"></line>
+    <rect x="21" y="27.5" width="22" height="1.6" rx="0.6" fill="rgba(100,116,139,0.55)"></rect>
+    <rect x="21" y="30" width="14" height="1.2" rx="0.5" fill="rgba(100,116,139,0.4)"></rect>
+  </g>
+  <g style="filter: drop-shadow(0 1.5px 1.5px rgba(80,0,15,0.5))">
+    <rect x="19" y="34" width="44" height="9" rx="1.6" fill="url(#paper-3)" stroke="rgba(0,0,0,0.22)" stroke-width="0.5"></rect>
+    <line x1="20" y1="34.6" x2="61" y2="34.6" stroke="rgba(255,255,255,0.7)" stroke-width="0.5"></line>
+    <rect x="23" y="37.5" width="22" height="1.6" rx="0.6" fill="rgba(100,116,139,0.55)"></rect>
+    <rect x="23" y="40" width="14" height="1.2" rx="0.5" fill="rgba(100,116,139,0.4)"></rect>
+  </g>
+  <g style="filter: drop-shadow(0 1.5px 1.5px rgba(80,0,15,0.5))">
+    <rect x="16.5" y="44" width="44" height="9" rx="1.6" fill="url(#paper-2)" stroke="rgba(0,0,0,0.22)" stroke-width="0.5"></rect>
+    <line x1="17.5" y1="44.6" x2="58.5" y2="44.6" stroke="rgba(255,255,255,0.7)" stroke-width="0.5"></line>
+    <rect x="20.5" y="47.5" width="22" height="1.6" rx="0.6" fill="rgba(100,116,139,0.55)"></rect>
+    <rect x="20.5" y="50" width="14" height="1.2" rx="0.5" fill="rgba(100,116,139,0.4)"></rect>
+  </g>
+  <g style="filter: drop-shadow(0 1.5px 1.5px rgba(80,0,15,0.5))">
+    <rect x="18.5" y="54" width="44" height="9" rx="1.6" fill="url(#paper-1)" stroke="rgba(0,0,0,0.22)" stroke-width="0.5"></rect>
+    <line x1="19.5" y1="54.6" x2="60.5" y2="54.6" stroke="rgba(255,255,255,0.7)" stroke-width="0.5"></line>
+    <rect x="22.5" y="57.5" width="22" height="1.6" rx="0.6" fill="rgba(100,116,139,0.55)"></rect>
+    <rect x="22.5" y="60" width="14" height="1.2" rx="0.5" fill="rgba(100,116,139,0.4)"></rect>
+  </g>
+  <line x1="12" y1="66" x2="68" y2="14" stroke="rgba(255,255,255,0.95)" stroke-width="7" stroke-linecap="round"></line>
+  <line x1="12" y1="66" x2="68" y2="14" stroke="#9f1239" stroke-width="3.2" stroke-linecap="round"></line>
+  <rect x="0.5" y="0.5" width="79" height="79" rx="21.5" fill="none" stroke="rgba(255,255,255,0.25)" stroke-width="1"></rect>
+  <rect x="0" y="0" width="80" height="80" rx="22" fill="none" stroke="rgba(0,0,0,0.18)" stroke-width="0.6"></rect>
+</svg>

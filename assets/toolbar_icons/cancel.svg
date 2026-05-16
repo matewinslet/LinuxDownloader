@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="80" height="80" viewBox="0 0 80 80">
+  <defs>
+    <linearGradient id="bg-cancel" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#fef3c7"></stop>
+      <stop offset="1" stop-color="#d97706"></stop>
+    </linearGradient>
+    <linearGradient id="hl-cancel" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="white" stop-opacity="0.38"></stop>
+      <stop offset="0.5" stop-color="white" stop-opacity="0"></stop>
+    </linearGradient>
+    <radialGradient id="gloss-cancel" cx="0.5" cy="0" r="0.9">
+      <stop offset="0" stop-color="white" stop-opacity="0.25"></stop>
+      <stop offset="1" stop-color="white" stop-opacity="0"></stop>
+    </radialGradient>
+  </defs>
+  <rect width="80" height="80" rx="22" fill="url(#bg-cancel)"></rect>
+  <rect width="80" height="80" rx="22" fill="url(#gloss-cancel)"></rect>
+  <rect width="80" height="80" rx="22" fill="url(#hl-cancel)"></rect>
+  
+  <defs>
+    <linearGradient id="stop-grad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#f87171"></stop>
+      <stop offset="0.5" stop-color="#dc2626"></stop>
+      <stop offset="1" stop-color="#991b1b"></stop>
+    </linearGradient>
+  </defs>
+  <g style="filter: drop-shadow(1.5px 3px 3px rgba(0,0,0,0.45))">
+    <path d="M 28 12 L 52 12 L 68 28 L 68 52 L 52 68 L 28 68 L 12 52 L 12 28 Z" fill="white" stroke="rgba(0,0,0,0.7)" stroke-width="1"></path>
+    <path d="M 29 14 L 51 14 L 66 29 L 66 51 L 51 66 L 29 66 L 14 51 L 14 29 Z" fill="url(#stop-grad)" stroke="rgba(120,20,20,0.6)" stroke-width="0.6"></path>
+    <text x="40" y="40" text-anchor="middle" dominant-baseline="central" font-size="13" font-weight="900" fill="white" font-family="&#39;Arial Black&#39;, &#39;Helvetica Neue&#39;, Helvetica, sans-serif" letter-spacing="0.3">STOP</text>
+    <path d="M32 17 L48 17" stroke="rgba(255,255,255,0.5)" stroke-width="1.2" stroke-linecap="round"></path>
+  </g>
+  <rect x="0.5" y="0.5" width="79" height="79" rx="21.5" fill="none" stroke="rgba(255,255,255,0.25)" stroke-width="1"></rect>
+  <rect x="0" y="0" width="80" height="80" rx="22" fill="none" stroke="rgba(0,0,0,0.18)" stroke-width="0.6"></rect>
+</svg>
