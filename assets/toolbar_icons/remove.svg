@@ -1,0 +1,46 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="80" height="80" viewBox="0 0 80 80">
+  <defs>
+    <linearGradient id="bg-remove" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#cbd5e1"></stop>
+      <stop offset="1" stop-color="#64748b"></stop>
+    </linearGradient>
+    <linearGradient id="hl-remove" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="white" stop-opacity="0.38"></stop>
+      <stop offset="0.5" stop-color="white" stop-opacity="0"></stop>
+    </linearGradient>
+    <radialGradient id="gloss-remove" cx="0.5" cy="0" r="0.9">
+      <stop offset="0" stop-color="white" stop-opacity="0.25"></stop>
+      <stop offset="1" stop-color="white" stop-opacity="0"></stop>
+    </radialGradient>
+  </defs>
+  <rect width="80" height="80" rx="22" fill="url(#bg-remove)"></rect>
+  <rect width="80" height="80" rx="22" fill="url(#gloss-remove)"></rect>
+  <rect width="80" height="80" rx="22" fill="url(#hl-remove)"></rect>
+  
+  <defs>
+    <linearGradient id="bin-body" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="rgba(255,255,255,0.95)"></stop>
+      <stop offset="0.4" stop-color="rgba(255,255,255,0.7)"></stop>
+      <stop offset="1" stop-color="rgba(241,245,249,0.85)"></stop>
+    </linearGradient>
+    <linearGradient id="bin-lid" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff"></stop>
+      <stop offset="1" stop-color="#e2e8f0"></stop>
+    </linearGradient>
+  </defs>
+  <path d="M34 14 Q34 11 37 11 L43 11 Q46 11 46 14 L46 18 L34 18 Z" fill="none" stroke="rgba(30,41,59,0.55)" stroke-width="1.8" stroke-linecap="round"></path>
+  <g style="filter: drop-shadow(0 1px 1px rgba(0,0,0,0.2))">
+    <ellipse cx="40" cy="21" rx="22" ry="3.5" fill="url(#bin-lid)" stroke="rgba(0,0,0,0.25)" stroke-width="0.5"></ellipse>
+    <ellipse cx="40" cy="20" rx="19" ry="2.4" fill="none" stroke="rgba(255,255,255,0.7)" stroke-width="0.5"></ellipse>
+  </g>
+  <g style="filter: drop-shadow(0 2px 2.5px rgba(0,0,0,0.25))">
+    <path d="M 22 24 L 26 62 Q 26.5 66 30 66 L 50 66 Q 53.5 66 54 62 L 58 24 Z" fill="url(#bin-body)" stroke="rgba(30,41,59,0.45)" stroke-width="0.6"></path>
+    <path d="M26 28 L29 62" stroke="rgba(255,255,255,0.6)" stroke-width="1" stroke-linecap="round" fill="none"></path>
+    <path d="M52 28 L51 62" stroke="rgba(30,41,59,0.18)" stroke-width="0.6" fill="none"></path>
+    <line x1="34" y1="28" x2="33" y2="62" stroke="rgba(30,41,59,0.18)" stroke-width="0.5"></line>
+    <line x1="40" y1="28" x2="40" y2="62" stroke="rgba(30,41,59,0.12)" stroke-width="0.5"></line>
+    <line x1="46" y1="28" x2="47" y2="62" stroke="rgba(30,41,59,0.18)" stroke-width="0.5"></line>
+  </g>
+  <rect x="0.5" y="0.5" width="79" height="79" rx="21.5" fill="none" stroke="rgba(255,255,255,0.25)" stroke-width="1"></rect>
+  <rect x="0" y="0" width="80" height="80" rx="22" fill="none" stroke="rgba(0,0,0,0.18)" stroke-width="0.6"></rect>
+</svg>
