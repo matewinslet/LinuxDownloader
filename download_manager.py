@@ -2018,11 +2018,30 @@ class StreamDialog(QDialog):
         if "unsupported url" in m and self._url and (
             'facebook.com' in self._url or 'fb.watch' in self._url
         ):
+            is_reel = '/reel/' in self._url
+            if is_reel:
+                return (
+                    "Facebook Reels — cannot download automatically on first entry.\n\n"
+                    "On the reel, click Share \u2192 Copy link\n"
+                    "(or \u22ef (3 dots) \u2192 Copy link),\n"
+                    "then paste the link in the box below and click Start Download."
+                ), "Paste the reel link below to download"
             return (
                 "Facebook feed video — cannot download automatically.\n\n"
                 "On the video, click \u22ef (3 dots) \u2192 Copy link,\n"
                 "then paste the link in the box below and click Start Download."
             ), "Paste the video link below to download"
+        # Outdated yt-dlp on a major host — extractor returns "no formats" when
+        # YouTube/Facebook change their delivery flow. Press-Play won't fix this.
+        if "no video formats" in m and self._url and any(
+            h in self._url for h in ('youtube.com', 'youtu.be', 'facebook.com', 'fb.watch')
+        ):
+            return (
+                "yt-dlp is out of date and can no longer read this site.\n\n"
+                "Open a terminal and run:\n"
+                "  pip install -U yt-dlp --break-system-packages\n\n"
+                "Then restart LDM and try again."
+            ), "yt-dlp out of date — run pip install -U yt-dlp"
         # Play-first errors — yt-dlp couldn't extract because stream not loaded yet
         if "unsupported url" in m or "no video formats" in m or "no suitable" in m:
             return (
@@ -2127,11 +2146,16 @@ class StreamDialog(QDialog):
             self.force_dl_btn.setVisible(True)
             self.close_btn.setEnabled(True)
         # Facebook paste hint -- show input row so user can paste link
-        elif 'Paste the video link' in label_msg:
+        elif 'Paste the video link' in label_msg or 'Paste the reel link' in label_msg:
             self.info_label.setText(label_msg)
-            self.paste_hint.setText(
-                "\u22ef (3 dots) on video \u2192 Copy link \u2192 paste below:"
-            )
+            if 'reel link' in label_msg:
+                self.paste_hint.setText(
+                    "Share \u2192 Copy link (or \u22ef \u2192 Copy link) on the reel \u2192 paste below:"
+                )
+            else:
+                self.paste_hint.setText(
+                    "\u22ef (3 dots) on video \u2192 Copy link \u2192 paste below:"
+                )
             self.paste_row.setVisible(True)
             self.start_btn.setEnabled(True)
             self.close_btn.setEnabled(True)
@@ -4091,7 +4115,7 @@ class DownloadManager(QMainWindow):
     ("1. System packages  (ffmpeg, curl, PyQt6 SVG)",
      "sudo apt install -y ffmpeg curl python3-pyqt6.qtsvg"),
     ("2. Python packages  (PyQt6, requests, yt-dlp, browser-cookie3)",
-     "pip install PyQt6 requests yt-dlp browser-cookie3 --break-system-packages"),
+     "pip install -U PyQt6 requests yt-dlp browser-cookie3 --break-system-packages"),
     ("3. Deno  —  JavaScript runtime required for YouTube",
      "curl -fsSL https://deno.land/install.sh | sh && sudo ln -sf ~/.deno/bin/deno /usr/local/bin/deno"),
 ]
@@ -5371,9 +5395,32 @@ class DownloadManager(QMainWindow):
         self._update_category_counts()
 
 
+def _ensure_ytdlp_config():
+    """YouTube's current bot protection needs a JS challenge solver that yt-dlp
+    fetches from GitHub on first use. Without --remote-components ejs:github
+    the fetch is blocked and extraction silently returns no formats."""
+    cfg_dir = os.path.expanduser("~/.config/yt-dlp")
+    cfg_path = os.path.join(cfg_dir, "config")
+    flag = "--remote-components ejs:github"
+    try:
+        os.makedirs(cfg_dir, exist_ok=True)
+        existing = ""
+        if os.path.exists(cfg_path):
+            with open(cfg_path, "r", encoding="utf-8") as f:
+                existing = f.read()
+        if flag not in existing:
+            with open(cfg_path, "a", encoding="utf-8") as f:
+                if existing and not existing.endswith("\n"):
+                    f.write("\n")
+                f.write(flag + "\n")
+    except OSError:
+        pass
+
+
 if __name__ == "__main__":
     if not os.environ.get("QT_QPA_PLATFORMTHEME"):
         os.environ["QT_QPA_PLATFORMTHEME"] = "gtk3"
+    _ensure_ytdlp_config()
     app = QApplication(sys.argv)
     window = DownloadManager()
     window.show()
