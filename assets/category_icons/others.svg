@@ -1,0 +1,44 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="80" height="80" viewBox="0 0 80 80">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#fb923c"/>
+      <stop offset="1" stop-color="#9a3412"/>
+    </linearGradient>
+    <linearGradient id="hl" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="rgba(255,255,255,0.42)"/>
+      <stop offset="0.55" stop-color="rgba(255,255,255,0)"/>
+    </linearGradient>
+    <radialGradient id="gloss" cx="0.5" cy="0" r="0.9">
+      <stop offset="0" stop-color="rgba(255,255,255,0.28)"/>
+      <stop offset="1" stop-color="rgba(255,255,255,0)"/>
+    </radialGradient>
+    <linearGradient id="shapeWhite" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#cbd5e1"/>
+    </linearGradient>
+    <linearGradient id="shapeYellow" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#fef3c7"/>
+      <stop offset="1" stop-color="#fbbf24"/>
+    </linearGradient>
+    <linearGradient id="shapeRose" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#fda4af"/>
+      <stop offset="1" stop-color="#e11d48"/>
+    </linearGradient>
+  </defs>
+  <rect width="80" height="80" rx="22" fill="url(#bg)"/>
+  <rect width="80" height="80" rx="22" fill="url(#gloss)"/>
+  <rect width="80" height="80" rx="22" fill="url(#hl)"/>
+  <path d="M26 14 L42 14 L34 30 Z" fill="url(#shapeYellow)" stroke="rgba(0,0,0,0.4)" stroke-width="0.6" stroke-linejoin="round"/>
+  <path d="M28 17 L40 17" stroke="rgba(255,255,255,0.75)" stroke-width="0.8" stroke-linecap="round"/>
+  <g transform="rotate(15 56 22)">
+    <rect x="46" y="12" width="20" height="20" rx="3" fill="url(#shapeRose)" stroke="rgba(0,0,0,0.4)" stroke-width="0.6"/>
+    <path d="M48 15 L64 15" stroke="rgba(255,255,255,0.7)" stroke-width="0.8" stroke-linecap="round"/>
+  </g>
+  <circle cx="40" cy="52" r="16" fill="url(#shapeWhite)" stroke="rgba(0,0,0,0.4)" stroke-width="0.6"/>
+  <path d="M30 42 Q40 35 50 42" stroke="rgba(255,255,255,0.7)" stroke-width="1.2" fill="none" stroke-linecap="round"/>
+  <g transform="rotate(45 22 56)">
+    <rect x="16" y="50" width="12" height="12" rx="2" fill="url(#shapeYellow)" stroke="rgba(0,0,0,0.4)" stroke-width="0.6"/>
+  </g>
+  <rect x="0.5" y="0.5" width="79" height="79" rx="21.5" fill="none" stroke="rgba(255,255,255,0.28)" stroke-width="1"/>
+  <rect x="0" y="0" width="80" height="80" rx="22" fill="none" stroke="rgba(0,0,0,0.18)" stroke-width="0.6"/>
+</svg>

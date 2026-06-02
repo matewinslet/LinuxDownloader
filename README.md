@@ -4,7 +4,7 @@ A powerful download manager for Linux — with a Firefox extension, YouTube down
 
 ![Platform](https://img.shields.io/badge/platform-Linux-blue)
 ![Python](https://img.shields.io/badge/python-3.10%2B-blue)
-![License](https://img.shields.io/badge/license-All%20Rights%20Reserved-red)
+![License](https://img.shields.io/badge/license-MIT-green)
 ![Version](https://img.shields.io/badge/version-1.0-green)
 
 ---
@@ -174,5 +174,5 @@ Having issues? Contact the developer:
 
 ## License
 
-Copyright (c) 2026 Tanjim — All Rights Reserved.
+Licensed under the MIT License — Copyright (c) 2026 Tanjim.
 See [LICENSE.txt](LICENSE.txt) for details.

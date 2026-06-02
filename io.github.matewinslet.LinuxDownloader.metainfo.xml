@@ -1,0 +1,82 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.matewinslet.LinuxDownloader</id>
+
+  <name>Linux Download Manager</name>
+  <summary>Download files and videos from the web</summary>
+
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+
+  <developer id="io.github.matewinslet">
+    <name>Tanjim</name>
+  </developer>
+
+  <description>
+    <p>
+      Linux Download Manager is a desktop download manager that keeps every
+      download in one place and sorts finished files into categories
+      automatically.
+    </p>
+    <p>
+      Paste a link to start a download, or install the companion Firefox and
+      Chrome extension to capture downloads and videos straight from your
+      browser. Video downloads are powered by yt-dlp, so you can grab clips
+      from YouTube and many other streaming and social sites.
+    </p>
+    <p>Features:</p>
+    <ul>
+      <li>Automatic categorization of finished files (Videos, Music, Documents, Compressed, Programs)</li>
+      <li>YouTube downloader with quality and audio-only options</li>
+      <li>Video capture from streaming and social sites via yt-dlp</li>
+      <li>Pause, resume, and queue management</li>
+      <li>Optional Firefox and Chrome companion extension for one-click capture</li>
+      <li>Live download speed, ETA, and disk-usage overview</li>
+    </ul>
+  </description>
+
+  <launchable type="desktop-id">io.github.matewinslet.LinuxDownloader.desktop</launchable>
+
+  <url type="homepage">https://github.com/matewinslet/LinuxDownloader</url>
+  <url type="bugtracker">https://github.com/matewinslet/LinuxDownloader/issues</url>
+  <url type="vcs-browser">https://github.com/matewinslet/LinuxDownloader</url>
+
+  <screenshots>
+    <screenshot type="default">
+      <caption>The main download manager window</caption>
+      <image>https://raw.githubusercontent.com/matewinslet/LinuxDownloader/v1.0.0/screenshots/01-main-window.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>Downloading a video with the YouTube downloader</caption>
+      <image>https://raw.githubusercontent.com/matewinslet/LinuxDownloader/v1.0.0/screenshots/07-youtube-downloader.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>Capturing a video from a streaming site</caption>
+      <image>https://raw.githubusercontent.com/matewinslet/LinuxDownloader/v1.0.0/screenshots/09-stream-downloader.png</image>
+    </screenshot>
+  </screenshots>
+
+  <content_rating type="oars-1.1" />
+
+  <recommends>
+    <control>keyboard</control>
+    <control>pointing</control>
+  </recommends>
+
+  <requires>
+    <display_length compare="ge">768</display_length>
+  </requires>
+
+  <branding>
+    <color type="primary" scheme_preference="light">#dbeafe</color>
+    <color type="primary" scheme_preference="dark">#1e293b</color>
+  </branding>
+
+  <releases>
+    <release version="1.0.0" date="2026-06-03">
+      <description>
+        <p>First public release.</p>
+      </description>
+    </release>
+  </releases>
+</component>
