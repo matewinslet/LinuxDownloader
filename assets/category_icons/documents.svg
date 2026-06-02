@@ -1,0 +1,50 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="80" height="80" viewBox="0 0 80 80">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#f472b6"/>
+      <stop offset="1" stop-color="#9d174d"/>
+    </linearGradient>
+    <linearGradient id="hl" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="rgba(255,255,255,0.42)"/>
+      <stop offset="0.55" stop-color="rgba(255,255,255,0)"/>
+    </linearGradient>
+    <radialGradient id="gloss" cx="0.5" cy="0" r="0.9">
+      <stop offset="0" stop-color="rgba(255,255,255,0.28)"/>
+      <stop offset="1" stop-color="rgba(255,255,255,0)"/>
+    </radialGradient>
+    <linearGradient id="pback" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#f1f5f9"/>
+      <stop offset="1" stop-color="#94a3b8"/>
+    </linearGradient>
+    <linearGradient id="pmid" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#f8fafc"/>
+      <stop offset="1" stop-color="#cbd5e1"/>
+    </linearGradient>
+    <linearGradient id="pfront" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#e2e8f0"/>
+    </linearGradient>
+  </defs>
+  <rect width="80" height="80" rx="22" fill="url(#bg)"/>
+  <rect width="80" height="80" rx="22" fill="url(#gloss)"/>
+  <rect width="80" height="80" rx="22" fill="url(#hl)"/>
+  <g transform="rotate(-9 40 42)">
+    <rect x="20" y="16" width="40" height="52" rx="3" fill="url(#pback)" stroke="rgba(0,0,0,0.35)" stroke-width="0.6"/>
+  </g>
+  <g transform="rotate(6 40 42)">
+    <rect x="20" y="16" width="40" height="52" rx="3" fill="url(#pmid)" stroke="rgba(0,0,0,0.35)" stroke-width="0.6"/>
+  </g>
+  <path d="M22 16 L52 16 L60 24 L60 66 Q60 68 58 68 L22 68 Q20 68 20 66 L20 18 Q20 16 22 16 Z" fill="url(#pfront)" stroke="rgba(0,0,0,0.4)" stroke-width="0.6"/>
+  <path d="M52 16 L52 24 L60 24 Z" fill="#cbd5e1" stroke="rgba(0,0,0,0.4)" stroke-width="0.5" stroke-linejoin="round"/>
+  <rect x="26" y="32" width="28" height="2.2" rx="1" fill="#475569"/>
+  <rect x="26" y="38" width="28" height="2.2" rx="1" fill="#64748b"/>
+  <rect x="26" y="44" width="28" height="2.2" rx="1" fill="#64748b"/>
+  <rect x="26" y="50" width="20" height="2.2" rx="1" fill="#94a3b8"/>
+  <rect x="26" y="56" width="24" height="2.2" rx="1" fill="#94a3b8"/>
+  <g transform="rotate(-18 30 22)">
+    <path d="M26 14 Q26 11 29 11 Q32 11 32 14 L32 26 Q32 28 30 28 Q28 28 28 26 L28 16 Q28 14.5 29.5 14.5 Q31 14.5 31 16 L31 24" fill="none" stroke="#cbd5e1" stroke-width="2.2" stroke-linecap="round"/>
+    <path d="M26 14 Q26 11 29 11 Q32 11 32 14 L32 26 Q32 28 30 28 Q28 28 28 26 L28 16 Q28 14.5 29.5 14.5 Q31 14.5 31 16 L31 24" fill="none" stroke="rgba(255,255,255,0.7)" stroke-width="0.7" stroke-linecap="round"/>
+  </g>
+  <rect x="0.5" y="0.5" width="79" height="79" rx="21.5" fill="none" stroke="rgba(255,255,255,0.28)" stroke-width="1"/>
+  <rect x="0" y="0" width="80" height="80" rx="22" fill="none" stroke="rgba(0,0,0,0.18)" stroke-width="0.6"/>
+</svg>

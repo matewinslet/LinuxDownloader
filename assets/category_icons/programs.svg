@@ -1,0 +1,58 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="80" height="80" viewBox="0 0 80 80">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#818cf8"/>
+      <stop offset="1" stop-color="#3730a3"/>
+    </linearGradient>
+    <linearGradient id="hl" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="rgba(255,255,255,0.42)"/>
+      <stop offset="0.55" stop-color="rgba(255,255,255,0)"/>
+    </linearGradient>
+    <radialGradient id="gloss" cx="0.5" cy="0" r="0.9">
+      <stop offset="0" stop-color="rgba(255,255,255,0.28)"/>
+      <stop offset="1" stop-color="rgba(255,255,255,0)"/>
+    </radialGradient>
+    <linearGradient id="titlebar" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#f8fafc"/>
+      <stop offset="1" stop-color="#cbd5e1"/>
+    </linearGradient>
+    <linearGradient id="canvas" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#e2e8f0"/>
+    </linearGradient>
+    <linearGradient id="launch" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#a5b4fc"/>
+      <stop offset="1" stop-color="#3730a3"/>
+    </linearGradient>
+    <radialGradient id="tlr" cx="0.35" cy="0.3" r="0.7">
+      <stop offset="0" stop-color="#fecaca"/>
+      <stop offset="1" stop-color="#dc2626"/>
+    </radialGradient>
+    <radialGradient id="tly" cx="0.35" cy="0.3" r="0.7">
+      <stop offset="0" stop-color="#fde68a"/>
+      <stop offset="1" stop-color="#d97706"/>
+    </radialGradient>
+    <radialGradient id="tlg" cx="0.35" cy="0.3" r="0.7">
+      <stop offset="0" stop-color="#86efac"/>
+      <stop offset="1" stop-color="#16a34a"/>
+    </radialGradient>
+  </defs>
+  <rect width="80" height="80" rx="22" fill="url(#bg)"/>
+  <rect width="80" height="80" rx="22" fill="url(#gloss)"/>
+  <rect width="80" height="80" rx="22" fill="url(#hl)"/>
+  <rect x="12" y="18" width="56" height="44" rx="4.5" fill="url(#canvas)" stroke="rgba(0,0,0,0.4)" stroke-width="0.6"/>
+  <path d="M12 22.5 Q12 18 16.5 18 L63.5 18 Q68 18 68 22.5 L68 28 L12 28 Z" fill="url(#titlebar)" stroke="rgba(0,0,0,0.25)" stroke-width="0.4"/>
+  <line x1="12" y1="28" x2="68" y2="28" stroke="rgba(0,0,0,0.25)" stroke-width="0.5"/>
+  <circle cx="18" cy="23" r="2.4" fill="url(#tlr)" stroke="rgba(0,0,0,0.4)" stroke-width="0.4"/>
+  <circle cx="25" cy="23" r="2.4" fill="url(#tly)" stroke="rgba(0,0,0,0.4)" stroke-width="0.4"/>
+  <circle cx="32" cy="23" r="2.4" fill="url(#tlg)" stroke="rgba(0,0,0,0.4)" stroke-width="0.4"/>
+  <circle cx="17.3" cy="22.3" r="0.7" fill="rgba(255,255,255,0.85)"/>
+  <circle cx="24.3" cy="22.3" r="0.7" fill="rgba(255,255,255,0.85)"/>
+  <circle cx="31.3" cy="22.3" r="0.7" fill="rgba(255,255,255,0.85)"/>
+  <circle cx="40" cy="45" r="11" fill="url(#launch)" stroke="rgba(0,0,0,0.35)" stroke-width="0.6"/>
+  <circle cx="40" cy="45" r="10" fill="none" stroke="rgba(255,255,255,0.45)" stroke-width="0.6"/>
+  <path d="M37 40 L37 50 L46 45 Z" fill="#ffffff" stroke="rgba(0,0,0,0.25)" stroke-width="0.4" stroke-linejoin="round"/>
+  <path d="M32 42 Q40 36 48 42" stroke="rgba(255,255,255,0.5)" stroke-width="1.2" fill="none" stroke-linecap="round"/>
+  <rect x="0.5" y="0.5" width="79" height="79" rx="21.5" fill="none" stroke="rgba(255,255,255,0.28)" stroke-width="1"/>
+  <rect x="0" y="0" width="80" height="80" rx="22" fill="none" stroke="rgba(0,0,0,0.18)" stroke-width="0.6"/>
+</svg>

@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Linux Download Manager
+Comment=Download files and videos with browser integration
+Exec=ldm
+Icon=io.github.matewinslet.LinuxDownloader
+Terminal=false
+Categories=Network;FileTransfer;
+Keywords=download;downloader;video;youtube;yt-dlp;manager;stream;
+StartupWMClass=io.github.matewinslet.LinuxDownloader
+StartupNotify=true

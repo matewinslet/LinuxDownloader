@@ -16,6 +16,8 @@ pip-packages/
 # Flatpak build artifacts
 .flatpak-builder/
 build-dir/
+build-dir-test/
+.flathub-work/
 
 # Backups / scratch
 *.bak
@@ -23,6 +25,17 @@ build-dir/
 *~
 TXT.txt
 Image backup/
+Debug/
+Visual polish/
+.superpowers/
+/popup.html
+downloader v*.py
+downloader v*.txt
+download_manager v*.py
+firefox-extension/*may*2026*.js
+firefox-extension/*May*2026*.js
+firefox-extension/working background*.txt
+chrome-extension/chrome-extension.zip
 
 # Firefox extension build output
 firefox-extension/web-ext-artifacts/

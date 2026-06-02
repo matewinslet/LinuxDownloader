@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Linux Download Manager
 # Copyright (c) 2026 Tanjim — tpodbcs@gmail.com
-# All rights reserved. See LICENSE.txt for details.
+# Licensed under the MIT License. See LICENSE.txt for details.
 
 import sys, time, os, threading, queue, subprocess, re, shutil, json, glob
 
@@ -28,13 +28,14 @@ from PyQt6.QtWidgets import (
     QMessageBox, QListWidget, QListWidgetItem, QLabel, QAbstractItemView,
     QStyledItemDelegate, QStyle, QMenuBar, QMainWindow,
     QDialog, QComboBox, QRadioButton, QGroupBox,
-    QProgressBar, QTextEdit, QSizePolicy,
+    QProgressBar, QTextEdit, QSizePolicy, QCheckBox, QFileDialog, QFrame,
     QGraphicsOpacityEffect, QGraphicsDropShadowEffect, QStackedWidget
 )
 from PyQt6.QtCore import QThread, pyqtSignal, QTimer, Qt, QSize, QRect, QPointF, QRectF
 from PyQt6.QtGui import (
-    QIcon, QColor, QFont, QPainter, QAction, QPixmap,
-    QLinearGradient, QPalette, QPainterPath, QBrush, QFontDatabase, QFontMetrics
+    QIcon, QColor, QFont, QPainter, QAction, QPixmap, QPen,
+    QLinearGradient, QRadialGradient, QPalette, QPainterPath, QBrush,
+    QFontDatabase, QFontMetrics
 )
 
 HOME = os.path.expanduser("~")
@@ -54,8 +55,12 @@ def get_firefox_profile():
 CONFIG_DIR = os.path.join(HOME, ".config", "ldm")
 HISTORY_FILE = os.path.join(CONFIG_DIR, "history.json")
 SETTINGS_FILE = os.path.join(CONFIG_DIR, "settings.json")
+# yt-dlp writes fragment + .part files here instead of the user's Downloads
+# folder, so file managers don't flicker through dozens of throwaway files.
+YT_DLP_TEMP_DIR = os.path.join(HOME, ".cache", "ldm", "ytdlp-tmp")
 
 os.makedirs(CONFIG_DIR, exist_ok=True)
+os.makedirs(YT_DLP_TEMP_DIR, exist_ok=True)
 
 
 
@@ -126,7 +131,7 @@ file_types = {
     "Music":      ["mp3", "flac", "aac", "wav", "ogg", "m4a"],
     "Documents":  ["pdf", "doc", "docx", "txt", "ppt", "pptx"],
     "Compressed": ["zip", "rar", "7z", "tar", "gz"],
-    "Programs":   ["exe", "bin", "appimage", "deb", "rpm"]
+    "Programs":   ["exe", "bin", "appimage", "deb", "rpm", "iso"]
 }
 
 STATUS_COLORS = {
@@ -143,11 +148,88 @@ CATEGORIES = [
     ("All Downloads", "⬇", "#2563eb"),
     ("Videos",        "🎬", "#dc2626"),
     ("Music",         "🎵", "#7c3aed"),
-    ("Documents",     "📄", "#d97706"),
-    ("Compressed",    "🗜", "#059669"),
+    ("Documents",     "📄", "#db2777"),
+    ("Compressed",    "🗜", "#0891b2"),
     ("Programs",      "⚙",  "#4f46e5"),
-    ("Others",        "📦", "#6b7280"),
 ]
+
+# Squircle icon file (in assets/category_icons/) for each sidebar category.
+CATEGORY_ICON_FILE = {
+    "All Downloads": "all.svg",
+    "Videos":        "videos.svg",
+    "Music":         "music.svg",
+    "Documents":     "documents.svg",
+    "Compressed":    "compressed.svg",
+    "Programs":      "programs.svg",
+    "Others":        "others.svg",
+}
+
+# Visual tokens for the file-list redesign (LDM_file_list_v1/README.md).
+# Each app status maps to dot/text/bg/bar/accent colors used by the row
+# delegates. Aliases below collapse non-canonical states onto Error tokens.
+FL_STATUS_TOKENS = {
+    "Downloading":  {"key": "active", "dot": "#3b82f6", "text": "#1d4ed8", "bg": "#dbeafe",
+                     "bar": ("#60a5fa", "#2563eb"), "accent": "#2563eb"},
+    "Paused":       {"key": "paused", "dot": "#d97706", "text": "#92400e", "bg": "#fef3c7",
+                     "bar": ("#fbbf24", "#d97706"), "accent": "#d97706"},
+    "Queued":       {"key": "queued", "dot": "#64748b", "text": "#475569", "bg": "#e2e8f0",
+                     "bar": None,                      "accent": "#94a3b8"},
+    "Finished":     {"key": "done",   "dot": "#16a34a", "text": "#166534", "bg": "#dcfce7",
+                     "bar": ("#4ade80", "#16a34a"), "accent": "#16a34a"},
+    "Error":        {"key": "error",  "dot": "#dc2626", "text": "#991b1b", "bg": "#fee2e2",
+                     "bar": ("#f87171", "#dc2626"), "accent": "#dc2626"},
+}
+_FL_STATUS_ALIASES = {
+    "Cancelled":    "Error",
+    "File Missing": "Error",
+    "Interrupted":  "Error",
+    "Failed":       "Error",
+}
+
+def fl_status_token(status):
+    if status in FL_STATUS_TOKENS:
+        return FL_STATUS_TOKENS[status]
+    return FL_STATUS_TOKENS[_FL_STATUS_ALIASES.get(status, "Error")]
+
+# App-folder label → cat id used by category_icons.jsx
+CATEGORY_ID_FOR_FOLDER = {
+    "All Downloads": "all", "Videos": "vid", "Music": "mus",
+    "Documents": "doc", "Compressed": "zip", "Programs": "pgm", "Others": "oth",
+}
+
+_CATEGORY_PIXMAP_CACHE = {}
+
+def get_category_pixmap(category, size=28):
+    """Return the cached squircle pixmap for an app folder category."""
+    key = (category, size)
+    cached = _CATEGORY_PIXMAP_CACHE.get(key)
+    if cached is not None:
+        return cached
+    fname = CATEGORY_ICON_FILE.get(category) or CATEGORY_ICON_FILE.get("Others")
+    icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                             "assets", "category_icons", fname)
+    if not os.path.exists(icon_path):
+        return None
+    try:
+        pix = _render_svg_pixmap(icon_path, size)
+    except Exception:
+        return None
+    _CATEGORY_PIXMAP_CACHE[key] = pix
+    return pix
+
+
+# Extra data roles used by the file-list delegates.
+FL_ROLE_CATEGORY = Qt.ItemDataRole.UserRole + 4   # set on column 0
+FL_ROLE_TOTAL    = Qt.ItemDataRole.UserRole + 5   # set on column 0 (sub-meta)
+
+# Row metrics
+# Single source of truth for the download-table row height. Must match the
+# value _apply_table_style() pushes into the vertical header — otherwise rows
+# inserted at runtime (setRowHeight in _insert_row_items) end up taller than
+# the rows already laid out at the header's default section size.
+FL_ROW_HEIGHT     = 40
+FL_ROW_LEFT_PAD   = 14
+FL_ROW_RIGHT_PAD  = 18
 
 def choose_folder(filename):
     ext = filename.split(".")[-1].lower() if "." in filename else ""
@@ -468,6 +550,32 @@ def _strip_png_disguised_segments(path):
                 pass
 
 
+# Hosts whose downloads must never be routed through LDM. Matched against the
+# URL's hostname (exact or any subdomain). Mirrors the same list in the
+# Firefox/Chrome extensions — defense in depth in case an older extension
+# build forwards a URL anyway.
+BRIDGE_BLOCKED_HOSTS = ("claude.ai", "anthropic.com", "figma.com")
+
+
+def _is_blocked_bridge_host(url):
+    if not url:
+        return False
+    # blob:/filesystem: wrap an inner origin; urlparse().hostname is None for
+    # them, so peel the wrapper before parsing.
+    u = url
+    low = u.lower()
+    if low.startswith("blob:") or low.startswith("filesystem:"):
+        u = u[u.find(":") + 1:]
+    try:
+        host = (urlparse(u).hostname or "").lower()
+    except Exception:
+        return False
+    for h in BRIDGE_BLOCKED_HOSTS:
+        if host == h or host.endswith("." + h):
+            return True
+    return False
+
+
 class BridgeHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         try:
@@ -489,6 +597,11 @@ class BridgeHandler(BaseHTTPRequestHandler):
             filename = q.get("filename", [None])[0]
             msg_type = q.get("type", ["file"])[0]
             referer = q.get("referer", [""])[0]
+            if url and _is_blocked_bridge_host(url):
+                # Silently drop — the extension shouldn't have forwarded this.
+                self.send_response(200); self.end_headers()
+                self.wfile.write(b"BLOCKED")
+                return
             if url:
                 url_queue.put((url, filename, msg_type, referer))
                 self.send_response(200); self.end_headers()
@@ -773,7 +886,11 @@ class GradientTextLabel(QLabel):
         path = QPainterPath()
         path.addText(QPointF(0, 0), font, self.text())
         br = path.boundingRect()
-        w = int(br.width() + self._letter_spacing * max(0, len(self.text()) - 1) + 10)
+        # Width: glyph ink + trailing letter-spacing + a small right pad for the
+        # shadow halo. No LEFT pad — the wordmark's left edge must sit at
+        # widget x=0 so a sibling FlatBearingLabel below aligns to the same
+        # gridline.
+        w = int(br.width() + self._letter_spacing * max(0, len(self.text()) - 1) + 6)
         h = int(br.height() + 10)  # small vertical padding for shadow halo
         self.setFixedSize(w, h)
 
@@ -788,22 +905,570 @@ class GradientTextLabel(QLabel):
         p.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
         font = self._make_font()
         path = QPainterPath()
-        path.addText(QPointF(4, 0), font, self.text())
+        path.addText(QPointF(0, 0), font, self.text())
         br = path.boundingRect()
-        # Vertically center the glyph bounds inside the widget.
+        # Vertically center the glyph bounds; horizontally, cancel the left
+        # side bearing so the first ink pixel sits at widget x=0 — the
+        # sibling FlatBearingLabel below uses the same trick to stay aligned.
         offset_y = (self.height() - br.height()) / 2.0 - br.top()
-        p.translate(0, offset_y)
+        p.translate(-br.left(), offset_y)
         grad = QLinearGradient(0, br.top(), 0, br.bottom())
         grad.setColorAt(0.0, self._shift_lightness(self._accent,  0.08))
         grad.setColorAt(1.0, self._shift_lightness(self._accent, -0.10))
         p.fillPath(path, QBrush(grad))
 
 
-# ── Numeric column delegate (font override only) ─────────────────────────────
-class NumericFontDelegate(QStyledItemDelegate):
-    """Applies a given font family/weight to its column without changing
-    colors, selection, or any other native rendering."""
+class FlatBearingLabel(QLabel):
+    """Plain-text label that paints with the left side bearing cancelled, so
+    it lines up flush with a GradientTextLabel above it. Used for the
+    DOWNLOAD MANAGER subtitle in the sidebar."""
 
+    def __init__(self, text="", parent=None):
+        super().__init__(text, parent)
+        self._color = QColor("#94a3b8")
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+
+    def setColor(self, color_hex):
+        self._color = QColor(color_hex)
+        self.update()
+
+    def paintEvent(self, _event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        p.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+        path = QPainterPath()
+        path.addText(QPointF(0, 0), self.font(), self.text())
+        br = path.boundingRect()
+        offset_y = (self.height() - br.height()) / 2.0 - br.top()
+        p.translate(-br.left(), offset_y)
+        p.fillPath(path, QBrush(self._color))
+
+
+# ── File-list redesign delegates (LDM_file_list_v1/README.md) ────────────────
+#
+# Each row column gets its own painter so the table can render the card-style
+# layout — accent bar, two-line filename with squircle icon, striped progress
+# bar, mono numeric cells, status pill — without leaving QTableWidget land.
+# A shared 25 fps timer drives the stripe and pulse animations.
+
+
+class _FlBaseDelegate(QStyledItemDelegate):
+    """Common helpers + shared animation timer used by every column delegate."""
+
+    _shared_timer = None
+    _shared_views = set()
+
+    def __init__(self, parent=None, sans_family="IBM Plex Sans",
+                 mono_family="IBM Plex Mono"):
+        super().__init__(parent)
+        self._sans = sans_family
+        self._mono = mono_family
+        self._start_anim(parent)
+
+    @classmethod
+    def _start_anim(cls, view):
+        if view is None or not hasattr(view, "viewport"):
+            return
+        cls._shared_views.add(view)
+        if cls._shared_timer is None:
+            t = QTimer()
+            t.timeout.connect(cls._tick)
+            t.start(40)
+            cls._shared_timer = t
+
+    @classmethod
+    def _tick(cls):
+        dead = []
+        for v in list(cls._shared_views):
+            try:
+                vp = v.viewport()
+                if vp is None:
+                    dead.append(v)
+                    continue
+                if cls._any_row_animating(v):
+                    vp.update()
+            except RuntimeError:
+                dead.append(v)
+        for v in dead:
+            cls._shared_views.discard(v)
+
+    @staticmethod
+    def _any_row_animating(view):
+        try:
+            model = view.model()
+        except Exception:
+            return False
+        if model is None:
+            return False
+        for r in range(model.rowCount()):
+            s = model.index(r, 5).data(Qt.ItemDataRole.DisplayRole)
+            if s == "Downloading":
+                return True
+        return False
+
+    @staticmethod
+    def _status_from(index):
+        return index.siblingAtColumn(5).data(Qt.ItemDataRole.DisplayRole) or "Finished"
+
+    @staticmethod
+    def _pct_from(index):
+        v = index.siblingAtColumn(1).data(Qt.ItemDataRole.UserRole + 1)
+        try:
+            return max(0, min(100, int(v)))
+        except (TypeError, ValueError):
+            return 0
+
+    @staticmethod
+    def _font(family, px, weight=QFont.Weight.Normal, letter_spacing=None):
+        f = QFont(family)
+        f.setPixelSize(px)
+        f.setWeight(weight)
+        if letter_spacing is not None:
+            f.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, letter_spacing)
+        return f
+
+    def _paint_cell_chrome(self, painter, option, draw_bottom_border=True):
+        # Card-style row: white bg, soft blue tint when selected, hairline
+        # bottom border that matches the body-row divider in the spec.
+        if option.state & QStyle.StateFlag.State_Selected:
+            painter.fillRect(option.rect, QColor("#eff6ff"))
+        else:
+            painter.fillRect(option.rect, QColor("#ffffff"))
+        if draw_bottom_border:
+            painter.setPen(QPen(QColor("#f1f5f9"), 1))
+            y = option.rect.bottom()
+            painter.drawLine(option.rect.left(), y, option.rect.right(), y)
+
+
+class FlNameDelegate(_FlBaseDelegate):
+    """Column 0 — 28px squircle icon, filename, EXT · TOTAL_SIZE sub-meta,
+    plus the row's left accent bar painted on the leading edge."""
+
+    _fallbacks_cached = None
+
+    @classmethod
+    def _fallbacks(cls):
+        if cls._fallbacks_cached is not None:
+            return cls._fallbacks_cached
+        try:
+            WS = QFontDatabase.WritingSystem
+            skip = {WS.Any, WS.Latin, WS.Symbol}
+            seen, ordered = set(), []
+            for f in QFontDatabase.families(WS.Bengali) or []:
+                if 'Noto Sans Bengali UI' in f and f not in seen:
+                    seen.add(f); ordered.append(f)
+            for ws in WS:
+                if ws in skip:
+                    continue
+                for f in QFontDatabase.families(ws) or []:
+                    if f not in seen:
+                        seen.add(f); ordered.append(f)
+            cls._fallbacks_cached = ordered
+        except Exception:
+            cls._fallbacks_cached = []
+        return cls._fallbacks_cached
+
+    def paint(self, painter, option, index):
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+        self._paint_cell_chrome(painter, option)
+
+        status = self._status_from(index)
+        token = fl_status_token(status)
+
+        # Left status accent bar — 3px wide, inset 8px top/bottom, hidden on Finished.
+        if status != "Finished":
+            bar_rect = QRectF(
+                option.rect.left() + 0.0,
+                option.rect.top() + 8.0,
+                3.0,
+                max(0.0, option.rect.height() - 16.0),
+            )
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(token["accent"]))
+            painter.drawRoundedRect(bar_rect, 2.0, 2.0)
+
+        category = index.data(FL_ROLE_CATEGORY) or "Others"
+        filename = (index.data(Qt.ItemDataRole.DisplayRole) or "").strip()
+        total    = index.data(FL_ROLE_TOTAL) or ""
+
+        # Icon at 28px.
+        icon_size = 28
+        icon_x = option.rect.left() + FL_ROW_LEFT_PAD
+        icon_y = option.rect.top() + (option.rect.height() - icon_size) // 2
+        pix = get_category_pixmap(category, icon_size)
+        if pix is not None:
+            painter.drawPixmap(icon_x, icon_y, pix)
+
+        text_x = icon_x + icon_size + 11
+        text_right = option.rect.right() - 8
+        text_width = max(0, text_right - text_x)
+
+        ext = ""
+        if "." in filename:
+            ext = filename.rsplit(".", 1)[-1].upper()
+        sub_meta = " · ".join([p for p in (ext, str(total)) if p])
+
+        # Layout the two text lines centred vertically within the row.
+        primary_font = self._font(self._sans, 13, QFont.Weight.DemiBold)
+        primary_font.setFamilies([self._sans] + self._fallbacks())
+        secondary_font = self._font(self._mono, 10, QFont.Weight.Medium, letter_spacing=0.2)
+        fm_p = QFontMetrics(primary_font)
+        fm_s = QFontMetrics(secondary_font)
+
+        line_gap = 1
+        total_h = fm_p.height() + line_gap + fm_s.height()
+        top = option.rect.top() + (option.rect.height() - total_h) // 2
+
+        # Primary line — filename.
+        painter.setFont(primary_font)
+        painter.setPen(QColor("#0f172a"))
+        elided = fm_p.elidedText(filename, Qt.TextElideMode.ElideRight, text_width)
+        painter.drawText(text_x, top + fm_p.ascent(), elided)
+
+        # Secondary line — EXT · TOTAL_SIZE.
+        if sub_meta:
+            painter.setFont(secondary_font)
+            painter.setPen(QColor("#94a3b8"))
+            sub_y = top + fm_p.height() + line_gap + fm_s.ascent()
+            elided_sub = fm_s.elidedText(sub_meta, Qt.TextElideMode.ElideRight, text_width)
+            painter.drawText(text_x, sub_y, elided_sub)
+        painter.restore()
+
+    def sizeHint(self, option, index):
+        return QSize(option.rect.width(), FL_ROW_HEIGHT)
+
+
+class FlProgressDelegate(_FlBaseDelegate):
+    """Column 1 — striped/gradient/dashed progress bar + mono percent label."""
+
+    def paint(self, painter, option, index):
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        self._paint_cell_chrome(painter, option)
+
+        status = self._status_from(index)
+        token = fl_status_token(status)
+        pct = self._pct_from(index)
+
+        cell_left = option.rect.left() + 6
+        cell_right = option.rect.right() - 12
+        bar_w = max(0, cell_right - cell_left)
+        bar_h = 6
+        pct_font = self._font(self._mono, 10, QFont.Weight.DemiBold, letter_spacing=0.2)
+        fm = QFontMetrics(pct_font)
+
+        stack_h = bar_h + 4 + fm.height()
+        bar_top = option.rect.top() + (option.rect.height() - stack_h) // 2
+        bar_rect = QRectF(cell_left, bar_top, bar_w, bar_h)
+
+        is_queued = (status == "Queued")
+        is_error  = (token["key"] == "error")
+
+        if is_queued:
+            # Empty 6px box with 1px dashed #cbd5e1 border, no fill.
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            pen = QPen(QColor("#cbd5e1"), 1, Qt.PenStyle.DashLine)
+            pen.setDashPattern([4, 3])
+            painter.setPen(pen)
+            painter.drawRoundedRect(bar_rect, 3.0, 3.0)
+        else:
+            # Track.
+            track = QColor("#fee2e2") if is_error else QColor("#e2e8f0")
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(track)
+            painter.drawRoundedRect(bar_rect, 3.0, 3.0)
+
+            # Fill.
+            if pct > 0 and token["bar"] is not None:
+                fill_w = bar_rect.width() * (pct / 100.0)
+                fill_rect = QRectF(bar_rect.left(), bar_rect.top(), fill_w, bar_rect.height())
+                grad = QLinearGradient(fill_rect.left(), 0, fill_rect.right(), 0)
+                grad.setColorAt(0.0, QColor(token["bar"][0]))
+                grad.setColorAt(1.0, QColor(token["bar"][1]))
+                painter.save()
+                clip = QPainterPath()
+                clip.addRoundedRect(bar_rect, 3.0, 3.0)
+                painter.setClipPath(clip)
+                if is_error:
+                    painter.setOpacity(0.55)
+                painter.setBrush(grad)
+                painter.drawRect(fill_rect)
+
+                # Inset highlight (1px white-ish line along the top edge).
+                if not is_error and fill_w > 1:
+                    painter.setOpacity(0.45)
+                    painter.setPen(Qt.PenStyle.NoPen)
+                    painter.setBrush(QColor(255, 255, 255, 115))
+                    painter.drawRect(QRectF(fill_rect.left(), fill_rect.top(),
+                                            fill_rect.width(), 1.0))
+                    painter.setOpacity(1.0)
+
+                # Animated diagonal stripes for active downloads.
+                if status == "Downloading" and fill_w > 0:
+                    offset = (time.time() / 1.2) * 24.0
+                    painter.setOpacity(1.0)
+                    painter.setPen(Qt.PenStyle.NoPen)
+                    painter.setBrush(QColor(255, 255, 255, 64))
+                    stripe_w = 6
+                    spacing = 12
+                    # Cover the full fill with 45° stripes, shifted by offset.
+                    y0 = fill_rect.top() - bar_rect.height()
+                    y1 = fill_rect.bottom() + bar_rect.height()
+                    x_start = int(fill_rect.left() - bar_rect.height() - (offset % spacing) - spacing)
+                    x_end = int(fill_rect.right() + bar_rect.height() + spacing)
+                    for x in range(x_start, x_end, spacing):
+                        poly = QPainterPath()
+                        poly.moveTo(x, y1)
+                        poly.lineTo(x + bar_rect.height(), y0)
+                        poly.lineTo(x + bar_rect.height() + stripe_w, y0)
+                        poly.lineTo(x + stripe_w, y1)
+                        poly.closeSubpath()
+                        painter.drawPath(poly)
+                painter.restore()
+
+        # Percent label.
+        painter.setFont(pct_font)
+        if status == "Finished":
+            painter.setPen(QColor("#16a34a"))
+        else:
+            painter.setPen(QColor("#64748b"))
+        pct_text = f"{pct}%"
+        painter.drawText(int(cell_left),
+                         int(bar_top + bar_h + 4 + fm.ascent()),
+                         pct_text)
+        painter.restore()
+
+    def sizeHint(self, option, index):
+        return QSize(180, FL_ROW_HEIGHT)
+
+
+class FlDownloadedDelegate(_FlBaseDelegate):
+    """Column 2 — `done` (bold, dark) ` / total` (muted), or just total when done."""
+
+    def paint(self, painter, option, index):
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        self._paint_cell_chrome(painter, option)
+
+        text = (index.data(Qt.ItemDataRole.DisplayRole) or "").strip()
+        status = self._status_from(index)
+        font = self._font(self._mono, 11, QFont.Weight.Medium)
+        fm = QFontMetrics(font)
+        avail = option.rect.width() - 8
+        y = option.rect.top() + (option.rect.height() + fm.ascent() - fm.descent()) // 2
+
+        def _center_x(w):
+            # Center content under the centered "DOWNLOADED" header, matching
+            # the Status/Date columns.
+            return option.rect.left() + (option.rect.width() - w) // 2
+
+        if status == "Finished":
+            # Spec: finished rows show only the total size, not "size / size".
+            if " / " in text:
+                a, b = text.split(" / ", 1)
+                if a.strip() == b.strip():
+                    text = a.strip()
+            shown = fm.elidedText(text, Qt.TextElideMode.ElideRight, avail)
+            painter.setFont(font)
+            painter.setPen(QColor("#334155"))
+            painter.drawText(_center_x(fm.horizontalAdvance(shown)), y, shown)
+        else:
+            # Try to split "done / total". Falls back to plain rendering.
+            if " / " in text:
+                done, total = text.split(" / ", 1)
+                bold = self._font(self._mono, 11, QFont.Weight.DemiBold)
+                fm_b = QFontMetrics(bold)
+                rest = f" / {total}"
+                group_w = fm_b.horizontalAdvance(done) + fm.horizontalAdvance(rest)
+                x = _center_x(group_w)
+                painter.setFont(bold)
+                painter.setPen(QColor("#0f172a"))
+                painter.drawText(x, y, done)
+                painter.setFont(font)
+                painter.setPen(QColor("#94a3b8"))
+                painter.drawText(x + fm_b.horizontalAdvance(done), y, rest)
+            else:
+                shown = fm.elidedText(text, Qt.TextElideMode.ElideRight, avail)
+                painter.setFont(font)
+                painter.setPen(QColor("#334155"))
+                painter.drawText(_center_x(fm.horizontalAdvance(shown)), y, shown)
+        painter.restore()
+
+
+class FlSpeedDelegate(_FlBaseDelegate):
+    """Column 3 — mono. Active rows show ↓ green/bold; otherwise muted dash."""
+
+    def paint(self, painter, option, index):
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        self._paint_cell_chrome(painter, option)
+
+        text = (index.data(Qt.ItemDataRole.DisplayRole) or "—").strip() or "—"
+        status = self._status_from(index)
+        active = (status == "Downloading") and text not in ("—", "")
+        if active:
+            font = self._font(self._mono, 11, QFont.Weight.Bold)
+            painter.setPen(QColor("#16a34a"))
+            shown = f"↓ {text}" if not text.startswith("↓") else text
+        else:
+            font = self._font(self._mono, 11, QFont.Weight.Medium)
+            painter.setPen(QColor("#94a3b8"))
+            shown = "—" if text in ("—", "") else text
+        painter.setFont(font)
+        fm = QFontMetrics(font)
+        x = option.rect.left() + 4
+        y = option.rect.top() + (option.rect.height() + fm.ascent() - fm.descent()) // 2
+        painter.drawText(x, y, fm.elidedText(shown, Qt.TextElideMode.ElideRight,
+                                              option.rect.width() - 8))
+        painter.restore()
+
+
+class FlEtaDelegate(_FlBaseDelegate):
+    """Column 4 — mono ETA. Slate for active, muted dash otherwise."""
+
+    def paint(self, painter, option, index):
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        self._paint_cell_chrome(painter, option)
+
+        text = (index.data(Qt.ItemDataRole.DisplayRole) or "—").strip() or "—"
+        status = self._status_from(index)
+        font = self._font(self._mono, 11, QFont.Weight.Medium)
+        if status == "Downloading" and text != "—":
+            painter.setPen(QColor("#475569"))
+        else:
+            painter.setPen(QColor("#94a3b8"))
+            text = "—" if text in ("—", "") else text
+        painter.setFont(font)
+        fm = QFontMetrics(font)
+        x = option.rect.left() + 4
+        y = option.rect.top() + (option.rect.height() + fm.ascent() - fm.descent()) // 2
+        painter.drawText(x, y, fm.elidedText(text, Qt.TextElideMode.ElideRight,
+                                              option.rect.width() - 8))
+        painter.restore()
+
+
+class FlStatusDelegate(_FlBaseDelegate):
+    """Column 5 — rounded pill with leading colored dot + status label.
+    Active rows get a pulsing halo around the dot."""
+
+    def paint(self, painter, option, index):
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        self._paint_cell_chrome(painter, option)
+
+        raw_status = (index.data(Qt.ItemDataRole.DisplayRole) or "Finished").strip()
+        # Verbose error messages ("Error: ERROR: [generic] HTTP 503 …") would
+        # blow out the pill — collapse them to the canonical "Error" token while
+        # still resolving the right color tokens.
+        if raw_status.lower().startswith("error"):
+            status, label = "Error", "Error"
+        else:
+            status, label = raw_status, raw_status
+        token = fl_status_token(status)
+
+        font = self._font(self._sans, 11, QFont.Weight.Bold, letter_spacing=0.2)
+        fm = QFontMetrics(font)
+        text_w = fm.horizontalAdvance(label)
+        # Uniform pill width: size for the widest status label so every pill
+        # matches regardless of text length.
+        widest = max(
+            fm.horizontalAdvance(s)
+            for s in ("Downloading", "File Missing", "Finished", "Error",
+                      "Cancelled", "Paused", "Queued")
+        )
+
+        pad_left, pad_right = 8, 9
+        dot_d = 6
+        gap = 6
+        pill_h = max(fm.height() + 2, 18)
+        pill_w = pad_left + dot_d + gap + widest + pad_right
+
+        pill_x = option.rect.left() + (option.rect.width() - pill_w) / 2.0
+        pill_y = option.rect.top() + (option.rect.height() - pill_h) // 2
+        pill_rect = QRectF(pill_x, pill_y, pill_w, pill_h)
+
+        # Pill body.
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(token["bg"]))
+        painter.drawRoundedRect(pill_rect, pill_h / 2.0, pill_h / 2.0)
+
+        # Center dot+label as a group inside the fixed-width pill.
+        content_w = dot_d + gap + text_w
+        content_x = pill_x + (pill_w - content_w) / 2.0
+        dot_cx = content_x + dot_d / 2.0
+        dot_cy = pill_y + pill_h / 2.0
+
+        # Pulsing halo for active downloads.
+        if status == "Downloading":
+            phase = (time.time() / 1.6) % 1.0
+            halo_r = (dot_d / 2.0) + (phase * 6.0)
+            halo_alpha = int(140 * (1.0 - phase))
+            painter.setBrush(QColor(token["dot"]))
+            painter.setOpacity(halo_alpha / 255.0)
+            painter.drawEllipse(QPointF(dot_cx, dot_cy), halo_r, halo_r)
+            painter.setOpacity(1.0)
+
+        # Dot.
+        painter.setBrush(QColor(token["dot"]))
+        painter.drawEllipse(QPointF(dot_cx, dot_cy), dot_d / 2.0, dot_d / 2.0)
+
+        # Label.
+        painter.setFont(font)
+        painter.setPen(QColor(token["text"]))
+        text_x = content_x + dot_d + gap
+        text_y = pill_y + (pill_h + fm.ascent() - fm.descent()) // 2 - 1
+        painter.drawText(int(text_x), int(text_y), label)
+        painter.restore()
+
+
+class FlDateDelegate(_FlBaseDelegate):
+    """Column 6 — mono date string in muted slate."""
+
+    @staticmethod
+    def _humanize(text):
+        # Convert app-stored "YYYY-MM-DD HH:MM" to "Today, HH:MM" / "Yesterday"
+        # / "MMM DD" per the spec; leave other formats untouched.
+        if not text:
+            return ""
+        try:
+            import datetime as _dt
+            parts = text.split(" ")
+            d = _dt.datetime.strptime(parts[0], "%Y-%m-%d").date()
+            today = _dt.date.today()
+            delta = (today - d).days
+            if delta == 0:
+                return "Today"
+            if delta == 1:
+                return "Yesterday"
+            if 0 <= delta < 365 and d.year == today.year:
+                return d.strftime("%b %d").replace(" 0", " ")
+            return d.strftime("%b %d, %Y")
+        except Exception:
+            return text
+
+    def paint(self, painter, option, index):
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        self._paint_cell_chrome(painter, option)
+        text = self._humanize((index.data(Qt.ItemDataRole.DisplayRole) or "").strip())
+        font = self._font(self._mono, 11, QFont.Weight.Medium)
+        painter.setFont(font)
+        painter.setPen(QColor("#64748b"))
+        fm = QFontMetrics(font)
+        elided = fm.elidedText(text, Qt.TextElideMode.ElideRight,
+                               option.rect.width() - 8)
+        text_w = fm.horizontalAdvance(elided)
+        x = option.rect.left() + (option.rect.width() - text_w) // 2
+        y = option.rect.top() + (option.rect.height() + fm.ascent() - fm.descent()) // 2
+        painter.drawText(x, y, elided)
+        painter.restore()
+
+
+# Back-compat aliases — older code references the original class names.
+class NumericFontDelegate(_FlBaseDelegate):
     def __init__(self, family="Sans", weight=QFont.Weight.Medium, parent=None):
         super().__init__(parent)
         self._family = family
@@ -817,128 +1482,15 @@ class NumericFontDelegate(QStyledItemDelegate):
         option.font = f
 
 
-class FilenameFontDelegate(QStyledItemDelegate):
-    """Keeps the primary Latin font but appends every installed non-Latin
-    family as a fallback. Qt picks a fallback per-glyph only when the
-    primary font lacks the glyph, so Latin rendering is unchanged and
-    any script (Bengali, CJK, Arabic, Devanagari, Thai, Hebrew, …) gets
-    a real glyph instead of tofu."""
-
-    _fallbacks_cached = None
-
-    @classmethod
-    def _fallbacks(cls):
-        if cls._fallbacks_cached is not None:
-            return cls._fallbacks_cached
-        try:
-            WS = QFontDatabase.WritingSystem
-            # Latin is covered by the primary font; Any/Symbol aren't scripts.
-            skip = {WS.Any, WS.Latin, WS.Symbol}
-            seen = set()
-            ordered = []
-            # Pin Noto Sans Bengali UI first when present (matches Firefox's pick).
-            for f in QFontDatabase.families(WS.Bengali) or []:
-                if 'Noto Sans Bengali UI' in f and f not in seen:
-                    seen.add(f)
-                    ordered.append(f)
-            for ws in WS:
-                if ws in skip:
-                    continue
-                for f in QFontDatabase.families(ws) or []:
-                    if f not in seen:
-                        seen.add(f)
-                        ordered.append(f)
-            cls._fallbacks_cached = ordered
-        except Exception:
-            cls._fallbacks_cached = []
-        return cls._fallbacks_cached
-
-    def initStyleOption(self, option, index):
-        super().initStyleOption(option, index)
-        fallbacks = self._fallbacks()
-        if not fallbacks:
-            return
-        f = QFont(option.font)
-        f.setFamilies([f.family()] + fallbacks)
-        option.font = f
+# Legacy filename delegate — superseded by FlNameDelegate but kept so any
+# stray reference still resolves.
+class FilenameFontDelegate(FlNameDelegate):
+    pass
 
 
-# ── Progress bar delegate ────────────────────────────────────────────────────
-class ProgressDelegate(QStyledItemDelegate):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self._shimmer_timer = QTimer()
-        self._shimmer_timer.timeout.connect(self._tick)
-        self._shimmer_timer.start(40)
-
-    def _tick(self):
-        if self.parent() and self.parent().viewport():
-            self.parent().viewport().update()
-
-    def paint(self, painter, option, index):
-        value = index.data(Qt.ItemDataRole.UserRole + 1)
-        if value is None:
-            super().paint(painter, option, index)
-            return
-
-        dark = index.data(Qt.ItemDataRole.UserRole + 3)
-        if dark:
-            bg_even  = QColor("#0f172a")
-            bg_odd   = QColor("#0f172a")
-            sel_color = QColor(59, 130, 246, 38)
-            track_color = QColor(255, 255, 255, 15)
-        else:
-            bg_even  = QColor("#ffffff")
-            bg_odd   = QColor("#f8fafc")
-            sel_color = QColor("#eff6ff")
-            track_color = QColor("#f1f5f9")
-
-        if option.state & QStyle.StateFlag.State_Selected:
-            painter.fillRect(option.rect, sel_color)
-        else:
-            painter.fillRect(option.rect, bg_even if index.row() % 2 == 0 else bg_odd)
-
-        # Thin 6 px bar, centered vertically, full width — blue = in-progress, green = done
-        bar_h = 6
-        bar_rect = QRect(
-            option.rect.x() + 12,
-            option.rect.y() + (option.rect.height() - bar_h) // 2,
-            option.rect.width() - 24,
-            bar_h,
-        )
-        radius = bar_h // 2
-
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(track_color)
-        painter.drawRoundedRect(bar_rect, radius, radius)
-
-        finished = value >= 100
-        if value > 0:
-            filled_w = int(bar_rect.width() * value / 100)
-            filled_rect = QRect(bar_rect.x(), bar_rect.y(), filled_w, bar_rect.height())
-            grad = QLinearGradient(bar_rect.x(), 0, bar_rect.right(), 0)
-            if finished:
-                grad.setColorAt(0.0, QColor("#16a34a"))
-                grad.setColorAt(1.0, QColor("#4ade80"))
-            else:
-                grad.setColorAt(0.0, QColor("#3b82f6"))
-                grad.setColorAt(1.0, QColor("#60a5fa"))
-            painter.setBrush(grad)
-            painter.drawRoundedRect(filled_rect, radius, radius)
-
-            if 0 < value < 100 and filled_w > 0:
-                phase = (time.time() % 1.2) / 1.2
-                shimmer_w = max(30, filled_w // 3)
-                shimmer_x = bar_rect.x() + int((filled_w - shimmer_w) * phase)
-                shimmer_grad = QLinearGradient(shimmer_x, 0, shimmer_x + shimmer_w, 0)
-                shimmer_grad.setColorAt(0.0, QColor(255, 255, 255, 0))
-                shimmer_grad.setColorAt(0.5, QColor(255, 255, 255, 70))
-                shimmer_grad.setColorAt(1.0, QColor(255, 255, 255, 0))
-                painter.setBrush(shimmer_grad)
-                painter.drawRoundedRect(filled_rect, radius, radius)
-
-    def sizeHint(self, option, index):
-        return QSize(180, 40)
+# Legacy progress delegate — superseded by FlProgressDelegate.
+class ProgressDelegate(FlProgressDelegate):
+    pass
 
 
 # ── Combo hover delegate (Linux Qt6 workaround) ─────────────────────────────
@@ -971,6 +1523,7 @@ class ComboHoverDelegate(QStyledItemDelegate):
 # ── Fetch formats thread ─────────────────────────────────────────────────────
 class FetchFormatsThread(QThread):
     formats_ready = pyqtSignal(str)
+    info_ready    = pyqtSignal(dict)
     error = pyqtSignal(str)
 
     def __init__(self, url):
@@ -995,6 +1548,76 @@ class FetchFormatsThread(QThread):
                     return
                 title = info.get('title', 'video')
                 print(f"[YT-FETCH] Success: {title}", flush=True)
+                duration = info.get('duration') or 0
+                formats = info.get('formats') or []
+
+                def _fmt_bytes(f):
+                    sz = f.get('filesize') or f.get('filesize_approx')
+                    if sz:
+                        return int(sz)
+                    tbr = f.get('tbr')  # kbps (total bitrate)
+                    if tbr and duration:
+                        return int(tbr * 1000 * duration / 8)
+                    return None
+
+                # Best audio (we always merge an audio track for non-progressive video)
+                audio_only = [
+                    f for f in formats
+                    if (f.get('vcodec') in (None, 'none'))
+                    and (f.get('acodec') and f.get('acodec') != 'none')
+                ]
+                audio_bytes = 0
+                audio_kbps  = 0
+                if audio_only:
+                    best_aud = max(audio_only, key=lambda f: f.get('abr') or 0)
+                    audio_bytes = _fmt_bytes(best_aud) or 0
+                    abr = best_aud.get('abr') or best_aud.get('tbr')
+                    if abr:
+                        audio_kbps = int(round(abr))
+                    elif audio_bytes and duration:
+                        audio_kbps = int(round(audio_bytes * 8 / duration / 1000))
+
+                # Per-height best video format size
+                heights = set()
+                size_by_height = {}
+                video_fmts = [
+                    f for f in formats
+                    if f.get('vcodec') and f.get('vcodec') != 'none'
+                ]
+                grouped = {}
+                for f in video_fmts:
+                    h = f.get('height')
+                    if isinstance(h, int) and h > 0:
+                        heights.add(h)
+                        grouped.setdefault(h, []).append(f)
+                for h, fmts in grouped.items():
+                    best = max(fmts, key=lambda f: f.get('tbr') or 0)
+                    vsize = _fmt_bytes(best)
+                    if not vsize:
+                        continue
+                    is_progressive = (
+                        best.get('acodec') and best.get('acodec') != 'none'
+                    )
+                    size_by_height[h] = (
+                        vsize if is_progressive else vsize + audio_bytes
+                    )
+
+                payload = {
+                    'title':         title,
+                    'channel':       info.get('uploader') or info.get('channel') or '',
+                    'duration':      duration,
+                    'view_count':    info.get('view_count') or 0,
+                    'upload_date':   info.get('upload_date') or '',
+                    'thumbnail':     info.get('thumbnail') or '',
+                    'video_id':      info.get('id') or '',
+                    'heights':       sorted(heights, reverse=True),
+                    'size_by_height': size_by_height,
+                    'audio_bytes':   audio_bytes,
+                    'audio_kbps':    audio_kbps,
+                    'has_subs':      bool(info.get('subtitles') or info.get('automatic_captions')),
+                    'categories':    info.get('categories') or [],
+                }
+                self.info_ready.emit(payload)
                 self.formats_ready.emit(title)
         except Exception as e:
             print(f"[YT-FETCH ERROR] {e}", flush=True)
@@ -1002,6 +1625,13 @@ class FetchFormatsThread(QThread):
 
 
 # ── YouTube download thread ──────────────────────────────────────────────────
+class _YTCancelled(Exception):
+    """Raised inside the yt-dlp progress hook when the user clicks Stop.
+    Caught in ``YouTubeDownloadThread.run`` and reported as a clean
+    cancellation instead of an error."""
+    pass
+
+
 class YouTubeDownloadThread(QThread):
     progress  = pyqtSignal(int)
     speed     = pyqtSignal(str)
@@ -1026,10 +1656,19 @@ class YouTubeDownloadThread(QThread):
                 if info is None:
                     raise Exception("Could not download video")
             self.finished.emit("Finished")
+        except _YTCancelled:
+            self.finished.emit("Cancelled")
         except Exception as e:
-            self.finished.emit(f"Error: {str(e)[:80]}")
+            # yt-dlp wraps the cancellation in its own DownloadError; detect it
+            # by checking self.running rather than the exception type.
+            if not self.running:
+                self.finished.emit("Cancelled")
+            else:
+                self.finished.emit(f"Error: {str(e)[:80]}")
 
     def hook(self, d):
+        if not self.running:
+            raise _YTCancelled()
         ansi_escape = re.compile(r'\x1b\[[0-9;]*m|\[[0-9;]*m')
         def clean(s): return ansi_escape.sub('', s).strip()
         if d['status'] == 'downloading':
@@ -1210,550 +1849,1059 @@ def make_close_btn_style(dark=True):
     )
 
 
-# ── YouTube dialog ───────────────────────────────────────────────────────────
-class YouTubeDialog(QDialog):
-    download_started    = pyqtSignal(str, str, str)
-    download_progress   = pyqtSignal(str, int, str, str, str)
-    download_finished   = pyqtSignal(str, str)
-    yt_settings_captured = pyqtSignal(str, dict)  # url, {mode, quality, audio_fmt}
-
-    def __init__(self, parent=None, prefill_url="", dark=True, skip_fetch=False):
-        super().__init__(parent)
-        self.setWindowFlags(
-            Qt.WindowType.Window |
-            Qt.WindowType.WindowMinimizeButtonHint |
-            Qt.WindowType.WindowMaximizeButtonHint |
-            Qt.WindowType.WindowCloseButtonHint
-        )
-        self.setWindowTitle("LDM YouTube Downloader")
-        self.setMinimumWidth(540)
-        self.setMinimumHeight(552)
-        self._dark = dark
-        self.setStyleSheet(make_dialog_style(dark))
-        self.video_title = ""
-        self.fetch_thread = None
-        self.dl_thread = None
-        self._last_size = ""
-        self._last_speed = ""
-        self._last_eta = ""
-        self._current_url = ""
-        self._build_ui()
-        if prefill_url:
-            self.url_input.setText(prefill_url)
-            if not skip_fetch:
-                self.fetch_formats()
-
-    def _build_ui(self):
-        layout = QVBoxLayout(self)
-        layout.setSpacing(12)
-        layout.setContentsMargins(20, 20, 20, 20)
-
-        title = QLabel("YouTube Downloader")
-        title.setStyleSheet(f"font-size: 15px; font-weight: 700; color: {'#f85149' if self._dark else '#cf222e'};")
-        layout.addWidget(title)
-
-        url_row = QHBoxLayout()
-        self.url_input = QLineEdit()
-        self.url_input.setPlaceholderText("Paste YouTube URL here...")
-        self.fetch_btn = QPushButton("Fetch")
-        self.fetch_btn.setStyleSheet(
-            "QPushButton { background-color: #2563eb; color: white; }"
-            "QPushButton:hover { background-color: #1d4ed8; }"
-            "QPushButton:disabled { background-color: #94a3b8; }"
-        )
-        self.fetch_btn.setFixedWidth(80)
-        self.fetch_btn.clicked.connect(self.fetch_formats)
-        url_row.addWidget(self.url_input)
-        url_row.addWidget(self.fetch_btn)
-        layout.addLayout(url_row)
-
-        self.title_label = QLabel("")
-        self.title_label.setStyleSheet(f"color: {'#8b949e' if self._dark else '#656d76'}; font-size: 12px;")
-        self.title_label.setWordWrap(True)
-        layout.addWidget(self.title_label)
-
-        type_group = QGroupBox("Download Type")
-        type_group.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
-        type_layout = QHBoxLayout(type_group)
-        type_layout.setContentsMargins(8, 10, 8, 6)
-        self.radio_video      = QRadioButton("Video + Audio")
-        self.radio_audio      = QRadioButton("Audio Only")
-        self.radio_video_only = QRadioButton("Video Only")
-        self.radio_video.setChecked(True)
-        self.radio_audio.toggled.connect(self._on_type_changed)
-        type_layout.addWidget(self.radio_video)
-        type_layout.addWidget(self.radio_audio)
-        type_layout.addWidget(self.radio_video_only)
-        layout.addWidget(type_group)
-
-        quality_row = QHBoxLayout()
-        quality_row.setContentsMargins(0, 0, 0, 0)
-        quality_row.setSpacing(6)
-        quality_label = QLabel("Quality:")
-        quality_label.setFixedWidth(55)
-        self.quality_combo = QComboBox()
-        self.quality_combo.addItems(["Best", "1080p", "720p", "480p", "360p"])
-        self.quality_combo.setStyleSheet("QComboBox { min-height: 27px; max-height: 27px; padding: 4px 12px; }")
-        _accent = '#2f81f7' if self._dark else '#0969da'
-        self.quality_combo.view().setMouseTracking(True)
-        self.quality_combo.view().viewport().setMouseTracking(True)
-        self.quality_combo.view().setItemDelegate(ComboHoverDelegate(_accent, self.quality_combo))
-        quality_row.addWidget(quality_label)
-        quality_row.addWidget(self.quality_combo)
-        layout.addLayout(quality_row)
-
-        self.audio_fmt_widget = QWidget()
-        self.audio_fmt_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        audio_fmt_row = QHBoxLayout(self.audio_fmt_widget)
-        audio_fmt_row.setContentsMargins(0, 0, 0, 0)
-        audio_fmt_row.setSpacing(6)
-        audio_fmt_label = QLabel("Format:")
-        audio_fmt_label.setFixedWidth(55)
-        self.audio_fmt_combo = QComboBox()
-        self.audio_fmt_combo.setStyleSheet("QComboBox { min-height: 27px; max-height: 27px; padding: 4px 12px; }")
-        self.audio_fmt_combo.addItems(["mp3", "m4a", "flac", "wav", "ogg", "aac"])
-        self.audio_fmt_combo.view().setMouseTracking(True)
-        self.audio_fmt_combo.view().viewport().setMouseTracking(True)
-        self.audio_fmt_combo.view().setItemDelegate(ComboHoverDelegate(_accent, self.audio_fmt_combo))
-        audio_fmt_row.addWidget(audio_fmt_label)
-        audio_fmt_row.addWidget(self.audio_fmt_combo)
-        self.audio_fmt_widget.setVisible(False)
-        layout.addWidget(self.audio_fmt_widget)
-
-        self.progress_bar = QProgressBar()
-        self.progress_bar.setValue(0)
-        self.progress_bar.setVisible(False)
-        layout.addWidget(self.progress_bar)
-
-        self.info_label = QLabel("")
-        self.info_label.setStyleSheet(f"color: {'#8b949e' if self._dark else '#656d76'}; font-size: 12px;")
-        self.info_label.setVisible(False)
-        layout.addWidget(self.info_label)
-
-        self.log_box = QTextEdit()
-        self.log_box.setReadOnly(True)
-        self.log_box.setFixedHeight(90)
-        self.log_box.setVisible(False)
-        layout.addWidget(self.log_box)
-
-        btn_row = QHBoxLayout()
-        self.cancel_dl_btn = QPushButton("Cancel Download")
-        self.cancel_dl_btn.setStyleSheet(
-            "QPushButton { background-color: #dc2626; color: white; }"
-            "QPushButton:hover { background-color: #b91c1c; }"
-        )
-        self.cancel_dl_btn.setVisible(False)
-        self.cancel_dl_btn.clicked.connect(self.cancel_download)
-
-        self.download_btn = QPushButton("Download")
-        self.download_btn.setStyleSheet(
-            "QPushButton { background-color: #16a34a; color: white; }"
-            "QPushButton:hover { background-color: #15803d; }"
-            "QPushButton:disabled { background-color: #94a3b8; }"
-        )
-        self.download_btn.setEnabled(False)
-        self.download_btn.clicked.connect(self.start_download)
-
-        self.close_btn = QPushButton("Close")
-        self.close_btn.setStyleSheet(make_close_btn_style(self._dark))
-        self.close_btn.clicked.connect(self.close)
-
-        self.open_file_btn = QPushButton("Open")
-        self.open_file_btn.setStyleSheet(
-            "QPushButton { background-color: #0ea5e9; color: white; }"
-            "QPushButton:hover { background-color: #0284c7; }"
-        )
-        self.open_file_btn.setVisible(False)
-        self.open_file_btn.clicked.connect(self._open_downloaded_file)
-
-        self.open_folder_btn = QPushButton("Open Folder")
-        self.open_folder_btn.setStyleSheet(
-            "QPushButton { background-color: #64748b; color: white; }"
-            "QPushButton:hover { background-color: #475569; }"
-        )
-        self.open_folder_btn.setVisible(False)
-        self.open_folder_btn.clicked.connect(self._open_downloaded_folder)
-
-        btn_row.addWidget(self.cancel_dl_btn)
-        btn_row.addStretch()
-        btn_row.addWidget(self.open_file_btn)
-        btn_row.addWidget(self.open_folder_btn)
-        btn_row.addWidget(self.close_btn)
-        btn_row.addWidget(self.download_btn)
-        layout.addLayout(btn_row)
-
-
-    def _on_type_changed(self):
-        self.audio_fmt_widget.setVisible(self.radio_audio.isChecked())
-
-    def fetch_formats(self):
-        url = self.url_input.text().strip()
-        if not url:
-            return
-        self.fetch_btn.setEnabled(False)
-        self.fetch_btn.setText("Fetching...")
-        self.title_label.setText("Fetching video info...")
-        self.download_btn.setEnabled(False)
-        self.fetch_thread = FetchFormatsThread(url)
-        self.fetch_thread.formats_ready.connect(self.on_formats_ready)
-        self.fetch_thread.error.connect(self.on_fetch_error)
-        self.fetch_thread.start()
-
-    def on_formats_ready(self, title):
-        self.video_title = title
-        self.title_label.setText(f"Ready: {title}")
-        self.fetch_btn.setEnabled(True)
-        self.fetch_btn.setText("Fetch")
-        self.download_btn.setEnabled(True)
-
-    def on_fetch_error(self, error):
-        self.title_label.setText(f"Error: {error}")
-        self.fetch_btn.setEnabled(True)
-        self.fetch_btn.setText("Fetch")
-
-    def _build_yt_params(self, settings, safe_title):
-        """Return (ydl_opts, folder, display_name) for the given settings."""
-        mode      = settings.get("mode", "combined")
-        quality   = settings.get("quality", "Best")
-        audio_fmt = settings.get("audio_fmt", "mp3")
-        if mode == "audio":
-            folder = os.path.join(HOME, "Downloads", "Music")
-            os.makedirs(folder, exist_ok=True)
-            display_name = f"{safe_title}.{audio_fmt}"
-            ydl_opts = {
-                'format': 'bestaudio/best',
-                'outtmpl': os.path.join(folder, f"{safe_title}.%(ext)s"),
-                'postprocessors': [{'key': 'FFmpegExtractAudio', 'preferredcodec': audio_fmt, 'preferredquality': '0'}],
-                'quiet': True, 'no_warnings': True,
-                'http_headers': {'User-Agent': HEADERS['User-Agent']},
-            }
-        elif mode == "video_only":
-            folder = os.path.join(HOME, "Downloads", "Videos")
-            os.makedirs(folder, exist_ok=True)
-            display_name = f"{safe_title}.mp4"
-            fmt = "bestvideo/best" if quality == "Best" else f"bestvideo[height<={quality[:-1]}]/bestvideo/best"
-            ydl_opts = {
-                'format': fmt,
-                'outtmpl': os.path.join(folder, f"{safe_title}.%(ext)s"),
-                'quiet': True, 'no_warnings': True,
-                'http_headers': {'User-Agent': HEADERS['User-Agent']},
-            }
-        else:
-            folder = os.path.join(HOME, "Downloads", "Videos")
-            os.makedirs(folder, exist_ok=True)
-            display_name = f"{safe_title}.mp4"
-            fmt = "bestvideo+bestaudio/best" if quality == "Best" else f"bestvideo[height<={quality[:-1]}]+bestaudio/bestvideo[height<={quality[:-1]}]/best"
-            ydl_opts = {
-                'format': fmt,
-                'outtmpl': os.path.join(folder, f"{safe_title}.%(ext)s"),
-                'merge_output_format': 'mp4',
-                'quiet': True, 'no_warnings': True,
-                'http_headers': {'User-Agent': HEADERS['User-Agent']},
-            }
-        return ydl_opts, folder, display_name
-
-    def _current_settings(self):
-        if self.radio_audio.isChecked():
-            mode = "audio"
-        elif self.radio_video_only.isChecked():
-            mode = "video_only"
-        else:
-            mode = "combined"
-        return {
-            "mode":      mode,
-            "quality":   self.quality_combo.currentText(),
-            "audio_fmt": self.audio_fmt_combo.currentText(),
-        }
-
-    def _kick_off(self, url, settings, safe_title):
-        """Build opts, show progress UI, and launch the yt-dlp thread."""
-        self._current_url = url
-        self.download_btn.setEnabled(False)
-        self.fetch_btn.setEnabled(False)
-        self.cancel_dl_btn.setVisible(True)
-        self.progress_bar.setValue(0)
-        self.progress_bar.setVisible(True)
-        self.info_label.setVisible(True)
-        self.log_box.setVisible(True)
-        self.log_box.clear()
-        self._last_size = ""
-        self._last_speed = ""
-        self._last_eta = ""
-
-        ydl_opts, folder, display_name = self._build_yt_params(settings, safe_title)
-        self._dl_folder = folder
-        self._dl_base   = safe_title
-        self.open_file_btn.setVisible(False)
-        self.open_folder_btn.setVisible(False)
-        self.download_btn.setVisible(True)
-        self.download_started.emit(url, display_name, folder)
-        self.yt_settings_captured.emit(url, settings)
-        self.dl_thread = YouTubeDownloadThread(url, ydl_opts)
-        self.dl_thread.progress.connect(self._on_progress)
-        self.dl_thread.speed.connect(self._on_speed)
-        self.dl_thread.size_info.connect(self._on_size)
-        self.dl_thread.eta.connect(self._on_eta)
-        self.dl_thread.log.connect(lambda msg: self.log_box.append(msg))
-        self.dl_thread.finished.connect(self.on_download_finished)
-        self.dl_thread.start()
-        self.log_box.append("Starting download...")
-
-    def start_download(self):
-        url = self.url_input.text().strip()
-        if not url:
-            return
-        safe_title = re.sub(r'[<>:"/\\|?*\x00-\x1F]', '', self.video_title)[:80].strip() or "video"
-        self._kick_off(url, self._current_settings(), safe_title)
-
-    def start_with_saved_settings(self, url, settings, safe_title):
-        """Resume path: skip format fetch, jump straight to downloading."""
-        self.url_input.setText(url)
-        mode = settings.get("mode", "combined")
-        if mode == "audio":
-            self.radio_audio.setChecked(True)
-        elif mode == "video_only":
-            self.radio_video_only.setChecked(True)
-        else:
-            self.radio_video.setChecked(True)
-        q = settings.get("quality", "Best")
-        idx = self.quality_combo.findText(q)
-        if idx >= 0:
-            self.quality_combo.setCurrentIndex(idx)
-        af = settings.get("audio_fmt", "mp3")
-        idx = self.audio_fmt_combo.findText(af)
-        if idx >= 0:
-            self.audio_fmt_combo.setCurrentIndex(idx)
-        self.video_title = safe_title
-        self.title_label.setText(f"Resuming: {safe_title}")
-        self._kick_off(url, settings, safe_title)
-
-    def _on_progress(self, pct):
-        self.progress_bar.setValue(pct)
-        self.download_progress.emit(self._current_url, pct, self._last_size, self._last_speed, self._last_eta)
-
-    def _on_speed(self, spd):
-        self._last_speed = spd
-        self._refresh_info()
-        self.download_progress.emit(self._current_url, self.progress_bar.value(), self._last_size, spd, self._last_eta)
-
-    def _on_size(self, sz):
-        self._last_size = sz
-        self._refresh_info()
-
-    def _on_eta(self, eta):
-        self._last_eta = eta
-        self._refresh_info()
-
-    def _refresh_info(self):
-        parts = []
-        if self._last_size: parts.append(self._last_size)
-        if self._last_speed: parts.append(self._last_speed)
-        if self._last_eta and self._last_eta != "—": parts.append(f"ETA {self._last_eta}")
-        self.info_label.setText("  ".join(parts))
-
-    def cancel_download(self):
-        if self.dl_thread and self.dl_thread.isRunning():
-            self.dl_thread.running = False
-            self.dl_thread.terminate()
-            self.log_box.append("Download cancelled.")
-            self.cancel_dl_btn.setVisible(False)
-            self.download_btn.setEnabled(True)
-            self.fetch_btn.setEnabled(True)
-            self.download_finished.emit(self._current_url, "Cancelled")
-
-    def on_download_finished(self, msg):
-        self.fetch_btn.setEnabled(True)
-        self.download_btn.setEnabled(True)
-        self.cancel_dl_btn.setVisible(False)
-        if msg == "Finished":
-            self.progress_bar.setValue(100)
-            self.log_box.append("Download complete!")
-            self.info_label.setText("Download complete!")
-            self.download_btn.setVisible(False)
-            self.open_file_btn.setVisible(True)
-            self.open_folder_btn.setVisible(True)
-        else:
-            self.log_box.append(msg)
-            self.info_label.setText(msg)
-        self.download_finished.emit(self._current_url, msg)
-
-    def _open_downloaded_file(self):
-        import glob as _glob
-        folder = getattr(self, '_dl_folder', '')
-        base   = getattr(self, '_dl_base', '')
-        if folder and base:
-            matches = _glob.glob(os.path.join(folder, f"{base}.*"))
-            if matches:
-                subprocess.Popen(['xdg-open', matches[0]])
-                self.close()
-                return
-        if folder:
-            subprocess.Popen(['xdg-open', folder])
-        self.close()
-
-    def _open_downloaded_folder(self):
-        folder = getattr(self, '_dl_folder', '')
-        if folder and os.path.exists(folder):
-            subprocess.Popen(['xdg-open', folder])
-        self.close()
-
-
 # ── Main download thread ─────────────────────────────────────────────────────
 
+# ── Redesigned downloader-dialog shared infrastructure ──────────────────────
+# DIALOG_THEMES are scoped to the three redesigned downloader dialogs (Core,
+# Stream, YouTube). They intentionally stay separate from the main app's THEMES
+# so the dialogs can evolve their visual language without touching the rest.
+DIALOG_THEMES = {
+    "light": {
+        "bg":        "#f1f5f9",
+        "surface":   "#ffffff",
+        "surface2":  "#f8fafc",
+        "title_bg":  "#eef2f5",
+        "card":      "#f8fafc",
+        "input_bg":  "#ffffff",
+        "border":    "#e2e8f0",
+        "text":      "#0f172a",
+        "muted":     "#64748b",
+        "subtle":    "#94a3b8",
+        "close_btn": "#e2e8f0",
+        "bar_track": "#e2e8f0",
+    },
+    "dark": {
+        "bg":        "#020617",
+        "surface":   "#0f172a",
+        "surface2":  "#020617",
+        "title_bg":  "#0a121f",
+        # Cards are LIGHTER than the surface in dark mode, so they pop forward.
+        "card":      "#1e293b",
+        "input_bg":  "#1e293b",
+        "border":    "#334155",
+        "text":      "#f1f5f9",
+        "muted":     "#94a3b8",
+        "subtle":    "#64748b",
+        "close_btn": "#334155",
+        "bar_track": "#0b1220",
+    },
+}
+
+PLEX_SANS = '"IBM Plex Sans", "Segoe UI", system-ui, sans-serif'
+PLEX_MONO = '"IBM Plex Mono", "SF Mono", "DejaVu Sans Mono", Menlo, monospace'
+
+
+def _svg_rgba_to_qt(path):
+    """Rewrite rgba() colors in an SVG to rgb() + matching *-opacity attrs so
+    Qt's QSvgRenderer (which can't parse rgba()) renders them correctly.
+    Returns a QByteArray ready to pass to QSvgRenderer."""
+    from PyQt6.QtCore import QByteArray
+    with open(path, "rb") as f:
+        svg = f.read().decode("utf-8")
+    rgba_re = re.compile(
+        r'\b(fill|stroke|stop-color)\s*=\s*"\s*rgba\(\s*'
+        r'(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*([\d.]+)\s*\)\s*"'
+    )
+
+    def repl(m):
+        attr, r, g, b, a = m.group(1), m.group(2), m.group(3), m.group(4), m.group(5)
+        opacity_attr = "stop-opacity" if attr == "stop-color" else f"{attr}-opacity"
+        return f'{attr}="rgb({r},{g},{b})" {opacity_attr}="{a}"'
+
+    return QByteArray(rgba_re.sub(repl, svg).encode("utf-8"))
+
+
+# ── Inline SVG tile glyphs (replace OS-dependent emoji in dialog tiles) ──────
+# Each SVG uses `currentColor` placeholders that get substituted with the
+# active tone color at render time.  Kept tiny so QSvgRenderer can parse them
+# without any external dependency.
+_TILE_SVG_LINK = (
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" '
+    'fill="none" stroke="currentColor" stroke-width="2.2" '
+    'stroke-linecap="round" stroke-linejoin="round">'
+    '<path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0 -5.7 -5.7l-1.2 1.2"/>'
+    '<path d="M14 10a4 4 0 0 0 -5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1.2 -1.2"/>'
+    '</svg>'
+)
+_TILE_SVG_FOLDER = (
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" '
+    'fill="none" stroke="currentColor" stroke-width="2.0" '
+    'stroke-linecap="round" stroke-linejoin="round">'
+    '<path d="M3 7a2 2 0 0 1 2-2h4l2 2.5h8a2 2 0 0 1 2 2v9a2 2 0 0 1 -2 2h-14a2 2 0 0 1 -2 -2z"/>'
+    '</svg>'
+)
+_TILE_SVG_CATEGORY = (
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" '
+    'fill="none" stroke="currentColor" stroke-width="2.0" '
+    'stroke-linecap="round" stroke-linejoin="round">'
+    '<rect x="3.5"  y="3.5"  width="7" height="7" rx="1.6"/>'
+    '<rect x="13.5" y="3.5"  width="7" height="7" rx="1.6"/>'
+    '<rect x="3.5"  y="13.5" width="7" height="7" rx="1.6"/>'
+    '<rect x="13.5" y="13.5" width="7" height="7" rx="1.6"/>'
+    '</svg>'
+)
+_TILE_SVG_CHEVRON_DOWN = (
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" '
+    'fill="none" stroke="currentColor" stroke-width="2.6" '
+    'stroke-linecap="round" stroke-linejoin="round">'
+    '<polyline points="6 9 12 15 18 9"/>'
+    '</svg>'
+)
+_TILE_SVG_HDD = (
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" '
+    'fill="none" stroke="currentColor" stroke-width="1.8" '
+    'stroke-linecap="round" stroke-linejoin="round">'
+    # Trapezoid roof + chassis as one continuous outline.
+    '<path d="M21 13 L17.6 7.1 C17.2 6.4 16.5 6 15.7 6 H8.3 '
+    'C7.5 6 6.8 6.4 6.4 7.1 L3 13 V17 C3 18.1 3.9 19 5 19 '
+    'H19 C20.1 19 21 18.1 21 17 Z"/>'
+    # Shelf where the sloped roof meets the chassis.
+    '<line x1="3" y1="13" x2="21" y2="13"/>'
+    # Two LED dots on the chassis (filled, no stroke).
+    '<circle cx="7" cy="16" r="0.9" fill="currentColor" stroke="none"/>'
+    '<circle cx="10" cy="16" r="0.9" fill="currentColor" stroke="none"/>'
+    '</svg>'
+)
+
+
+def _render_svg_str_pixmap(svg_str, color_hex, size=18):
+    """Render an inline SVG string into a transparent QPixmap, substituting
+    ``currentColor`` placeholders with ``color_hex`` first. Used by dialog
+    tiles so we don't depend on the user's emoji font."""
+    from PyQt6.QtCore import QByteArray
+    from PyQt6.QtSvg import QSvgRenderer
+    svg = svg_str.replace("currentColor", color_hex)
+    renderer = QSvgRenderer(QByteArray(svg.encode("utf-8")))
+    render_size = max(size * 4, 96)
+    pix = QPixmap(render_size, render_size)
+    pix.fill(QColor(0, 0, 0, 0))
+    p = QPainter(pix)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+    p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+    renderer.render(p)
+    p.end()
+    return pix.scaled(size, size,
+                      Qt.AspectRatioMode.KeepAspectRatio,
+                      Qt.TransformationMode.SmoothTransformation)
+
+
+def _make_glyph_tile(svg_str, tone_color, dark, size=28, glyph_size=18):
+    """Build a small rounded tile QLabel with a tinted SVG glyph centered
+    inside. Used as the leading icon for URL / folder / category fields."""
+    tile = QLabel()
+    tile.setFixedSize(size, size)
+    r, g, b = int(tone_color[1:3], 16), int(tone_color[3:5], 16), int(tone_color[5:7], 16)
+    bg_alpha = 0.20 if dark else 0.12
+    tile.setStyleSheet(
+        f"background: rgba({r},{g},{b},{bg_alpha}); border-radius: 8px;"
+    )
+    tile.setPixmap(_render_svg_str_pixmap(svg_str, tone_color, size=glyph_size))
+    tile.setAlignment(Qt.AlignmentFlag.AlignCenter)
+    return tile
+
+
+def _render_svg_pixmap(icon_path, size):
+    """Render an SVG file to a transparent QPixmap at the requested square size.
+    Uses 4× super-sampling for crisp edges at typical UI sizes."""
+    from PyQt6.QtSvg import QSvgRenderer
+    renderer = QSvgRenderer(_svg_rgba_to_qt(icon_path))
+    render_size = max(size * 4, 192)
+    pix = QPixmap(render_size, render_size)
+    pix.fill(QColor(0, 0, 0, 0))
+    p = QPainter(pix)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+    p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+    renderer.render(p)
+    p.end()
+    return pix.scaled(size, size,
+                      Qt.AspectRatioMode.KeepAspectRatio,
+                      Qt.TransformationMode.SmoothTransformation)
+
+
+class DownloaderDialogBase(QDialog):
+    """Frameless, draggable chrome shared by the Core / Stream / YouTube
+    downloader dialogs. Subclasses fill ``self.body`` with their content and
+    set the footer via ``self._set_footer(widgets)``.
+    """
+
+    def __init__(self, parent=None, dark=False, window_title="LDM Downloader"):
+        super().__init__(parent)
+        self.dark = dark
+        self.theme = DIALOG_THEMES["dark" if dark else "light"]
+        self.setWindowTitle(window_title)
+        # QDialog hides min/max by default — opt into the full system menu so
+        # the OS title bar shows Minimize / Maximize / Close.
+        self.setWindowFlags(
+            Qt.WindowType.Window
+            | Qt.WindowType.WindowTitleHint
+            | Qt.WindowType.WindowSystemMenuHint
+            | Qt.WindowType.WindowMinimizeButtonHint
+            | Qt.WindowType.WindowMaximizeButtonHint
+            | Qt.WindowType.WindowCloseButtonHint
+        )
+        self._build_chrome()
+
+    def _build_chrome(self):
+        t = self.theme
+
+        self.setStyleSheet(
+            f"QDialog {{ background-color: {t['surface']}; }}"
+        )
+
+        outer_layout = QVBoxLayout(self)
+        outer_layout.setContentsMargins(0, 0, 0, 0)
+        outer_layout.setSpacing(0)
+
+        # Body region — subclasses populate this via body_layout.
+        self.body = QWidget()
+        self.body.setStyleSheet(f"background: {t['surface']};")
+        self.body_layout = QVBoxLayout(self.body)
+        self.body_layout.setContentsMargins(0, 0, 0, 0)
+        self.body_layout.setSpacing(0)
+        outer_layout.addWidget(self.body, 1)
+
+        # Footer — populated by subclasses via footer_layout.
+        self.footer = QWidget()
+        self.footer.setStyleSheet(
+            f"background: {t['surface2']}; "
+            f"border-top: 1px solid {t['border']};"
+        )
+        self.footer_layout = QHBoxLayout(self.footer)
+        self.footer_layout.setContentsMargins(22, 14, 22, 14)
+        self.footer_layout.setSpacing(10)
+        outer_layout.addWidget(self.footer)
+
+
+def _make_hero_band(parent, dark, icon_path, title, subtitle="", chip_label="",
+                    accent_color="#3b82f6", accent_soft="rgba(0,0,0,0)"):
+    """Engine-coloured band at the top of each downloader dialog: 56px squircle
+    icon on the left, title (+ optional chip + subtitle) on the right, tinted
+    gradient bg. When both ``subtitle`` and ``chip_label`` are empty, the title
+    is vertically centred against the icon for a clean header-only look."""
+    t = DIALOG_THEMES["dark" if dark else "light"]
+    band = QWidget(parent)
+    band.setStyleSheet(f"""
+        background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+            stop:0 {accent_soft}, stop:0.75 transparent);
+        border-bottom: 1px solid {t['border']};
+    """)
+    layout = QHBoxLayout(band)
+    layout.setContentsMargins(22, 18, 22, 18)
+    layout.setSpacing(16)
+
+    icon_lbl = QLabel()
+    icon_lbl.setFixedSize(56, 56)
+    icon_lbl.setStyleSheet("background: transparent;")
+    if icon_path and os.path.exists(icon_path):
+        icon_lbl.setPixmap(_render_svg_pixmap(icon_path, 56))
+    layout.addWidget(icon_lbl, 0, Qt.AlignmentFlag.AlignVCenter)
+
+    title_lbl = QLabel(title)
+    title_lbl.setStyleSheet(
+        f"font-family: {PLEX_SANS}; font-size: 19px; font-weight: 800; "
+        f"color: {t['text']}; letter-spacing: -0.2px; background: transparent;"
+    )
+
+    if not subtitle and not chip_label:
+        # Title-only header — center it vertically alongside the icon.
+        layout.addWidget(title_lbl, 1, Qt.AlignmentFlag.AlignVCenter)
+        return band
+
+    text_col = QVBoxLayout()
+    text_col.setSpacing(3)
+
+    header_row = QHBoxLayout()
+    header_row.setSpacing(10)
+    header_row.addWidget(title_lbl)
+
+    if chip_label:
+        chip = QLabel(chip_label)
+        chip.setStyleSheet(
+            f"font-family: {PLEX_SANS}; font-size: 10px; font-weight: 700; "
+            f"letter-spacing: 0.8px; padding: 3px 8px; border-radius: 10px; "
+            f"background: rgba(148,163,184,0.18); color: {accent_color};"
+        )
+        chip.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        header_row.addWidget(chip)
+    header_row.addStretch()
+    text_col.addLayout(header_row)
+
+    if subtitle:
+        sub_lbl = QLabel(subtitle)
+        sub_lbl.setStyleSheet(
+            f"font-family: {PLEX_SANS}; font-size: 12px; color: {t['muted']}; "
+            f"background: transparent;"
+        )
+        sub_lbl.setWordWrap(True)
+        text_col.addWidget(sub_lbl)
+
+    layout.addLayout(text_col, 1)
+    return band
+
+
+class StripedProgressBar(QWidget):
+    """Thick progress bar with a diagonal-stripe overlay.
+
+    Replaces QProgressBar so we can: (a) guarantee the fill renders even at
+    very small percentages, (b) draw the slanted highlight pattern that the
+    design handoff calls for, and (c) keep the corners crisp via clipping
+    instead of relying on QSS border-radius math.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._value = 0
+        self._color_a = QColor("#22c55e")
+        self._color_b = QColor("#16a34a")
+        self._track   = QColor("#e2e8f0")
+        self._border  = QColor("#cbd5e1")
+        self._stripe  = QColor(255, 255, 255, 70)
+        self.setFixedHeight(14)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding,
+                           QSizePolicy.Policy.Fixed)
+
+    def set_colors(self, a, b, track, border, stripe_alpha=70):
+        self._color_a = QColor(a)
+        self._color_b = QColor(b)
+        self._track   = QColor(track)
+        self._border  = QColor(border)
+        self._stripe  = QColor(255, 255, 255, stripe_alpha)
+        self.update()
+
+    def setValue(self, pct):
+        self._value = max(0, min(100, int(pct)))
+        self.update()
+
+    def value(self):
+        return self._value
+
+    def paintEvent(self, _ev):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        rf = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        radius = rf.height() / 2.0
+
+        # Track
+        track_path = QPainterPath()
+        track_path.addRoundedRect(rf, radius, radius)
+        p.setClipPath(track_path)
+        p.fillRect(rf, self._track)
+
+        # Fill
+        fw = rf.width() * (self._value / 100.0)
+        if fw > 0.5:
+            fill = QRectF(rf.left(), rf.top(), fw, rf.height())
+            grad = QLinearGradient(0, rf.top(), 0, rf.bottom())
+            grad.setColorAt(0, self._color_a)
+            grad.setColorAt(1, self._color_b)
+            p.fillRect(fill, grad)
+
+            # Diagonal stripes inside the fill
+            p.save()
+            p.setClipRect(fill)
+            p.setPen(QPen(self._stripe, 6))
+            step = 14
+            h = rf.height()
+            x = rf.left() - h
+            end = rf.left() + fw + h
+            while x < end:
+                p.drawLine(QPointF(x, rf.bottom()),
+                           QPointF(x + h, rf.top()))
+                x += step
+            p.restore()
+
+        # Border (drawn on top so it stays crisp at any fill level)
+        p.setClipping(False)
+        p.setPen(QPen(self._border, 1))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawRoundedRect(rf, radius, radius)
+        p.end()
+
+
+class ProgressSection(QWidget):
+    """Shared progress card at the bottom of every downloader dialog.
+
+    States:
+      - idle:        0% with the bar shown but flat
+      - downloading: green bar, percentage + size + speed + ETA
+      - complete:    blue bar, "✓ Complete" label, speed/ETA hidden
+      - error:       red bar with an error message in place of size
+
+    Sizes are flexible — callers pass either a human-readable string via
+    ``set_size_text`` or numeric (downloaded, total) via ``update_progress``.
+    """
+
+    def __init__(self, parent=None, dark=False):
+        super().__init__(parent)
+        self.dark = dark
+        self.theme = DIALOG_THEMES["dark" if dark else "light"]
+        self._state = "idle"
+        self._build_ui()
+        # Ensure the parent layout can't squish us below the room needed for
+        # 22px-bold pct label + bar + 12px speed/eta row + margins + spacing.
+        self.setMinimumHeight(90)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding,
+                           QSizePolicy.Policy.Minimum)
+
+    def _build_ui(self):
+        t = self.theme
+        # Plain strip (no card chrome) so the bar's edges line up with the
+        # controls above it in the dialog body.
+        self.setStyleSheet("background: transparent;")
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 6, 0, 6)
+        outer.setSpacing(8)
+
+        top = QHBoxLayout()
+        # 3px left inset on the text row only (bar stays flush) — guards
+        # against bold-italic glyph negative LSB clipping the leading digit.
+        top.setContentsMargins(3, 0, 0, 0)
+        top.setSpacing(8)
+
+        self.pct_lbl = QLabel("0%")
+        _pct_font = QFont("IBM Plex Sans")
+        _pct_font.setPixelSize(22)
+        _pct_font.setWeight(QFont.Weight.Bold)
+        self.pct_lbl.setFont(_pct_font)
+        self.pct_lbl.setStyleSheet(
+            f"color: {t['text']}; background: transparent;"
+        )
+        # Force the full 22px-bold line box. Parent's QVBoxLayout was
+        # squishing the row to 15px, hiding the glyphs under the bar.
+        _fm = self.pct_lbl.fontMetrics()
+        self.pct_lbl.setFixedHeight(_fm.height() + 4)
+        top.addWidget(self.pct_lbl)
+
+        self.label_lbl = QLabel("ready")
+        self.label_lbl.setStyleSheet(
+            f"font-family: {PLEX_SANS}; font-size: 12px; color: {t['muted']}; "
+            f"background: transparent;"
+        )
+        top.addWidget(self.label_lbl)
+        top.addStretch()
+
+        self.size_lbl = QLabel("")
+        self.size_lbl.setStyleSheet(
+            f"font-family: {PLEX_MONO}; font-size: 12px; color: {t['muted']}; "
+            f"background: transparent;"
+        )
+        top.addWidget(self.size_lbl)
+        outer.addLayout(top)
+
+        self.bar = StripedProgressBar()
+        self.bar.setValue(0)
+        outer.addWidget(self.bar)
+
+        bottom = QHBoxLayout()
+        bottom.setContentsMargins(0, 0, 0, 0)
+        self.speed_lbl = QLabel("")
+        self.eta_lbl = QLabel("")
+        for lbl in (self.speed_lbl, self.eta_lbl):
+            lbl.setStyleSheet(
+                f"font-family: {PLEX_MONO}; font-size: 11.5px; color: {t['muted']}; "
+                f"background: transparent;"
+            )
+        bottom.addWidget(self.speed_lbl)
+        bottom.addStretch()
+        bottom.addWidget(self.eta_lbl)
+        outer.addLayout(bottom)
+
+        self._apply_bar_style("idle")
+
+    def _apply_bar_style(self, state):
+        t = self.theme
+        if state == "error":
+            grad_from, grad_to, border = "#ef4444", "#b91c1c", "#dc2626"
+        elif state in ("downloading", "complete"):
+            grad_from, grad_to, border = "#22c55e", "#16a34a", t['border']
+        else:  # idle
+            grad_from, grad_to, border = t['bar_track'], t['bar_track'], t['border']
+        self.bar.set_colors(grad_from, grad_to, t['bar_track'], border)
+
+    def set_pct(self, pct):
+        pct = max(0, min(100, int(pct)))
+        self.bar.setValue(pct)
+        self.pct_lbl.setText(f"{pct}%")
+        if pct >= 100 and self._state != "complete":
+            self.mark_complete()
+        elif 0 < pct < 100 and self._state not in ("downloading", "error"):
+            self.mark_active()
+
+    def set_size_text(self, text):
+        self.size_lbl.setText(text or "")
+
+    def set_speed_text(self, text):
+        self.speed_lbl.setText(f"\u2193 {text}" if text else "")
+
+    def set_eta_text(self, text):
+        self.eta_lbl.setText(f"{text} remaining" if text else "")
+
+    def mark_idle(self):
+        self._state = "idle"
+        self._apply_bar_style("idle")
+        self.label_lbl.setText("ready")
+        self.label_lbl.setStyleSheet(
+            f"font-family: {PLEX_SANS}; font-size: 12px; color: {self.theme['muted']}; "
+            f"background: transparent;"
+        )
+        self.speed_lbl.show(); self.eta_lbl.show()
+
+    def mark_active(self):
+        self._state = "downloading"
+        self._apply_bar_style("downloading")
+        self.label_lbl.setText("downloaded")
+        self.label_lbl.setStyleSheet(
+            f"font-family: {PLEX_SANS}; font-size: 12px; color: {self.theme['muted']}; "
+            f"background: transparent;"
+        )
+        self.speed_lbl.show(); self.eta_lbl.show()
+
+    def mark_complete(self):
+        self._state = "complete"
+        self._apply_bar_style("complete")
+        self.pct_lbl.setText("100%")
+        self.bar.setValue(100)
+        self.label_lbl.setText("Complete")
+        self.label_lbl.setStyleSheet(
+            f"font-family: {PLEX_SANS}; font-size: 12px; color: #16a34a; "
+            f"font-weight: 700; background: transparent;"
+        )
+        self.speed_lbl.hide(); self.eta_lbl.hide()
+
+    def mark_error(self, msg=""):
+        self._state = "error"
+        self._apply_bar_style("error")
+        self.label_lbl.setText(msg or "Error")
+        self.label_lbl.setStyleSheet(
+            f"font-family: {PLEX_SANS}; font-size: 12px; color: #dc2626; "
+            f"font-weight: 700; background: transparent;"
+        )
+        self.speed_lbl.hide(); self.eta_lbl.hide()
+
+
+def _dialog_btn_qss(theme, kind="secondary"):
+    """Return a QSS string for one of the five primary button variants. Apply
+    with btn.setStyleSheet(_dialog_btn_qss(self.theme, 'primaryGreen'))."""
+    t = theme
+    base = (
+        f"QPushButton {{"
+        f" padding: 9px 18px; border-radius: 10px;"
+        f" font-family: {PLEX_SANS}; font-size: 13px; font-weight: 600;"
+        f" border: none; outline: none;"
+        f"}}"
+    )
+    variants = {
+        "secondary":
+            f" QPushButton {{ background: {t['surface']}; color: {t['text']};"
+            f"   border: 1px solid {t['border']}; }}"
+            f" QPushButton:hover {{ background: {t['card']}; }}"
+            f" QPushButton:disabled {{ color: {t['subtle']}; background: {t['surface2']}; }}",
+        "primaryGreen":
+            " QPushButton { background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
+            "   stop:0 #22c55e, stop:1 #16a34a); color: white; }"
+            " QPushButton:hover { background: #16a34a; }"
+            " QPushButton:disabled { background: #94a3b8; color: #f1f5f9; }",
+        "primaryRed":
+            " QPushButton { background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
+            "   stop:0 #ef4444, stop:1 #dc2626); color: white; }"
+            " QPushButton:hover { background: #dc2626; }"
+            " QPushButton:disabled { background: #94a3b8; color: #f1f5f9; }",
+        "primaryViolet":
+            " QPushButton { background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
+            "   stop:0 #8b5cf6, stop:1 #6d28d9); color: white; }"
+            " QPushButton:hover { background: #6d28d9; }"
+            " QPushButton:disabled { background: #94a3b8; color: #f1f5f9; }",
+        "primaryBlue":
+            " QPushButton { background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
+            "   stop:0 #3b82f6, stop:1 #1d4ed8); color: white; }"
+            " QPushButton:hover { background: #1d4ed8; }"
+            " QPushButton:disabled { background: #94a3b8; color: #f1f5f9; }",
+        "destructive":
+            " QPushButton { background: rgba(239,68,68,0.08); color: #dc2626;"
+            "   border: 1px solid rgba(239,68,68,0.30); }"
+            " QPushButton:hover { background: rgba(239,68,68,0.16); }",
+    }
+    return base + variants.get(kind, variants["secondary"])
+
+
+def _dialog_combo_inline_qss(theme, accent="#3b82f6", hide_arrow=False):
+    """Style for a QComboBox sitting inside a tile-styled wrapper (no border
+    of its own, transparent background). When ``hide_arrow`` is True the
+    native chevron is fully suppressed so the wrapper can draw its own."""
+    t = theme
+    arrow_block = (
+        " QComboBox::drop-down { width: 0; border: none; background: transparent; }"
+        " QComboBox::down-arrow { image: none; width: 0; height: 0; }"
+        if hide_arrow else
+        f" QComboBox::drop-down {{"
+        f"  subcontrol-origin: padding; subcontrol-position: center right;"
+        f"  width: 22px; border: none; background: transparent;"
+        f" }}"
+        f" QComboBox::down-arrow {{"
+        f"  image: none; width: 0; height: 0;"
+        f"  border-left: 4px solid transparent; border-right: 4px solid transparent;"
+        f"  border-top: 5px solid {accent}; margin-right: 8px;"
+        f" }}"
+    )
+    return (
+        f"QComboBox {{"
+        f"  background: transparent; border: none; color: {t['text']};"
+        f"  padding: 6px 4px 6px 4px; font-family: {PLEX_SANS}; font-size: 13.5px;"
+        f"}}"
+        f" QComboBox:hover {{ color: {t['text']}; }}"
+        + arrow_block
+    )
+
+
+def _style_combo_popup(combo, theme, accent):
+    """Style the QComboBox popup so hover/selection highlights work reliably.
+    Sets stylesheet on the *view* directly (Qt's QStyleSheetStyle sometimes
+    skips item :hover when set via the combo's parent stylesheet) and forces
+    mouse-tracking + a vanilla QStyledItemDelegate so QSS wins over the
+    native item painter."""
+    t = theme
+    r, g, b = int(accent[1:3], 16), int(accent[3:5], 16), int(accent[5:7], 16)
+    hover_bg = f"rgba({r},{g},{b},0.12)"
+    sel_bg   = f"rgba({r},{g},{b},0.20)"
+    view = combo.view()
+    view.setMouseTracking(True)
+    view.setCursor(Qt.CursorShape.PointingHandCursor)
+    view.setSpacing(2)
+    # A plain QStyledItemDelegate forces QSS to take effect on item rendering
+    # (without this, Qt's QComboBoxDelegate uses native styling on some
+    # platforms and ignores :hover / :selected backgrounds).
+    view.setItemDelegate(QStyledItemDelegate(view))
+    view.setStyleSheet(
+        f"QAbstractItemView, QListView {{"
+        f"  background: {t['surface']}; color: {t['text']};"
+        f"  border: 1px solid {t['border']}; border-radius: 10px;"
+        f"  padding: 6px; outline: none;"
+        f"  selection-background-color: {sel_bg}; selection-color: {accent};"
+        f"  font-family: {PLEX_SANS}; font-size: 13.5px;"
+        f"}}"
+        f" QAbstractItemView::item, QListView::item {{"
+        f"  min-height: 30px; padding: 6px 10px; border-radius: 6px;"
+        f"  color: {t['text']}; background: transparent;"
+        f"}}"
+        f" QAbstractItemView::item:hover, QListView::item:hover {{"
+        f"  background: {hover_bg}; color: {t['text']};"
+        f"}}"
+        f" QAbstractItemView::item:selected, QListView::item:selected {{"
+        f"  background: {sel_bg}; color: {accent}; font-weight: 600;"
+        f"}}"
+    )
+    # The popup window itself wraps the view in a QFrame container ("PopupFrame"
+    # on most Qt builds). Without explicit styling, that frame paints with the
+    # default window palette — visible as black/dark bars above and below the
+    # rounded view. Paint it to match the surface and drop its border so only
+    # the inner QListView's rounded rect shows.
+    container = view.parent()
+    if container is not None:
+        container.setStyleSheet(
+            f"background: {t['surface']}; border: 1px solid {t['border']}; "
+            f"border-radius: 10px;"
+        )
+
+
+def _dialog_input_qss(theme):
+    t = theme
+    return (
+        f"QLineEdit, QComboBox {{"
+        f" background: {t['input_bg']}; color: {t['text']};"
+        f" border: 1px solid {t['border']}; border-radius: 10px;"
+        f" padding: 10px 12px; font-family: {PLEX_SANS}; font-size: 13.5px;"
+        f"}}"
+        f" QLineEdit:focus, QComboBox:focus {{"
+        f" border: 1px solid #3b82f6;"
+        f"}}"
+        f" QLineEdit:read-only {{ color: {t['text']}; }}"
+        f" QComboBox::drop-down {{ border: none; width: 22px; }}"
+        f" QComboBox::down-arrow {{ image: none; width: 0; height: 0;"
+        f"   border-left: 4px solid transparent; border-right: 4px solid transparent;"
+        f"   border-top: 5px solid {t['muted']}; margin-right: 8px; }}"
+        f" QComboBox QAbstractItemView {{"
+        f"   background: {t['surface']}; color: {t['text']};"
+        f"   border: 1px solid {t['border']}; selection-background-color: rgba(59,130,246,0.16);"
+        f"   selection-color: {t['text']}; padding: 4px; outline: none;"
+        f" }}"
+    )
+
+
 # ── Stream dialog ─────────────────────────────────────────────────────────────
-class StreamDialog(QDialog):
+class StreamDialog(DownloaderDialogBase):
     download_started  = pyqtSignal(str, str, str)
     download_progress = pyqtSignal(str, int, str, str, str)
     download_finished = pyqtSignal(str, str)
     download_name_updated = pyqtSignal(str, str, str)  # url, new_filename, new_path
 
     def __init__(self, parent=None, url="", filename="", page_referer="", dark=True):
-        super().__init__(parent)
-        self.setWindowFlags(
-            Qt.WindowType.Window |
-            Qt.WindowType.WindowMinimizeButtonHint |
-            Qt.WindowType.WindowMaximizeButtonHint |
-            Qt.WindowType.WindowCloseButtonHint
-        )
-        self.setWindowTitle("LDM Stream Downloader")
-        self.setMinimumWidth(520)
-        self.setMinimumHeight(460)
-        self._dark = dark
-        self.setStyleSheet(make_dialog_style(dark))
+        super().__init__(parent, dark=dark, window_title="LDM Stream Downloader")
         self._url          = url
         self._filename     = filename
         self._page_referer = page_referer
         self._last_size    = ""
         self._last_speed   = ""
         self._last_eta     = ""
+        self._dl_path      = ""
         self.dl_thread     = None
         self._retried      = False
         self._force_retry  = False
         self._finished_reported = False   # guards closeEvent from stomping Finished with Cancelled
-        self._build_ui()
+        self._elapsed_start = None
+        self._elapsed_timer = None
 
-    def _build_ui(self):
-        layout = QVBoxLayout(self)
-        layout.setSpacing(12)
-        layout.setContentsMargins(20, 20, 20, 20)
-        title = QLabel("Stream Downloader")
-        title.setStyleSheet(f"font-size: 15px; font-weight: 700; color: {'#58a6ff' if self._dark else '#0969da'};")
-        layout.addWidget(title)
-        self.url_label = QLineEdit(self._url)
-        self.url_label.setReadOnly(True)
-        self.url_label.setStyleSheet(
-            f"color: {'#8b949e' if self._dark else '#656d76'}; font-size: 12px;"
-            " border: none; background: transparent; padding: 0;"
+        self.resize(740, 480)
+        self.setMinimumSize(620, 420)
+        # Pre-resolve the display name so the user sees the final filename
+        # before clicking Download.
+        try:
+            self._resolved_name = self._resolve_display_name(self._url, self._filename)
+        except Exception:
+            self._resolved_name = self._filename
+        self._build_body()
+        self._wire_footer()
+
+    # ── UI ────────────────────────────────────────────────────────────────────
+    def _build_body(self):
+        t = self.theme
+
+        icon_path = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            "assets", "toolbar_icons", "stream.svg",
         )
-        layout.addWidget(self.url_label)
-        self.file_label = QLabel(f"Saving as: {self._filename}")
-        self.file_label.setStyleSheet(f"font-size: 13px; font-weight: 600; color: {'#e6edf3' if self._dark else '#1f2328'};")
-        self.file_label.setWordWrap(True)
-        layout.addWidget(self.file_label)
-        self.progress_bar = QProgressBar()
-        self.progress_bar.setValue(0)
-        layout.addWidget(self.progress_bar)
-        self.info_label = QLabel("")
-        self.info_label.setStyleSheet(f"color: {'#8b949e' if self._dark else '#64748b'}; font-size: 12px;")
-        layout.addWidget(self.info_label)
-        self.log_box = QTextEdit()
-        self.log_box.setReadOnly(True)
-        self.log_box.setFixedHeight(160)
-        layout.addWidget(self.log_box)
-        btn_row = QHBoxLayout()
-        self.start_btn = QPushButton("Start Download")
-        self.start_btn.setStyleSheet(
-            "QPushButton { background-color: #16a34a; color: white; }"
-            "QPushButton:hover { background-color: #15803d; }"
-            "QPushButton:disabled { background-color: #94a3b8; }"
+        hero = _make_hero_band(
+            self.body, self.dark, icon_path,
+            title="Stream Downloader",
+            subtitle="Captured video / HLS streams via yt-dlp.",
+            chip_label="HLS",
+            accent_color="#7c3aed",
+            accent_soft=("rgba(139,92,246,0.16)" if self.dark else "rgba(139,92,246,0.10)"),
         )
-        self.start_btn.clicked.connect(self._on_start_clicked)
-        self.cancel_btn = QPushButton("Cancel")
-        self.cancel_btn.setStyleSheet(
-            "QPushButton { background-color: #dc2626; color: white; }"
-            "QPushButton:hover { background-color: #b91c1c; }"
+        self.body_layout.addWidget(hero)
+
+        content = QWidget()
+        content.setStyleSheet(f"background: {t['surface']};")
+        cl = QVBoxLayout(content)
+        cl.setContentsMargins(22, 16, 22, 16)
+        cl.setSpacing(10)
+
+        cl.addLayout(self._field_label("URL"))
+        cl.addWidget(self._url_field(self._url, tone="violet"))
+
+        # Save as + Save in (two columns). Filename is editable so the user
+        # can rename before yt-dlp starts; Save-In has a folder tile + Browse.
+        save_row = QHBoxLayout()
+        save_row.setSpacing(12)
+
+        as_col = QVBoxLayout(); as_col.setSpacing(6)
+        as_col.addLayout(self._field_label("Save as"))
+        self.filename_edit = QLineEdit(self._resolved_name or self._filename)
+        self.filename_edit.setStyleSheet(_dialog_input_qss(t))
+        self.filename_edit.setPlaceholderText("Filename")
+        as_col.addWidget(self.filename_edit)
+        save_row.addLayout(as_col, 16)
+
+        dir_col = QVBoxLayout(); dir_col.setSpacing(6)
+        dir_col.addLayout(self._field_label("Save in"))
+        self.save_dir_edit = QLineEdit(os.path.join(HOME, "Downloads", "Videos"))
+        self.save_dir_edit.setStyleSheet(_dialog_input_qss(t))
+        self.save_dir_edit.setCursorPosition(0)
+        dir_col.addWidget(self._dir_field(self.save_dir_edit, tone="violet"))
+        save_row.addLayout(dir_col, 12)
+        cl.addLayout(save_row)
+
+        # Live stats strip — colored dot + status label on the left, elapsed
+        # clock on the right. Matches the design handoff (Stream window).
+        stats = QFrame()
+        stats.setObjectName("statsCard")
+        stats.setStyleSheet(
+            f"QFrame#statsCard {{ background: {t['card']}; "
+            f"border: 1px solid {t['border']}; border-radius: 10px; }}"
         )
-        self.cancel_btn.setEnabled(False)
-        self.cancel_btn.clicked.connect(self._cancel)
-        self.close_btn = QPushButton("Close")
-        self.close_btn.setStyleSheet(make_close_btn_style(self._dark))
-        self.close_btn.clicked.connect(self.close)
-        # Hidden paste row — shown when Facebook URL needs manual paste
+        sl = QHBoxLayout(stats)
+        sl.setContentsMargins(16, 11, 16, 11)
+        sl.setSpacing(12)
+
+        self.status_dot = QLabel()
+        self.status_dot.setFixedSize(12, 12)
+        self.status_dot.setStyleSheet(
+            "background: #22c55e; border-radius: 6px; border: 1px solid rgba(0,0,0,0.10);"
+        )
+        sl.addWidget(self.status_dot, 0, Qt.AlignmentFlag.AlignVCenter)
+
+        self.status_text = QLabel("READY")
+        sl.addWidget(self.status_text, 0, Qt.AlignmentFlag.AlignVCenter)
+        sl.addStretch()
+
+        elapsed_col = QVBoxLayout()
+        elapsed_col.setSpacing(2)
+        elapsed_col.setContentsMargins(0, 0, 0, 0)
+        elapsed_cap = QLabel("ELAPSED")
+        elapsed_cap.setStyleSheet(
+            f"font-family: {PLEX_SANS}; font-size: 10px; font-weight: 700; "
+            f"letter-spacing: 0.8px; color: {t['subtle']}; background: transparent;"
+        )
+        elapsed_cap.setAlignment(Qt.AlignmentFlag.AlignRight)
+        elapsed_col.addWidget(elapsed_cap)
+        self.elapsed_lbl = QLabel("00:00")
+        self.elapsed_lbl.setStyleSheet(
+            f"font-family: {PLEX_MONO}; font-size: 13px; font-weight: 700; "
+            f"color: {t['text']}; background: transparent;"
+        )
+        self.elapsed_lbl.setAlignment(Qt.AlignmentFlag.AlignRight)
+        elapsed_col.addWidget(self.elapsed_lbl)
+        sl.addLayout(elapsed_col)
+        cl.addWidget(stats)
+        self._set_status("READY", "idle")
+
+        # Recovery row — hidden until a Facebook URL needs manual paste.
         self.paste_row = QWidget()
-        paste_layout = QVBoxLayout(self.paste_row)
-        paste_layout.setContentsMargins(0, 0, 0, 0)
-        paste_layout.setSpacing(6)
+        pl = QVBoxLayout(self.paste_row)
+        pl.setContentsMargins(0, 0, 0, 0); pl.setSpacing(6)
         self.paste_hint = QLabel()
         self.paste_hint.setWordWrap(True)
-        self.paste_hint.setStyleSheet("color: #e3b341; font-size: 12px;")
-        paste_layout.addWidget(self.paste_hint)
+        self.paste_hint.setStyleSheet(
+            f"font-family: {PLEX_SANS}; font-size: 12px; color: #f59e0b; "
+            f"background: transparent;"
+        )
+        pl.addWidget(self.paste_hint)
+        paste_inner = QHBoxLayout(); paste_inner.setSpacing(8)
         self.paste_input = QLineEdit()
-        self.paste_input.setPlaceholderText("Paste the copied link here...")
-        _paste_bg = "#0d1117" if self._dark else "#f8fafc"
-        _paste_fg = "#e6edf3" if self._dark else "#1e293b"
-        self.paste_input.setStyleSheet(
-            f"QLineEdit {{ background-color: {_paste_bg}; color: {_paste_fg};"
-            "  border: 1px solid #f97316; border-radius: 5px;"
-            "  padding: 6px 10px; font-size: 12px; }"
-            "QLineEdit:focus { border: 1px solid #ea580c; }"
-        )
-        paste_layout.addWidget(self.paste_input)
+        self.paste_input.setPlaceholderText("Paste the copied link here\u2026")
+        self.paste_input.setStyleSheet(_dialog_input_qss(t))
+        self.paste_input.returnPressed.connect(self._on_paste_submit)
+        paste_inner.addWidget(self.paste_input, 1)
+        self.paste_go_btn = QPushButton("Download")
+        self.paste_go_btn.setStyleSheet(_dialog_btn_qss(t, "primaryViolet"))
+        self.paste_go_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.paste_go_btn.clicked.connect(self._on_paste_submit)
+        paste_inner.addWidget(self.paste_go_btn)
+        pl.addLayout(paste_inner)
         self.paste_row.setVisible(False)
-        layout.addWidget(self.paste_row)
+        cl.addWidget(self.paste_row)
 
-        self.open_file_btn = QPushButton("Open")
-        self.open_file_btn.setStyleSheet(
-            "QPushButton { background-color: #0ea5e9; color: white; }"
-            "QPushButton:hover { background-color: #0284c7; }"
-        )
-        self.open_file_btn.setVisible(False)
+        # Hidden log buffer — keeps existing log_box.append() calls valid
+        # without rendering a console panel (the user prefers a clean UI).
+        self.log_box = QTextEdit()
+        self.log_box.setReadOnly(True)
+        self.log_box.hide()
+
+        self.progress = ProgressSection(content, dark=self.dark)
+        self.progress.mark_idle()
+        cl.addWidget(self.progress)
+        cl.addStretch(1)
+
+        self.body_layout.addWidget(content, 1)
+
+    def _wire_footer(self):
+        t = self.theme
+        # Force Download — shown only when yt-dlp bails on unusual extensions.
+        self.force_dl_btn = QPushButton("Force Download")
+        self.force_dl_btn.setStyleSheet(_dialog_btn_qss(t, "primaryViolet"))
+        self.force_dl_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.force_dl_btn.clicked.connect(self._start_force_download)
+        self.force_dl_btn.setVisible(False)
+        self.footer_layout.addWidget(self.force_dl_btn)
+
+        self.open_file_btn = QPushButton("Open File")
+        self.open_file_btn.setStyleSheet(_dialog_btn_qss(t, "primaryBlue"))
+        self.open_file_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.open_file_btn.clicked.connect(self._open_downloaded_file)
+        self.open_file_btn.setVisible(False)
+        self.footer_layout.addWidget(self.open_file_btn)
 
         self.open_folder_btn = QPushButton("Open Folder")
-        self.open_folder_btn.setStyleSheet(
-            "QPushButton { background-color: #64748b; color: white; }"
-            "QPushButton:hover { background-color: #475569; }"
-        )
-        self.open_folder_btn.setVisible(False)
+        self.open_folder_btn.setStyleSheet(_dialog_btn_qss(t, "secondary"))
+        self.open_folder_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.open_folder_btn.clicked.connect(self._open_downloaded_folder)
+        self.open_folder_btn.setVisible(False)
+        self.footer_layout.addWidget(self.open_folder_btn)
 
-        self.force_dl_btn = QPushButton("Force Download")
-        self.force_dl_btn.setStyleSheet(
-            "QPushButton { background-color: #d97706; color: white; }"
-            "QPushButton:hover { background-color: #b45309; }"
+        self.footer_layout.addStretch(1)
+
+        self.stop_btn = QPushButton("Stop")
+        self.stop_btn.setStyleSheet(_dialog_btn_qss(t, "destructive"))
+        self.stop_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.stop_btn.clicked.connect(self._cancel)
+        self.stop_btn.setVisible(False)
+        self.footer_layout.addWidget(self.stop_btn)
+
+        self.close_btn = QPushButton("Close")
+        self.close_btn.setStyleSheet(_dialog_btn_qss(t, "secondary"))
+        self.close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.close_btn.clicked.connect(self.close)
+        self.footer_layout.addWidget(self.close_btn)
+
+        self.download_btn = QPushButton("Download")
+        self.download_btn.setStyleSheet(_dialog_btn_qss(t, "primaryViolet"))
+        self.download_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.download_btn.clicked.connect(self._start_download)
+        self.download_btn.setDefault(True)
+        self.footer_layout.addWidget(self.download_btn)
+
+    def _field_label(self, text):
+        t = self.theme
+        layout = QHBoxLayout()
+        layout.setContentsMargins(0, 0, 0, 0); layout.setSpacing(0)
+        lbl = QLabel(text.upper())
+        lbl.setStyleSheet(
+            f"font-family: {PLEX_SANS}; font-size: 11px; font-weight: 700; "
+            f"letter-spacing: 0.8px; color: {t['muted']}; background: transparent;"
         )
-        self.force_dl_btn.setVisible(False)
-        self.force_dl_btn.clicked.connect(self._start_force_download)
+        layout.addWidget(lbl); layout.addStretch()
+        return layout
 
-        btn_row.addWidget(self.start_btn)
-        btn_row.addWidget(self.cancel_btn)
-        btn_row.addWidget(self.force_dl_btn)
-        btn_row.addStretch()
-        btn_row.addWidget(self.open_file_btn)
-        btn_row.addWidget(self.open_folder_btn)
-        btn_row.addWidget(self.close_btn)
-        layout.addLayout(btn_row)
+    def _url_field(self, value, tone="violet"):
+        t = self.theme
+        tone_color = {"blue": "#3b82f6", "violet": "#8b5cf6", "red": "#ef4444"}[tone]
+        sel_rgb = (
+            "rgba(59,130,246,0.35)"  if tone == "blue"  else
+            "rgba(139,92,246,0.35)"  if tone == "violet" else
+            "rgba(239,68,68,0.35)"
+        )
+        frame = QFrame()
+        frame.setStyleSheet(
+            f"background: {t['input_bg']}; border: 1px solid {t['border']}; "
+            f"border-radius: 10px;"
+        )
+        h = QHBoxLayout(frame)
+        h.setContentsMargins(10, 8, 12, 8); h.setSpacing(12)
+        h.addWidget(_make_glyph_tile(_TILE_SVG_LINK, tone_color, self.dark))
+        self.url_edit = QLineEdit(value)
+        self.url_edit.setReadOnly(True)
+        self.url_edit.setCursorPosition(0)
+        self.url_edit.setStyleSheet(
+            f"QLineEdit {{ background: transparent; border: none; color: {t['text']}; "
+            f"font-family: {PLEX_SANS}; font-size: 13.5px; "
+            f"selection-background-color: {sel_rgb}; "
+            f"selection-color: {t['text']}; }}"
+        )
+        h.addWidget(self.url_edit, 1)
+        return frame
 
+    def _dir_field(self, line_edit, tone="violet", browse_label="Browse"):
+        """Wrap a directory QLineEdit in a tile-styled frame: folder glyph on
+        the left, the editable path in the middle, a small Browse button on
+        the right that pops QFileDialog.getExistingDirectory."""
+        t = self.theme
+        tone_color = {"blue": "#3b82f6", "violet": "#8b5cf6", "red": "#ef4444"}[tone]
+        hover_bg = (
+            "rgba(59,130,246,0.10)"  if tone == "blue"  else
+            "rgba(139,92,246,0.10)"  if tone == "violet" else
+            "rgba(239,68,68,0.10)"
+        )
+        sel_rgb = (
+            "rgba(59,130,246,0.35)"  if tone == "blue"  else
+            "rgba(139,92,246,0.35)"  if tone == "violet" else
+            "rgba(239,68,68,0.35)"
+        )
+        frame = QFrame()
+        frame.setStyleSheet(
+            f"background: {t['input_bg']}; border: 1px solid {t['border']}; "
+            f"border-radius: 10px;"
+        )
+        h = QHBoxLayout(frame)
+        h.setContentsMargins(10, 8, 8, 8); h.setSpacing(10)
+        h.addWidget(_make_glyph_tile(_TILE_SVG_FOLDER, tone_color, self.dark))
+
+        line_edit.setStyleSheet(
+            f"QLineEdit {{ background: transparent; border: none; color: {t['text']}; "
+            f"font-family: {PLEX_SANS}; font-size: 13.5px; "
+            f"selection-background-color: {sel_rgb}; "
+            f"selection-color: {t['text']}; }}"
+        )
+        h.addWidget(line_edit, 1)
+
+        browse = QPushButton(browse_label)
+        browse.setCursor(Qt.CursorShape.PointingHandCursor)
+        browse.setStyleSheet(
+            f"QPushButton {{ background: {t['card']}; color: {t['text']}; "
+            f"border: 1px solid {t['border']}; border-radius: 7px; "
+            f"padding: 4px 10px; font-family: {PLEX_SANS}; font-size: 12px; "
+            f"font-weight: 600; }} "
+            f"QPushButton:hover {{ background: {hover_bg}; "
+            f"border-color: {tone_color}; color: {tone_color}; }}"
+        )
+        browse.clicked.connect(lambda: self._pick_dir(line_edit))
+        h.addWidget(browse)
+        return frame
+
+    def _pick_dir(self, line_edit):
+        start = line_edit.text().strip() or os.path.join(HOME, "Downloads", "Videos")
+        chosen = QFileDialog.getExistingDirectory(self, "Select folder", start)
+        if chosen:
+            line_edit.setText(chosen)
+
+    # ── Status / elapsed helpers ──────────────────────────────────────────────
+    def _set_status(self, text, accent="active"):
+        t = self.theme
+        colors = {
+            "active": "#22c55e",
+            "retry":  "#f59e0b",
+            "error":  "#ef4444",
+            "idle":   t['muted'],
+            "done":   "#3b82f6",
+        }
+        c = colors.get(accent, t['muted'])
+        self.status_dot.setStyleSheet(
+            f"background: {c}; border-radius: 6px; "
+            f"border: 1px solid rgba(0,0,0,0.10);"
+        )
+        self.status_text.setStyleSheet(
+            f"font-family: {PLEX_SANS}; font-size: 11px; font-weight: 700; "
+            f"letter-spacing: 0.8px; color: {c}; background: transparent;"
+        )
+        self.status_text.setText(text.upper())
+
+    def _start_elapsed(self):
+        if self._elapsed_timer is not None:
+            return
+        self._elapsed_start = time.monotonic()
+        self._elapsed_timer = QTimer(self)
+        self._elapsed_timer.timeout.connect(self._tick_elapsed)
+        self._elapsed_timer.start(1000)
+        self._tick_elapsed()
+
+    def _stop_elapsed(self):
+        if self._elapsed_timer is not None:
+            self._elapsed_timer.stop()
+            self._elapsed_timer = None
+
+    def _tick_elapsed(self):
+        if not self._elapsed_start:
+            return
+        secs = int(time.monotonic() - self._elapsed_start)
+        mm, ss = divmod(secs, 60)
+        hh, mm = divmod(mm, 60)
+        self.elapsed_lbl.setText(f"{hh:02d}:{mm:02d}:{ss:02d}" if hh else f"{mm:02d}:{ss:02d}")
+
+    # ── Behaviour (preserves legacy logic verbatim) ──────────────────────────
     def _start_force_download(self):
         """Bypass yt-dlp and download directly via HTTP (curl/requests).
         Used when yt-dlp refuses due to an unusual extension (e.g. .php redirect
         that actually serves video/mp4 content)."""
         self._force_retry = True
         self.force_dl_btn.setVisible(False)
-        self.start_btn.setEnabled(False)
-        self.cancel_btn.setEnabled(True)
-        self.close_btn.setEnabled(False)
-        self.progress_bar.setValue(0)
-        self.log_box.append("Bypassing yt-dlp — downloading directly via HTTP...")
-        self.info_label.setText("Downloading...")
-        self.info_label.setStyleSheet("color: #e3b341; font-size: 12px;")
+        self.download_btn.setVisible(False)
+        self.stop_btn.setVisible(True)
+        self.stop_btn.setEnabled(True)
+        self.progress.mark_active()
+        self.log_box.append("Bypassing yt-dlp \u2014 downloading directly via HTTP\u2026")
+        self._set_status("DOWNLOADING (FORCE)", "active")
 
-        folder = os.path.join(HOME, "Downloads", "Videos")
-        os.makedirs(folder, exist_ok=True)
-        display_name = self._resolve_display_name(self._url, self._filename)
+        folder = self.save_dir_edit.text().strip() or os.path.join(HOME, "Downloads", "Videos")
+        try:
+            os.makedirs(folder, exist_ok=True)
+        except OSError:
+            folder = os.path.join(HOME, "Downloads", "Videos")
+            os.makedirs(folder, exist_ok=True)
+            self.save_dir_edit.setText(folder)
+        user_name = self.filename_edit.text().strip()
+        display_name = user_name or self._resolve_display_name(self._url, self._filename)
         base, _ = os.path.splitext(display_name)
         display_name = f"{base}.mp4"
-        self.file_label.setText(f"Saving as: {display_name}")
+        self.filename_edit.setText(display_name)
         self._dl_path = os.path.join(folder, display_name)
         self.open_file_btn.setVisible(False)
         self.open_folder_btn.setVisible(False)
@@ -1771,18 +2919,20 @@ class StreamDialog(QDialog):
         self.dl_thread.finished.connect(self._on_finished)
         self.dl_thread.start()
 
-    def _on_start_clicked(self):
-        # If paste row is visible, use the pasted URL
-        if self.paste_row.isVisible():
-            pasted = self.paste_input.text().strip()
-            if pasted:
-                self._url = pasted
-                self._page_referer = pasted
-                self.paste_row.setVisible(False)
-                self.url_label.setText(pasted)
-        self.start_btn.setEnabled(False)
-        self.cancel_btn.setEnabled(True)
-        self.close_btn.setEnabled(True)
+    def _on_paste_submit(self):
+        pasted = self.paste_input.text().strip()
+        if not pasted:
+            return
+        self._url = pasted
+        self._page_referer = pasted
+        self.paste_row.setVisible(False)
+        self.url_edit.setText(pasted)
+        self.url_edit.setCursorPosition(0)
+        # Reset for a fresh attempt
+        self._retried = False
+        self._force_retry = False
+        self.progress.mark_idle()
+        self._set_status("STARTING\u2026", "active")
         self._start_download()
 
     def _resolve_display_name(self, url, filename):
@@ -1875,14 +3025,20 @@ class StreamDialog(QDialog):
             return f'video_{ts}.mp4'
 
     def _start_download(self):
-        folder = os.path.join(HOME, "Downloads", "Videos")
-        os.makedirs(folder, exist_ok=True)
+        folder = self.save_dir_edit.text().strip() or os.path.join(HOME, "Downloads", "Videos")
+        try:
+            os.makedirs(folder, exist_ok=True)
+        except OSError:
+            folder = os.path.join(HOME, "Downloads", "Videos")
+            os.makedirs(folder, exist_ok=True)
+            self.save_dir_edit.setText(folder)
         # Luluvdo / Lulustream: handled by a dedicated downloader (see
         # LuluHLSDownloadThread). yt-dlp/ffmpeg both 403 against this CDN.
         _is_lulu_page = bool(re.search(
             r'(?:luluvdo|lulustream)\.com', self._url, re.I
         ))
-        display_name = self._resolve_display_name(self._url, self._filename)
+        user_name = self.filename_edit.text().strip()
+        display_name = user_name or self._resolve_display_name(self._url, self._filename)
         base, ext = os.path.splitext(display_name)
         if not ext:
             ext = ".mp4"
@@ -1897,8 +3053,7 @@ class StreamDialog(QDialog):
             display_name = f"{_base} ({_counter}){_ext}"
             _counter += 1
         base = os.path.splitext(display_name)[0]   # keep base in sync for outtmpl below
-        # Update the dialog label to show the resolved filename
-        self.file_label.setText(f"Saving as: {display_name}")
+        self.filename_edit.setText(display_name)
         http_hdrs = {'User-Agent': HEADERS['User-Agent']}
         # TikTok CDN requires Referer header to avoid 403
         if 'tiktok.com' in self._url:
@@ -1927,6 +3082,12 @@ class StreamDialog(QDialog):
         self._dl_path = os.path.join(folder, display_name)
         self.open_file_btn.setVisible(False)
         self.open_folder_btn.setVisible(False)
+        self.download_btn.setVisible(False)
+        self.stop_btn.setVisible(True)
+        self.stop_btn.setEnabled(True)
+        self.progress.mark_active()
+        self._set_status("DOWNLOADING", "active")
+        self._start_elapsed()
         self.download_started.emit(self._url, display_name, folder)
         # Lulustream / Luluvdo page URL: dedicated downloader fetches the
         # whole HLS via Python requests and muxes locally.
@@ -1944,6 +3105,7 @@ class StreamDialog(QDialog):
         ydl_opts = {
             'format':              'bestvideo+bestaudio/best',
             'outtmpl':             os.path.join(folder, f"{base}.%(ext)s"),
+            'paths':               {'temp': YT_DLP_TEMP_DIR},
             'merge_output_format': 'mp4',
             'quiet':               True,
             'no_warnings':         True,
@@ -1969,39 +3131,51 @@ class StreamDialog(QDialog):
         self.dl_thread.log.connect(lambda msg: self.log_box.append(msg))
         self.dl_thread.finished.connect(self._on_finished)
         self.dl_thread.start()
-        self.log_box.append("Starting stream download...")
+        self.log_box.append("Starting stream download\u2026")
 
     def _on_progress(self, pct):
-        self.progress_bar.setValue(pct)
-        self.download_progress.emit(self._url, pct, self._last_size, self._last_speed, self._last_eta)
+        self.progress.set_pct(pct)
+        self.download_progress.emit(
+            self._url, pct, self._last_size, self._last_speed, self._last_eta,
+        )
 
-    def _on_speed(self, spd):  self._last_speed = spd;  self._refresh_info()
-    def _on_size(self, sz):    self._last_size  = sz;   self._refresh_info()
-    def _on_eta(self, eta):    self._last_eta   = eta;  self._refresh_info()
+    def _on_speed(self, spd):
+        self._last_speed = spd
+        self.progress.set_speed_text(spd)
 
-    def _refresh_info(self):
-        parts = []
-        if self._last_size:  parts.append(self._last_size)
-        if self._last_speed: parts.append(self._last_speed)
-        if self._last_eta and self._last_eta != "—": parts.append(f"ETA {self._last_eta}")
-        self.info_label.setText("  ".join(parts))
+    def _on_size(self, sz):
+        self._last_size = sz
+        self.progress.set_size_text(sz)
+
+    def _on_eta(self, eta):
+        self._last_eta = eta
+        self.progress.set_eta_text(eta if eta != "\u2014" else "")
 
     def closeEvent(self, event):
         """Handle window X button — cancel thread and save to history."""
+        self._stop_elapsed()
         if self.dl_thread and self.dl_thread.isRunning() and not self._finished_reported:
+            # Cooperative cancel — workers check self.running and exit on
+            # their own. QThread.terminate() can deadlock the GIL when the
+            # worker is mid-call inside a C extension.
             self.dl_thread.running = False
-            self.dl_thread.terminate()
+            try:
+                self.dl_thread.blockSignals(True)
+            except Exception:
+                pass
             self.download_finished.emit(self._url, "Cancelled")
         event.accept()
 
     def _cancel(self):
-        if self.dl_thread and self.dl_thread.isRunning():
-            self.dl_thread.running = False
-            self.dl_thread.terminate()
-            self.log_box.append("Download cancelled.")
-            self.cancel_btn.setEnabled(False)
-            self.close_btn.setEnabled(True)
-            self.download_finished.emit(self._url, "Cancelled")
+        if not self.dl_thread or not self.dl_thread.isRunning():
+            return
+        # Cooperative cancel — the worker's own loop polls ``running``;
+        # the UI finalizes in _on_finished("Cancelled") when run() exits.
+        self.dl_thread.running = False
+        self.stop_btn.setEnabled(False)
+        self.stop_btn.setText("Cancelling\u2026")
+        self.log_box.append("Cancelling download\u2026")
+        self._set_status("CANCELLING", "retry")
 
     def _friendly_error(self, msg):
         """Translate raw yt-dlp error strings into clean user-facing messages."""
@@ -2090,15 +3264,28 @@ class StreamDialog(QDialog):
         self.close()
 
     def _on_finished(self, msg):
-        self.cancel_btn.setEnabled(False)
-        self.close_btn.setEnabled(True)
+        self.stop_btn.setEnabled(False)
+        # Cancellation arrives here as either "Cancelled" (curl path) or
+        # "Error: Cancelled" (yt-dlp hook path). Treat both the same.
+        if msg == "Cancelled" or msg.startswith("Error: Cancelled"):
+            self._stop_elapsed()
+            self.log_box.append("Download cancelled.")
+            self.progress.mark_error("Cancelled")
+            self._set_status("CANCELLED", "error")
+            self.stop_btn.setVisible(False)
+            self.stop_btn.setEnabled(True)
+            self.stop_btn.setText("Stop")
+            self.download_btn.setVisible(True)
+            self._finished_reported = True
+            self.download_finished.emit(self._url, "Cancelled")
+            return
         if msg == "Finished":
-            self.progress_bar.setValue(100)
+            self._stop_elapsed()
+            self.progress.mark_complete()
+            self._set_status("DONE", "done")
             self.log_box.append("Download complete!")
-            self.info_label.setText("Download complete!")
-            self.info_label.setStyleSheet("color: #3fb950; font-size: 12px;")
-            self.start_btn.setVisible(False)
-            self.cancel_btn.setVisible(False)
+            self.stop_btn.setVisible(False)
+            self.force_dl_btn.setVisible(False)
             self.open_file_btn.setVisible(True)
             self.open_folder_btn.setVisible(True)
             # If force-downloaded via DownloadThread, the thread may have resolved
@@ -2107,7 +3294,7 @@ class StreamDialog(QDialog):
                 resolved = self.dl_thread.filename
                 folder   = choose_folder(resolved)
                 self._dl_path = os.path.join(folder, resolved)
-                self.file_label.setText(f"Saving as: {resolved}")
+                self.filename_edit.setText(resolved)
                 self.download_name_updated.emit(self._url, resolved, self._dl_path)
             try:
                 if _strip_png_disguised_segments(self._dl_path):
@@ -2126,28 +3313,30 @@ class StreamDialog(QDialog):
         )
         if _can_retry:
             self._retried = True
-            self.log_box.append("Stream URL expired (403) — retrying with page URL...")
-            self.info_label.setText("Retrying with page URL...")
-            self.info_label.setStyleSheet("color: #e3b341; font-size: 12px;")
-            self.start_btn.setEnabled(False)
-            self.cancel_btn.setEnabled(True)
-            self.close_btn.setEnabled(False)
+            self.log_box.append("Stream URL expired (403) \u2014 retrying with page URL\u2026")
+            self._set_status("RETRYING\u2026", "retry")
             self._url = self._page_referer
-            self.progress_bar.setValue(0)
+            self.url_edit.setText(self._url)
+            self.url_edit.setCursorPosition(0)
+            self.progress.mark_idle()
+            self.stop_btn.setEnabled(True)
             self._start_download()
             return
         # Show clean error message
+        self._stop_elapsed()
         log_msg, label_msg = self._friendly_error(msg)
         self.log_box.append(log_msg)
-        self.info_label.setStyleSheet("color: #f85149; font-size: 12px;")
         # Unusual extension — offer force download button
         if label_msg == "__force_ext__" and not self._force_retry:
-            self.info_label.setText("Unusual extension — force download?")
+            self.progress.mark_error("Unusual extension")
+            self._set_status("UNUSUAL EXTENSION", "error")
             self.force_dl_btn.setVisible(True)
-            self.close_btn.setEnabled(True)
+            self.stop_btn.setVisible(False)
+            self.download_btn.setVisible(False)
         # Facebook paste hint -- show input row so user can paste link
         elif 'Paste the video link' in label_msg or 'Paste the reel link' in label_msg:
-            self.info_label.setText(label_msg)
+            self.progress.mark_error(label_msg)
+            self._set_status("PASTE LINK BELOW", "retry")
             if 'reel link' in label_msg:
                 self.paste_hint.setText(
                     "Share \u2192 Copy link (or \u22ef \u2192 Copy link) on the reel \u2192 paste below:"
@@ -2157,11 +3346,979 @@ class StreamDialog(QDialog):
                     "\u22ef (3 dots) on video \u2192 Copy link \u2192 paste below:"
                 )
             self.paste_row.setVisible(True)
-            self.start_btn.setEnabled(True)
-            self.close_btn.setEnabled(True)
+            self.paste_input.setFocus()
+            self.stop_btn.setVisible(False)
+            self.download_btn.setVisible(False)
         else:
-            self.info_label.setText(label_msg)
+            self.progress.mark_error(label_msg)
+            self._set_status("ERROR", "error")
+            self.stop_btn.setVisible(False)
+            self.download_btn.setVisible(True)
             self.download_finished.emit(self._url, msg)
+
+
+class _ThumbnailFetchThread(QThread):
+    """Tiny worker that downloads a video thumbnail and emits the bytes.
+
+    yt-dlp gives us the canonical thumbnail URL in info_dict; loading it here
+    keeps the main UI thread responsive even on slow links."""
+    loaded = pyqtSignal(bytes)
+    failed = pyqtSignal()
+
+    def __init__(self, url):
+        super().__init__()
+        self._url = url
+
+    def run(self):
+        try:
+            r = requests.get(self._url, timeout=8, verify=False)
+            if r.status_code == 200 and r.content:
+                self.loaded.emit(r.content)
+                return
+        except Exception:
+            pass
+        self.failed.emit()
+
+
+class _ClickableFrame(QFrame):
+    """QFrame variant that emits ``clicked`` on left mouse release.
+    Used for the format/quality picker cards in the YouTube dialog."""
+    clicked = pyqtSignal()
+
+    def mousePressEvent(self, e):
+        if e.button() == Qt.MouseButton.LeftButton:
+            self._pressed = True
+        super().mousePressEvent(e)
+
+    def mouseReleaseEvent(self, e):
+        if e.button() == Qt.MouseButton.LeftButton and getattr(self, "_pressed", False):
+            self._pressed = False
+            if self.rect().contains(e.pos()):
+                self.clicked.emit()
+        super().mouseReleaseEvent(e)
+
+
+class _RadioGlyph(QWidget):
+    """16x16 radio button glyph. Unchecked: ring outline. Checked: ring +
+    inner dot, both in the accent colour."""
+
+    def __init__(self, parent=None, accent="#dc2626", border="#cbd5e1"):
+        super().__init__(parent)
+        self.setFixedSize(16, 16)
+        self._checked = False
+        self._accent = QColor(accent)
+        self._border = QColor(border)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+
+    def set_checked(self, checked: bool):
+        self._checked = checked
+        self.update()
+
+    def set_colors(self, accent: str, border: str):
+        self._accent = QColor(accent)
+        self._border = QColor(border)
+        self.update()
+
+    def paintEvent(self, _e):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        ring = self._accent if self._checked else self._border
+        pen = QPen(ring)
+        pen.setWidthF(1.6)
+        p.setPen(pen)
+        p.drawEllipse(1, 1, 14, 14)
+        if self._checked:
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(self._accent)
+            p.drawEllipse(5, 5, 6, 6)
+        p.end()
+
+
+class YouTubeDialog(DownloaderDialogBase):
+    download_started     = pyqtSignal(str, str, str)
+    download_progress    = pyqtSignal(str, int, str, str, str)
+    download_finished    = pyqtSignal(str, str)
+    yt_settings_captured = pyqtSignal(str, dict)  # url, {mode, quality, audio_fmt, ...}
+
+    # (id, sub-label, est-size placeholder, yt-dlp height filter)
+    QUALITIES = [
+        ('2160p',   '4K \u00b7 VP9',    '~1.8 GB', 2160),
+        ('1440p',   'QHD \u00b7 VP9',   '~920 MB', 1440),
+        ('1080p60', 'FHD \u00b7 h264',  '~480 MB', 1080),
+        ('720p',    'HD \u00b7 h264',   '~210 MB', 720),
+        ('480p',    'SD \u00b7 h264',   '~92 MB',  480),
+        ('360p',    'mobile',           '~54 MB',  360),
+    ]
+
+    # (id, title, sub-label, codec, kbps — None for m4a "original")
+    AUDIO_CHOICES = [
+        ('mp3_320', 'MP3 320',  'high quality',    'mp3', 320),
+        ('mp3_256', 'MP3 256',  'standard',        'mp3', 256),
+        ('mp3_128', 'MP3 128',  'smaller file',    'mp3', 128),
+        ('m4a',     'M4A',      'AAC \u00b7 original', 'm4a', None),
+    ]
+
+    def __init__(self, parent=None, prefill_url="", dark=True, skip_fetch=False):
+        super().__init__(parent, dark=dark, window_title="LDM YouTube Downloader")
+        self.video_title  = ""
+        self.fetch_thread = None
+        self.thumb_thread = None
+        self.dl_thread    = None
+        self._last_size   = ""
+        self._last_speed  = ""
+        self._last_eta    = ""
+        self._current_url = ""
+        self._dl_folder   = ""
+        self._dl_base     = ""
+        self._mode        = "video"     # "video" | "audio"
+        self._quality_id  = "1080p60"
+        self._audio_id    = "mp3_320"
+        self._info        = None        # populated by FetchFormatsThread
+        self._format_cards  = {}
+        self._quality_cards = {}
+        self._audio_cards   = {}
+
+        self.resize(720 + 48, 760 + 48)
+        self.setMinimumSize(640 + 48, 700 + 48)
+
+        self._build_body()
+        self._wire_footer()
+        self._select_format("video")
+        self._select_quality("1080p60")
+        self._select_audio("mp3_320")
+        self._refresh_summary()
+
+        if prefill_url:
+            self.url_input.setText(prefill_url)
+            if not skip_fetch:
+                self.fetch_formats()
+
+    # ── Layout ────────────────────────────────────────────────────────────────
+    def _build_body(self):
+        t = self.theme
+        icon_path = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            "assets", "toolbar_icons", "youtube.svg",
+        )
+        hero = _make_hero_band(
+            self.body, self.dark, icon_path,
+            title="YouTube Downloader",
+            accent_color="#dc2626",
+            accent_soft=("rgba(239,68,68,0.16)" if self.dark else "rgba(239,68,68,0.08)"),
+        )
+        self.body_layout.addWidget(hero)
+
+        content = QWidget()
+        content.setStyleSheet(f"background: {t['surface']};")
+        cl = QVBoxLayout(content)
+        cl.setContentsMargins(22, 16, 22, 16)
+        cl.setSpacing(12)
+
+        # URL row
+        cl.addLayout(self._field_label("Video URL"))
+        url_row = QHBoxLayout(); url_row.setSpacing(8)
+        self.url_input = QLineEdit()
+        self.url_input.setPlaceholderText("Paste YouTube URL here\u2026")
+        self.url_input.setStyleSheet(_dialog_input_qss(t))
+        self.url_input.returnPressed.connect(self._on_paste_or_fetch)
+        url_row.addWidget(self.url_input, 1)
+        self.fetch_btn = QPushButton("Paste")
+        self.fetch_btn.setStyleSheet(_dialog_btn_qss(t, "secondary"))
+        self.fetch_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.fetch_btn.clicked.connect(self._on_paste_or_fetch)
+        url_row.addWidget(self.fetch_btn)
+        cl.addLayout(url_row)
+
+        # Fetched video card (skeleton until fetch_formats completes)
+        cl.addWidget(self._build_video_card())
+
+        # Format picker (Video + audio | Audio only)
+        cl.addLayout(self._field_label("Format"))
+        fmt_row = QHBoxLayout(); fmt_row.setSpacing(8)
+        for fid, label, sub in (
+            ("video", "Video + audio", "mp4 \u00b7 combined"),
+            ("audio", "Audio only",    "MP3 / M4A"),
+        ):
+            card = self._make_format_card(fid, label, sub)
+            self._format_cards[fid] = card
+            fmt_row.addWidget(card, 1)
+        cl.addLayout(fmt_row)
+
+        # Quality grid — only shown when format = video
+        self.quality_label_layout = self._field_label("Quality")
+        cl.addLayout(self.quality_label_layout)
+        self.quality_grid = QWidget()
+        qg = QHBoxLayout(self.quality_grid)
+        qg.setContentsMargins(0, 0, 0, 0); qg.setSpacing(6)
+        for qid, sub, size, _h in self.QUALITIES:
+            card = self._make_quality_card(qid, sub, size)
+            self._quality_cards[qid] = card
+            qg.addWidget(card, 1)
+        cl.addWidget(self.quality_grid)
+
+        # Audio grid — only shown when format = audio
+        self.audio_grid = QWidget()
+        ag = QHBoxLayout(self.audio_grid)
+        ag.setContentsMargins(0, 0, 0, 0); ag.setSpacing(6)
+        for aid, title_, sub, _codec, _kbps in self.AUDIO_CHOICES:
+            card = self._make_audio_card(aid, title_, sub)
+            self._audio_cards[aid] = card
+            ag.addWidget(card, 1)
+        cl.addWidget(self.audio_grid)
+        self.audio_grid.setVisible(False)
+
+        # Extras row — checkboxes
+        extras = QHBoxLayout(); extras.setSpacing(22)
+        tick_path = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            "assets", "check_tick.svg",
+        ).replace("\\", "/")
+        chk_qss = (
+            f"QCheckBox {{ font-family: {PLEX_SANS}; font-size: 13px; "
+            f"color: {t['text']}; spacing: 8px; background: transparent; }}"
+            f" QCheckBox::indicator {{ width: 17px; height: 17px; "
+            f"border-radius: 5px; border: 1.5px solid {t['border']}; "
+            f"background: {t['input_bg']}; }}"
+            f" QCheckBox::indicator:checked {{ "
+            f"background: #dc2626; border: 1.5px solid #dc2626; "
+            f"image: url({tick_path}); }}"
+        )
+        self.subs_chk = QCheckBox("Embed subtitles")
+        self.subs_chk.setStyleSheet(chk_qss)
+        self.subs_chk.setChecked(False)
+        self.thumb_chk = QCheckBox("Embed thumbnail")
+        self.thumb_chk.setStyleSheet(chk_qss)
+        self.thumb_chk.setChecked(True)
+        extras.addWidget(self.subs_chk)
+        extras.addWidget(self.thumb_chk)
+        extras.addStretch()
+        cl.addLayout(extras)
+
+        # Hidden log buffer — preserves legacy log_box.append calls.
+        self.log_box = QTextEdit()
+        self.log_box.setReadOnly(True)
+        self.log_box.hide()
+
+        self.progress = ProgressSection(content, dark=self.dark)
+        self.progress.mark_idle()
+        cl.addWidget(self.progress)
+
+        # Back-compat aliases (older code paths reference these directly).
+        self.progress_bar = self.progress.bar
+        self.info_label   = self.progress.label_lbl
+
+        self.body_layout.addWidget(content, 1)
+
+    def _wire_footer(self):
+        t = self.theme
+
+        # Summary string — "Will download ~480 MB to ~/Downloads/Videos/"
+        self.summary_lbl = QLabel("")
+        self.summary_lbl.setStyleSheet(
+            f"font-family: {PLEX_SANS}; font-size: 12px; color: {t['muted']}; "
+            f"background: transparent;"
+        )
+        self.summary_lbl.setTextInteractionFlags(Qt.TextInteractionFlag.NoTextInteraction)
+        self.footer_layout.addWidget(self.summary_lbl, 1)
+
+        self.open_file_btn = QPushButton("Open File")
+        self.open_file_btn.setStyleSheet(_dialog_btn_qss(t, "primaryBlue"))
+        self.open_file_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.open_file_btn.clicked.connect(self._open_downloaded_file)
+        self.open_file_btn.setVisible(False)
+        self.footer_layout.addWidget(self.open_file_btn)
+
+        self.open_folder_btn = QPushButton("Open Folder")
+        self.open_folder_btn.setStyleSheet(_dialog_btn_qss(t, "secondary"))
+        self.open_folder_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.open_folder_btn.clicked.connect(self._open_downloaded_folder)
+        self.open_folder_btn.setVisible(False)
+        self.footer_layout.addWidget(self.open_folder_btn)
+
+        self.cancel_dl_btn = QPushButton("Stop")
+        self.cancel_dl_btn.setStyleSheet(_dialog_btn_qss(t, "destructive"))
+        self.cancel_dl_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.cancel_dl_btn.clicked.connect(self.cancel_download)
+        self.cancel_dl_btn.setVisible(False)
+        self.footer_layout.addWidget(self.cancel_dl_btn)
+
+        self.close_btn = QPushButton("Cancel")
+        self.close_btn.setStyleSheet(_dialog_btn_qss(t, "secondary"))
+        self.close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.close_btn.clicked.connect(self.close)
+        self.footer_layout.addWidget(self.close_btn)
+
+        self.download_btn = QPushButton("Download")
+        self.download_btn.setStyleSheet(_dialog_btn_qss(t, "primaryRed"))
+        self.download_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.download_btn.clicked.connect(self.start_download)
+        self.download_btn.setDefault(True)
+        self.footer_layout.addWidget(self.download_btn)
+
+    def _field_label(self, text):
+        t = self.theme
+        layout = QHBoxLayout()
+        layout.setContentsMargins(0, 0, 0, 0); layout.setSpacing(0)
+        lbl = QLabel(text.upper())
+        lbl.setStyleSheet(
+            f"font-family: {PLEX_SANS}; font-size: 11px; font-weight: 700; "
+            f"letter-spacing: 0.8px; color: {t['muted']}; background: transparent;"
+        )
+        layout.addWidget(lbl); layout.addStretch()
+        return layout
+
+    def _build_video_card(self):
+        t = self.theme
+        card = QFrame()
+        card.setObjectName("ytVideoCard")
+        card.setStyleSheet(
+            f"QFrame#ytVideoCard {{ background: {t['card']}; "
+            f"border: 1px solid {t['border']}; border-radius: 12px; }}"
+        )
+        h = QHBoxLayout(card)
+        h.setContentsMargins(12, 12, 12, 12); h.setSpacing(14)
+
+        # Thumbnail tile (gradient placeholder until a real thumb loads)
+        self.thumb_lbl = QLabel()
+        self.thumb_lbl.setFixedSize(132, 74)
+        self.thumb_lbl.setStyleSheet(
+            "background: qlineargradient(x1:0, y1:0, x2:1, y2:1, "
+            "stop:0 #4338ca, stop:0.6 #ec4899, stop:1 #f59e0b); "
+            "border-radius: 8px;"
+        )
+        self.thumb_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.thumb_lbl.setText("\u25B6")
+        self.thumb_lbl.setStyleSheet(self.thumb_lbl.styleSheet() + (
+            f" color: rgba(255,255,255,0.85); font-size: 22px;"
+        ))
+        h.addWidget(self.thumb_lbl)
+
+        info_col = QVBoxLayout(); info_col.setSpacing(4)
+        self.video_title_lbl = QLabel("Paste a YouTube URL above to fetch video info\u2026")
+        self.video_title_lbl.setStyleSheet(
+            f"font-family: {PLEX_SANS}; font-size: 14px; font-weight: 700; "
+            f"color: {t['text']}; background: transparent;"
+        )
+        self.video_title_lbl.setWordWrap(False)
+        info_col.addWidget(self.video_title_lbl)
+
+        self.video_meta_lbl = QLabel("")
+        self.video_meta_lbl.setStyleSheet(
+            f"font-family: {PLEX_SANS}; font-size: 11.5px; color: {t['muted']}; "
+            f"background: transparent;"
+        )
+        info_col.addWidget(self.video_meta_lbl)
+
+        self.tag_row = QHBoxLayout()
+        self.tag_row.setContentsMargins(0, 4, 0, 0); self.tag_row.setSpacing(6)
+        self.tag_row.addStretch()
+        tag_wrap = QWidget()
+        tag_wrap.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        tag_wrap.setStyleSheet("background: transparent;")
+        tag_wrap.setLayout(self.tag_row)
+        info_col.addWidget(tag_wrap)
+
+        h.addLayout(info_col, 1)
+
+        # Back-compat: external code reads title_label.text() in some paths.
+        self.title_label = self.video_title_lbl
+        return card
+
+    def _set_tags(self, tags):
+        t = self.theme
+        # Clear out any existing tag chips, then re-add.
+        while self.tag_row.count() > 0:
+            item = self.tag_row.takeAt(0)
+            if item.widget() is not None:
+                item.widget().deleteLater()
+        for tag in tags:
+            chip = QLabel(tag)
+            chip.setStyleSheet(
+                f"font-family: {PLEX_SANS}; font-size: 10px; font-weight: 600; "
+                f"padding: 3px 7px; border-radius: 999px; "
+                f"background: rgba(148,163,184,0.18); color: {t['muted']};"
+            )
+            self.tag_row.addWidget(chip)
+        self.tag_row.addStretch()
+
+    def _make_format_card(self, fid, label, sub):
+        t = self.theme
+        card = _ClickableFrame()
+        card.setObjectName(f"ytFmt_{fid}")
+        card.setCursor(Qt.CursorShape.PointingHandCursor)
+        h = QHBoxLayout(card)
+        h.setContentsMargins(12, 10, 12, 10); h.setSpacing(10)
+
+        radio = _RadioGlyph(accent="#dc2626", border=t['border'])
+        card._radio = radio  # keep handle for selection refresh
+        h.addWidget(radio, 0, Qt.AlignmentFlag.AlignVCenter)
+
+        text_col = QVBoxLayout(); text_col.setSpacing(1)
+        title = QLabel(label)
+        title.setStyleSheet(
+            f"font-family: {PLEX_SANS}; font-size: 13.5px; font-weight: 700; "
+            f"color: {t['text']}; background: transparent;"
+        )
+        text_col.addWidget(title)
+        sub_lbl = QLabel(sub)
+        sub_lbl.setStyleSheet(
+            f"font-family: {PLEX_SANS}; font-size: 11px; color: {t['muted']}; "
+            f"background: transparent;"
+        )
+        text_col.addWidget(sub_lbl)
+        h.addLayout(text_col, 1)
+
+        card.clicked.connect(lambda fid=fid: self._select_format(fid))
+        return card
+
+    def _make_quality_card(self, qid, sub, size):
+        t = self.theme
+        card = _ClickableFrame()
+        card.setObjectName(f"ytQ_{qid}")
+        card.setCursor(Qt.CursorShape.PointingHandCursor)
+        v = QVBoxLayout(card)
+        v.setContentsMargins(8, 8, 8, 8); v.setSpacing(2)
+        v.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        title = QLabel(qid); title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        title.setObjectName(f"ytQTitle_{qid}")
+        v.addWidget(title)
+        sub_lbl = QLabel(sub); sub_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        sub_lbl.setStyleSheet(
+            f"font-family: {PLEX_SANS}; font-size: 9.5px; color: {t['muted']}; "
+            f"background: transparent;"
+        )
+        v.addWidget(sub_lbl)
+        size_lbl = QLabel(size); size_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        size_lbl.setStyleSheet(
+            f"font-family: {PLEX_MONO}; font-size: 10px; font-weight: 700; "
+            f"color: {t['subtle']}; background: transparent;"
+        )
+        v.addWidget(size_lbl)
+
+        card._title_lbl = title
+        card._size_lbl  = size_lbl
+        card.clicked.connect(lambda qid=qid: self._select_quality(qid))
+        return card
+
+    def _make_audio_card(self, aid, title_text, sub_text):
+        t = self.theme
+        card = _ClickableFrame()
+        card.setObjectName(f"ytA_{aid}")
+        card.setCursor(Qt.CursorShape.PointingHandCursor)
+        v = QVBoxLayout(card)
+        v.setContentsMargins(8, 8, 8, 8); v.setSpacing(2)
+        v.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        title = QLabel(title_text); title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        title.setObjectName(f"ytATitle_{aid}")
+        v.addWidget(title)
+        sub_lbl = QLabel(sub_text); sub_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        sub_lbl.setStyleSheet(
+            f"font-family: {PLEX_SANS}; font-size: 9.5px; color: {t['muted']}; "
+            f"background: transparent;"
+        )
+        v.addWidget(sub_lbl)
+        size_lbl = QLabel(""); size_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        size_lbl.setStyleSheet(
+            f"font-family: {PLEX_MONO}; font-size: 10px; font-weight: 700; "
+            f"color: {t['subtle']}; background: transparent;"
+        )
+        v.addWidget(size_lbl)
+
+        card._title_lbl = title
+        card._sub_lbl   = sub_lbl
+        card._size_lbl  = size_lbl
+        card.clicked.connect(lambda aid=aid: self._select_audio(aid))
+        return card
+
+    @staticmethod
+    def _humanize_size(n):
+        if not n or n < 0:
+            return ""
+        if n >= 1024**3:
+            return f"~{n / 1024**3:.1f} GB"
+        if n >= 1024**2:
+            return f"~{int(round(n / 1024**2))} MB"
+        if n >= 1024:
+            return f"~{int(round(n / 1024))} KB"
+        return f"~{n} B"
+
+    # ── Selection helpers ─────────────────────────────────────────────────────
+    def _select_format(self, fid):
+        self._mode = fid
+        t = self.theme
+        for cid, card in self._format_cards.items():
+            active = (cid == fid)
+            bg = (
+                ("rgba(220,38,38,0.16)" if self.dark else "rgba(220,38,38,0.08)")
+                if active else t['input_bg']
+            )
+            border = "#dc2626" if active else t['border']
+            card.setStyleSheet(
+                f"QFrame#{card.objectName()} {{ background: {bg}; "
+                f"border: 1.5px solid {border}; border-radius: 10px; }}"
+            )
+            card._radio.set_checked(active)
+        # Swap which grid is shown — quality (video) vs audio choices
+        audio_mode = (fid == "audio")
+        self.quality_grid.setVisible(not audio_mode)
+        self.audio_grid.setVisible(audio_mode)
+        # The "QUALITY" caption is shared by both grids
+        for i in range(self.quality_label_layout.count()):
+            w = self.quality_label_layout.itemAt(i).widget()
+            if w is not None:
+                w.setVisible(True)
+        self._refresh_summary()
+
+    def _select_quality(self, qid):
+        self._quality_id = qid
+        t = self.theme
+        for cid, card in self._quality_cards.items():
+            active = (cid == qid)
+            bg = (
+                ("rgba(220,38,38,0.16)" if self.dark else "rgba(220,38,38,0.08)")
+                if active else t['input_bg']
+            )
+            border = "#dc2626" if active else t['border']
+            card.setStyleSheet(
+                f"QFrame#{card.objectName()} {{ background: {bg}; "
+                f"border: 1.5px solid {border}; border-radius: 9px; }}"
+            )
+            card._title_lbl.setStyleSheet(
+                f"font-family: {PLEX_SANS}; font-size: 12.5px; font-weight: 800; "
+                f"color: {'#dc2626' if active else t['text']}; "
+                f"background: transparent;"
+            )
+        self._refresh_summary()
+
+    def _select_audio(self, aid):
+        self._audio_id = aid
+        t = self.theme
+        for cid, card in self._audio_cards.items():
+            active = (cid == aid)
+            bg = (
+                ("rgba(220,38,38,0.16)" if self.dark else "rgba(220,38,38,0.08)")
+                if active else t['input_bg']
+            )
+            border = "#dc2626" if active else t['border']
+            card.setStyleSheet(
+                f"QFrame#{card.objectName()} {{ background: {bg}; "
+                f"border: 1.5px solid {border}; border-radius: 9px; }}"
+            )
+            card._title_lbl.setStyleSheet(
+                f"font-family: {PLEX_SANS}; font-size: 12.5px; font-weight: 800; "
+                f"color: {'#dc2626' if active else t['text']}; "
+                f"background: transparent;"
+            )
+        self._refresh_summary()
+
+    def _audio_choice(self):
+        for aid, _t, _s, codec, kbps in self.AUDIO_CHOICES:
+            if aid == self._audio_id:
+                return codec, kbps
+        return 'mp3', 320
+
+    def _estimate_audio_bytes(self):
+        codec, kbps = self._audio_choice()
+        duration = getattr(self, '_duration', 0) or 0
+        if codec == 'm4a':
+            # Native AAC stream — use yt-dlp's reported audio_bytes if available
+            return getattr(self, '_audio_bytes', 0) or (
+                int(duration * 128 * 1000 / 8) if duration else 0
+            )
+        if duration and kbps:
+            return int(duration * kbps * 1000 / 8)
+        return 0
+
+    def _selected_height(self):
+        for qid, _sub, _size, h in self.QUALITIES:
+            if qid == self._quality_id:
+                return h
+        return 1080
+
+    def _refresh_summary(self):
+        t = self.theme
+        size_by_h = getattr(self, '_size_by_height', {}) or {}
+        audio_bytes = getattr(self, '_audio_bytes', 0) or 0
+        duration = getattr(self, '_duration', 0) or 0
+
+        if self._mode == "audio":
+            folder = "~/Downloads/Music/"
+            est = self._estimate_audio_bytes()
+            size = self._humanize_size(est) if est else "~5\u201310 MB"
+        else:
+            folder = "~/Downloads/Videos/"
+            # Find target height for the selected quality card
+            target = self._selected_height()
+            matching = [hh for hh in size_by_h if hh >= target]
+            chosen = min(matching) if matching else None
+            if chosen is not None:
+                size = self._humanize_size(size_by_h[chosen])
+            else:
+                size = "—"
+        self.summary_lbl.setText(
+            f"<span>Will download </span>"
+            f"<b style='color:{t['text']}; font-family: {PLEX_MONO};'>{size}</b>"
+            f"<span> to </span>"
+            f"<b style='color:{t['text']}; font-family: {PLEX_MONO};'>{folder}</b>"
+        )
+
+    # ── Fetch flow ────────────────────────────────────────────────────────────
+    def _on_paste_or_fetch(self):
+        if not self.url_input.text().strip():
+            txt = QApplication.clipboard().text().strip()
+            if txt:
+                self.url_input.setText(txt)
+        self.fetch_formats()
+
+    def fetch_formats(self):
+        url = self.url_input.text().strip()
+        if not url:
+            return
+        self.fetch_btn.setEnabled(False)
+        self.fetch_btn.setText("Fetching\u2026")
+        self.video_title_lbl.setText("Fetching video info\u2026")
+        self.video_meta_lbl.setText("")
+        self._set_tags([])
+        self.fetch_thread = FetchFormatsThread(url)
+        self.fetch_thread.info_ready.connect(self._on_info_ready)
+        self.fetch_thread.error.connect(self._on_fetch_error)
+        self.fetch_thread.start()
+
+    def _on_info_ready(self, info):
+        self._info = info
+        self.video_title = info.get('title', '') or 'video'
+        self.video_title_lbl.setText(self.video_title)
+
+        channel = info.get('channel', '') or ''
+        views   = info.get('view_count', 0) or 0
+        ud      = info.get('upload_date', '') or ''
+        upload_str = ''
+        if ud and len(ud) == 8:
+            upload_str = f"{ud[:4]}-{ud[4:6]}-{ud[6:]}"
+        bits = []
+        if channel:
+            bits.append(channel)
+        if views:
+            bits.append(f"{views:,} views")
+        if upload_str:
+            bits.append(f"Uploaded {upload_str}")
+        self.video_meta_lbl.setText("  \u00b7  ".join(bits))
+
+        tags = []
+        cats = info.get('categories') or []
+        if cats:
+            tags.append(cats[0])
+        heights = info.get('heights') or []
+        if heights:
+            top = max(heights)
+            tags.append(f"{top}p available")
+        if info.get('has_subs'):
+            tags.append("CC available")
+        self._set_tags(tags)
+
+        # Update each quality card with the real size mined from yt-dlp.
+        self._size_by_height = info.get('size_by_height') or {}
+        self._audio_bytes    = info.get('audio_bytes') or 0
+        self._audio_kbps     = info.get('audio_kbps') or 0
+        self._duration       = info.get('duration') or 0
+        for qid, _sub, fallback, h in self.QUALITIES:
+            avail = (not heights) or any(hh >= h for hh in heights)
+            self._quality_cards[qid].setEnabled(avail)
+            self._quality_cards[qid].setVisible(True)
+            # Pick the closest available height >= card's target
+            matching = [hh for hh in self._size_by_height if hh >= h]
+            chosen = min(matching) if matching else None
+            if chosen is not None:
+                self._quality_cards[qid]._size_lbl.setText(
+                    self._humanize_size(self._size_by_height[chosen])
+                )
+            else:
+                self._quality_cards[qid]._size_lbl.setText("—")
+
+        # Audio card sizes — mp3 sizes derive from duration × bitrate, m4a
+        # uses the actual best-audio size yt-dlp reports.
+        duration = self._duration
+        for aid, _t, _s, codec, kbps in self.AUDIO_CHOICES:
+            if codec == 'm4a':
+                bytes_ = self._audio_bytes
+            elif duration and kbps:
+                bytes_ = int(duration * kbps * 1000 / 8)
+            else:
+                bytes_ = 0
+            card = self._audio_cards[aid]
+            card._size_lbl.setText(
+                self._humanize_size(bytes_) if bytes_ else "—"
+            )
+            if codec == 'm4a':
+                card._sub_lbl.setText(
+                    f"AAC \u00b7 {self._audio_kbps} kbps"
+                    if self._audio_kbps else "AAC \u00b7 original"
+                )
+
+        self._refresh_summary()
+
+        # Fetch the thumbnail off the UI thread
+        thumb_url = info.get('thumbnail') or ''
+        if thumb_url:
+            self.thumb_thread = _ThumbnailFetchThread(thumb_url)
+            self.thumb_thread.loaded.connect(self._on_thumb_loaded)
+            self.thumb_thread.start()
+
+        self.fetch_btn.setEnabled(True)
+        self.fetch_btn.setText("Refresh")
+
+    def _on_thumb_loaded(self, data):
+        try:
+            pm = QPixmap()
+            if pm.loadFromData(data):
+                w, h = self.thumb_lbl.width(), self.thumb_lbl.height()
+                scaled = pm.scaled(
+                    w, h,
+                    Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+                # Center-crop
+                x = max(0, (scaled.width() - w) // 2)
+                y = max(0, (scaled.height() - h) // 2)
+                cropped = scaled.copy(x, y, w, h)
+                # Round the corners via a clip-path mask
+                rounded = QPixmap(w, h)
+                rounded.fill(Qt.GlobalColor.transparent)
+                p = QPainter(rounded)
+                p.setRenderHint(QPainter.RenderHint.Antialiasing)
+                path = QPainterPath()
+                path.addRoundedRect(0, 0, w, h, 8, 8)
+                p.setClipPath(path)
+                p.drawPixmap(0, 0, cropped)
+                p.end()
+                self.thumb_lbl.setPixmap(rounded)
+                self.thumb_lbl.setText("")
+        except Exception:
+            pass
+
+    def _on_fetch_error(self, err):
+        self.video_title_lbl.setText("Could not fetch video info")
+        self.video_meta_lbl.setText(err)
+        self._set_tags([])
+        self.fetch_btn.setEnabled(True)
+        self.fetch_btn.setText("Retry")
+
+    # ── Download flow ─────────────────────────────────────────────────────────
+    def _build_yt_params(self, settings, safe_title):
+        """Return (ydl_opts, folder, display_name) for the given settings."""
+        mode          = settings.get("mode", "combined")
+        quality       = settings.get("quality", "Best")
+        audio_fmt     = settings.get("audio_fmt", "mp3")
+        audio_quality = settings.get("audio_quality", "320")
+        embed_subs    = bool(settings.get("embed_subs", False))
+        embed_thumb   = bool(settings.get("embed_thumb", True))
+
+        if mode == "audio":
+            folder = os.path.join(HOME, "Downloads", "Music")
+            os.makedirs(folder, exist_ok=True)
+            display_name = f"{safe_title}.{audio_fmt}"
+            postprocessors = []
+            if audio_fmt == "m4a":
+                # Prefer the native M4A audio stream so no re-encode happens.
+                fmt_selector = 'bestaudio[ext=m4a]/bestaudio'
+            else:
+                fmt_selector = 'bestaudio/best'
+                postprocessors.append({
+                    'key': 'FFmpegExtractAudio',
+                    'preferredcodec': audio_fmt,
+                    'preferredquality': audio_quality,
+                })
+            if embed_thumb:
+                postprocessors.append({'key': 'EmbedThumbnail'})
+            ydl_opts = {
+                'format':            fmt_selector,
+                'outtmpl':           os.path.join(folder, f"{safe_title}.%(ext)s"),
+                'paths':             {'temp': YT_DLP_TEMP_DIR},
+                'postprocessors':    postprocessors,
+                'writethumbnail':    embed_thumb,
+                'quiet':             True,
+                'no_warnings':       True,
+                'http_headers':      {'User-Agent': HEADERS['User-Agent']},
+            }
+        else:
+            folder = os.path.join(HOME, "Downloads", "Videos")
+            os.makedirs(folder, exist_ok=True)
+            display_name = f"{safe_title}.mp4"
+            # Map the quality id (e.g. "1080p60") to a yt-dlp height filter.
+            height = None
+            for qid, _sub, _size, h in self.QUALITIES:
+                if qid == quality:
+                    height = h
+                    break
+            if quality == "Best" or height is None:
+                fmt = "bestvideo+bestaudio/best"
+            else:
+                fmt = (
+                    f"bestvideo[height<={height}]+bestaudio/"
+                    f"bestvideo[height<={height}]/best"
+                )
+            postprocessors = []
+            if embed_thumb:
+                postprocessors.append({'key': 'EmbedThumbnail'})
+            if embed_subs:
+                postprocessors.append({'key': 'FFmpegEmbedSubtitle'})
+            ydl_opts = {
+                'format':              fmt,
+                'outtmpl':             os.path.join(folder, f"{safe_title}.%(ext)s"),
+                'paths':               {'temp': YT_DLP_TEMP_DIR},
+                'merge_output_format': 'mp4',
+                'postprocessors':      postprocessors,
+                'writethumbnail':      embed_thumb,
+                'writesubtitles':      embed_subs,
+                'writeautomaticsub':   embed_subs,
+                'subtitleslangs':      ['en'] if embed_subs else [],
+                'quiet':               True,
+                'no_warnings':         True,
+                'http_headers':        {'User-Agent': HEADERS['User-Agent']},
+            }
+        return ydl_opts, folder, display_name
+
+    def _current_settings(self):
+        codec, kbps = self._audio_choice()
+        return {
+            "mode":          "audio" if self._mode == "audio" else "combined",
+            "quality":       self._quality_id,
+            "audio_fmt":     codec,
+            "audio_quality": str(kbps) if kbps else "0",
+            "embed_subs":    self.subs_chk.isChecked(),
+            "embed_thumb":   self.thumb_chk.isChecked(),
+        }
+
+    def _kick_off(self, url, settings, safe_title):
+        self._current_url = url
+        self.download_btn.setVisible(False)
+        self.fetch_btn.setEnabled(False)
+        self.cancel_dl_btn.setVisible(True)
+        self.cancel_dl_btn.setEnabled(True)
+        self.progress.set_pct(0)
+        self.progress.mark_active()
+        self.log_box.clear()
+        self._last_size = self._last_speed = self._last_eta = ""
+
+        ydl_opts, folder, display_name = self._build_yt_params(settings, safe_title)
+        self._dl_folder = folder
+        self._dl_base   = safe_title
+        self.open_file_btn.setVisible(False)
+        self.open_folder_btn.setVisible(False)
+        self.download_started.emit(url, display_name, folder)
+        self.yt_settings_captured.emit(url, settings)
+        self.dl_thread = YouTubeDownloadThread(url, ydl_opts)
+        self.dl_thread.progress.connect(self._on_progress)
+        self.dl_thread.speed.connect(self._on_speed)
+        self.dl_thread.size_info.connect(self._on_size)
+        self.dl_thread.eta.connect(self._on_eta)
+        self.dl_thread.log.connect(lambda msg: self.log_box.append(msg))
+        self.dl_thread.finished.connect(self.on_download_finished)
+        self.dl_thread.start()
+        self.log_box.append("Starting download\u2026")
+
+    def start_download(self):
+        url = self.url_input.text().strip()
+        if not url:
+            return
+        title = self.video_title or "video"
+        safe_title = re.sub(r'[<>:"/\\|?*\x00-\x1F]', '', title)[:80].strip() or "video"
+        self._kick_off(url, self._current_settings(), safe_title)
+
+    def start_with_saved_settings(self, url, settings, safe_title):
+        """Resume path: skip fetch, apply settings, start downloading."""
+        self.url_input.setText(url)
+        mode = settings.get("mode", "combined")
+        self._select_format("audio" if mode == "audio" else "video")
+        q = settings.get("quality", "1080p60")
+        if q in self._quality_cards:
+            self._select_quality(q)
+        self.subs_chk.setChecked(bool(settings.get("embed_subs", False)))
+        self.thumb_chk.setChecked(bool(settings.get("embed_thumb", True)))
+        self.video_title = safe_title
+        self.video_title_lbl.setText(f"Resuming: {safe_title}")
+        self._kick_off(url, settings, safe_title)
+
+    # ── Progress / completion ────────────────────────────────────────────────
+    def _on_progress(self, pct):
+        self.progress.set_pct(pct)
+        self.download_progress.emit(
+            self._current_url, pct, self._last_size, self._last_speed, self._last_eta,
+        )
+
+    def _on_speed(self, spd):
+        self._last_speed = spd
+        self.progress.set_speed_text(spd)
+        self.download_progress.emit(
+            self._current_url, self.progress.bar.value(),
+            self._last_size, spd, self._last_eta,
+        )
+
+    def _on_size(self, sz):
+        self._last_size = sz
+        self.progress.set_size_text(sz)
+
+    def _on_eta(self, eta):
+        self._last_eta = eta
+        self.progress.set_eta_text(eta if eta != "\u2014" else "")
+
+    def cancel_download(self):
+        if not self.dl_thread or not self.dl_thread.isRunning():
+            return
+        # Cooperative cancel: flag the worker, then let yt-dlp's next
+        # progress hook raise out of the network loop. on_download_finished
+        # ("Cancelled") will reset the UI when the thread exits.
+        self.dl_thread.running = False
+        self.cancel_dl_btn.setEnabled(False)
+        self.cancel_dl_btn.setText("Cancelling\u2026")
+        self.log_box.append("Cancelling download\u2026")
+        self.progress.mark_error("Cancelling\u2026")
+
+    def on_download_finished(self, msg):
+        self.fetch_btn.setEnabled(True)
+        self.cancel_dl_btn.setVisible(False)
+        # Restore the Stop button to its default state for the next download.
+        self.cancel_dl_btn.setEnabled(True)
+        self.cancel_dl_btn.setText("Stop")
+        if msg == "Finished":
+            self.progress.mark_complete()
+            self.log_box.append("Download complete!")
+            self.download_btn.setVisible(False)
+            self.open_file_btn.setVisible(True)
+            self.open_folder_btn.setVisible(True)
+        elif msg == "Cancelled":
+            self.log_box.append("Download cancelled.")
+            self.progress.mark_error("Cancelled")
+            self.download_btn.setVisible(True)
+        else:
+            self.log_box.append(msg)
+            self.progress.mark_error(msg[:80])
+            self.download_btn.setVisible(True)
+        self.download_finished.emit(self._current_url, msg)
+
+    def _open_downloaded_file(self):
+        import glob as _glob
+        folder = getattr(self, '_dl_folder', '')
+        base   = getattr(self, '_dl_base', '')
+        if folder and base:
+            matches = _glob.glob(os.path.join(folder, f"{base}.*"))
+            if matches:
+                subprocess.Popen(['xdg-open', matches[0]])
+                self.close()
+                return
+        if folder:
+            subprocess.Popen(['xdg-open', folder])
+        self.close()
+
+    def _open_downloaded_folder(self):
+        folder = getattr(self, '_dl_folder', '')
+        if folder and os.path.exists(folder):
+            subprocess.Popen(['xdg-open', folder])
+        self.close()
+
 
 class LuluHLSDownloadThread(QThread):
     """Download a Luluvdo / Lulustream HLS video entirely via Python
@@ -2435,6 +4592,7 @@ class DownloadThread(QThread):
             out_template = os.path.join(folder, f"{base}.%(ext)s")
             ydl_opts = {
                 'outtmpl': out_template,
+                'paths': {'temp': YT_DLP_TEMP_DIR},
                 'restrictfilenames': False,
                 'progress_hooks': [self.yt_dlp_hook],
                 'no_warnings': False,
@@ -2783,127 +4941,368 @@ class DownloadThread(QThread):
 
 
 # ── Core downloader dialog ────────────────────────────────────────────────────
-class CoreDownloaderDialog(QDialog):
-    """Non-modal dialog for direct file downloads (zip, exe, pdf, etc.)
+class CoreDownloaderDialog(DownloaderDialogBase):
+    """Non-modal dialog for direct file downloads (zip, exe, pdf, etc.).
     Uses DownloadThread (requests/curl) — not yt-dlp."""
-    download_started  = pyqtSignal(str, str, str)   # url, display_name, folder
+
+    download_started  = pyqtSignal(str, str, str)            # url, display_name, folder
     download_progress = pyqtSignal(str, int, str, str, str)  # url, pct, size, speed, eta
-    download_finished = pyqtSignal(str, str)         # url, status
+    download_finished = pyqtSignal(str, str)                 # url, status
 
     def __init__(self, parent=None, url="", filename="", referer="", dark=True):
-        super().__init__(parent)
-        self.setWindowFlags(
-            Qt.WindowType.Window |
-            Qt.WindowType.WindowMinimizeButtonHint |
-            Qt.WindowType.WindowMaximizeButtonHint |
-            Qt.WindowType.WindowCloseButtonHint
+        super().__init__(parent, dark=dark, window_title="LDM Core Downloader")
+        self._url       = url
+        self._filename  = filename
+        self._referer   = referer
+        self._dl_path   = ""
+        self._save_dir  = choose_folder(filename) if filename else os.path.join(HOME, "Downloads")
+        self._user_dir_override = False
+        self.dl_thread  = None
+        self._last_size = ""
+        self._last_speed = ""
+        self._last_eta  = ""
+
+        self.resize(680, 520)
+        self.setMinimumSize(580, 460)
+        self._build_body()
+        self._wire_footer()
+
+    # ── UI ────────────────────────────────────────────────────────────────────
+    def _build_body(self):
+        t = self.theme
+
+        # Hero band — blue/HTTP for the Core engine.
+        icon_path = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            "assets", "toolbar_icons", "core.svg",
         )
-        self.setWindowTitle("LDM Core Downloader")
-        self.setMinimumWidth(520)
-        self.setMinimumHeight(320)
-        self._dark = dark
-        self.setStyleSheet(make_dialog_style(dark))
-        self._url      = url
-        self._filename = filename
-        self._referer  = referer
-        self._dl_path  = ""
-        self.dl_thread = None
-        self._build_ui()
-
-    def _build_ui(self):
-        layout = QVBoxLayout(self)
-        layout.setSpacing(12)
-        layout.setContentsMargins(20, 20, 20, 20)
-
-        title = QLabel("Core Downloader")
-        title.setStyleSheet(f"font-size: 16px; font-weight: bold; color: {'#58a6ff' if self._dark else '#0369a1'};")
-        layout.addWidget(title)
-
-        url_label = QLineEdit(self._url)
-        url_label.setReadOnly(True)
-        url_label.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
-        url_label.setStyleSheet(
-            f"color: {'#8b949e' if self._dark else '#64748b'}; font-size: 11px;"
-            " border: none; background: transparent; padding: 2px 4px;"
-            " selection-background-color: #1f6feb; selection-color: #ffffff;"
+        hero = _make_hero_band(
+            self.body, self.dark, icon_path,
+            title="Core Downloader",
+            subtitle="Multi-segment HTTP / HTTPS / FTP downloads.",
+            chip_label="HTTP",
+            accent_color="#1d4ed8",
+            accent_soft=("rgba(59,130,246,0.16)" if self.dark else "rgba(59,130,246,0.10)"),
         )
-        url_label.setCursorPosition(0)
-        layout.addWidget(url_label)
+        self.body_layout.addWidget(hero)
 
-        self.file_label = QLabel(f"Saving as: {self._filename}")
-        self.file_label.setStyleSheet(f"font-size: 13px; font-weight: bold; color: {'#e6edf3' if self._dark else '#1e293b'};")
-        self.file_label.setWordWrap(True)
-        layout.addWidget(self.file_label)
+        content = QWidget()
+        content.setStyleSheet(f"background: {t['surface']};")
+        cl = QVBoxLayout(content)
+        cl.setContentsMargins(22, 16, 22, 16)
+        cl.setSpacing(10)
 
-        self.progress_bar = QProgressBar()
-        self.progress_bar.setValue(0)
-        layout.addWidget(self.progress_bar)
+        # URL row — read-only field with a tinted link icon on the left.
+        cl.addLayout(self._field_label("URL"))
+        cl.addWidget(self._url_field(self._url, tone="blue"))
 
-        self.info_label = QLabel("")
-        self.info_label.setStyleSheet(f"color: {'#8b949e' if self._dark else '#64748b'}; font-size: 12px;")
-        layout.addWidget(self.info_label)
+        # Save as + Category (two columns).
+        row1 = QHBoxLayout()
+        row1.setSpacing(12)
 
-        layout.addStretch()
+        save_as_col = QVBoxLayout()
+        save_as_col.setSpacing(6)
+        save_as_col.addLayout(self._field_label("Save as"))
+        self.filename_edit = QLineEdit(self._filename)
+        self.filename_edit.setStyleSheet(_dialog_input_qss(t))
+        self.filename_edit.textChanged.connect(self._on_filename_changed)
+        save_as_col.addWidget(self.filename_edit)
+        row1.addLayout(save_as_col, 16)
 
-        btn_row = QHBoxLayout()
+        cat_col = QVBoxLayout()
+        cat_col.setSpacing(6)
+        cat_col.addLayout(self._field_label("Category"))
+        self.category_combo = QComboBox()
+        # Skip "All Downloads" — it's not a real folder. Items get their per-
+        # category SVG icon (assets/category_icons/) so the dropdown rows show
+        # a proper icon instead of the OS-dependent emoji glyph.
+        for label, _emoji, _color in CATEGORIES[1:]:
+            icon_file = CATEGORY_ICON_FILE.get(label)
+            if icon_file:
+                icon_path = os.path.join(
+                    os.path.dirname(os.path.abspath(__file__)),
+                    "assets", "category_icons", icon_file,
+                )
+                if os.path.exists(icon_path):
+                    self.category_combo.addItem(
+                        QIcon(_render_svg_pixmap(icon_path, 18)),
+                        f"  {label}", label,
+                    )
+                    continue
+            self.category_combo.addItem(label, label)
+        current_cat = get_category(self._filename) if self._filename else "Others"
+        idx = self.category_combo.findData(current_cat)
+        if idx >= 0:
+            self.category_combo.setCurrentIndex(idx)
+        self.category_combo.currentIndexChanged.connect(self._on_category_changed)
+        cat_col.addWidget(self._category_field(self.category_combo, tone="blue"))
+        row1.addLayout(cat_col, 10)
 
-        self.start_btn = QPushButton("Start Download")
-        self.start_btn.setStyleSheet(
-            "QPushButton { background-color: #16a34a; color: white; }"
-            "QPushButton:hover { background-color: #15803d; }"
-            "QPushButton:disabled { background-color: #94a3b8; }"
-        )
-        self.start_btn.clicked.connect(self._start_download)
+        cl.addLayout(row1)
+
+        # Save in — folder tile + path + Browse, matching the URL tile style.
+        cl.addLayout(self._field_label("Save in"))
+        self.save_dir_edit = QLineEdit(self._save_dir)
+        self.save_dir_edit.textEdited.connect(lambda _t: setattr(self, "_user_dir_override", True))
+        cl.addWidget(self._dir_field(self.save_dir_edit, tone="blue"))
+
+        # Progress section.
+        self.progress = ProgressSection(content, dark=self.dark)
+        self.progress.mark_idle()
+        cl.addWidget(self.progress)
+        cl.addStretch(1)
+
+        self.body_layout.addWidget(content, 1)
+
+    def _wire_footer(self):
+        t = self.theme
+        self.footer_layout.addStretch(1)
 
         self.cancel_btn = QPushButton("Cancel")
-        self.cancel_btn.setStyleSheet(
-            "QPushButton { background-color: #dc2626; color: white; }"
-            "QPushButton:hover { background-color: #b91c1c; }"
-            "QPushButton:disabled { background-color: #94a3b8; }"
-        )
-        self.cancel_btn.setEnabled(False)
-        self.cancel_btn.clicked.connect(self._cancel)
+        self.cancel_btn.setStyleSheet(_dialog_btn_qss(t, "secondary"))
+        self.cancel_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.cancel_btn.clicked.connect(self._on_cancel_clicked)
+        self.footer_layout.addWidget(self.cancel_btn)
 
-        self.open_file_btn = QPushButton("Open")
-        self.open_file_btn.setStyleSheet(
-            "QPushButton { background-color: #0ea5e9; color: white; }"
-            "QPushButton:hover { background-color: #0284c7; }"
-        )
+        self.primary_btn = QPushButton("Download")
+        self.primary_btn.setStyleSheet(_dialog_btn_qss(t, "primaryGreen"))
+        self.primary_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.primary_btn.clicked.connect(self._on_primary_clicked)
+        self.footer_layout.addWidget(self.primary_btn)
+
+        # Post-finish buttons — hidden until the download succeeds, mirroring
+        # the Stream / YouTube dialogs.
+        self.open_file_btn = QPushButton("Open File")
+        self.open_file_btn.setStyleSheet(_dialog_btn_qss(t, "primaryBlue"))
+        self.open_file_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.open_file_btn.clicked.connect(self._open_downloaded_file)
         self.open_file_btn.setVisible(False)
-        self.open_file_btn.clicked.connect(self._open_file)
+        self.footer_layout.addWidget(self.open_file_btn)
 
         self.open_folder_btn = QPushButton("Open Folder")
-        self.open_folder_btn.setStyleSheet(
-            "QPushButton { background-color: #64748b; color: white; }"
-            "QPushButton:hover { background-color: #475569; }"
-        )
+        self.open_folder_btn.setStyleSheet(_dialog_btn_qss(t, "secondary"))
+        self.open_folder_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.open_folder_btn.clicked.connect(self._open_downloaded_folder)
         self.open_folder_btn.setVisible(False)
-        self.open_folder_btn.clicked.connect(self._open_folder)
+        self.footer_layout.addWidget(self.open_folder_btn)
 
-        self.close_btn = QPushButton("Close")
-        self.close_btn.setStyleSheet(make_close_btn_style(self._dark))
-        self.close_btn.clicked.connect(self.close)
+    def _field_label(self, text):
+        t = self.theme
+        layout = QHBoxLayout()
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        lbl = QLabel(text.upper())
+        lbl.setStyleSheet(
+            f"font-family: {PLEX_SANS}; font-size: 11px; font-weight: 700; "
+            f"letter-spacing: 0.8px; color: {t['muted']}; background: transparent;"
+        )
+        layout.addWidget(lbl)
+        layout.addStretch()
+        return layout
 
-        btn_row.addWidget(self.start_btn)
-        btn_row.addWidget(self.cancel_btn)
-        btn_row.addStretch()
-        btn_row.addWidget(self.open_file_btn)
-        btn_row.addWidget(self.open_folder_btn)
-        btn_row.addWidget(self.close_btn)
-        layout.addLayout(btn_row)
+    def _url_field(self, value, tone="blue"):
+        t = self.theme
+        tone_color = {"blue": "#3b82f6", "violet": "#8b5cf6", "red": "#ef4444"}[tone]
+        sel_rgb = (
+            "rgba(59,130,246,0.35)"  if tone == "blue"  else
+            "rgba(139,92,246,0.35)"  if tone == "violet" else
+            "rgba(239,68,68,0.35)"
+        )
+        frame = QFrame()
+        frame.setStyleSheet(
+            f"background: {t['input_bg']}; border: 1px solid {t['border']}; "
+            f"border-radius: 10px;"
+        )
+        h = QHBoxLayout(frame)
+        h.setContentsMargins(10, 8, 12, 8)
+        h.setSpacing(12)
+        h.addWidget(_make_glyph_tile(_TILE_SVG_LINK, tone_color, self.dark))
+
+        edit = QLineEdit(value)
+        edit.setReadOnly(True)
+        edit.setCursorPosition(0)
+        edit.setStyleSheet(
+            f"QLineEdit {{ background: transparent; border: none; "
+            f"color: {t['text']}; font-family: {PLEX_SANS}; font-size: 13.5px; "
+            f"selection-background-color: {sel_rgb}; selection-color: {t['text']}; }}"
+        )
+        h.addWidget(edit, 1)
+        return frame
+
+    def _category_field(self, combo, tone="blue"):
+        """Wrap the category QComboBox in a tile-styled frame, mirroring the
+        URL row — a tinted 4-square 'category' glyph on the left, the combo
+        in the middle (transparent), and a real SVG chevron button on the
+        right (Qt's CSS-triangle chevron renders inconsistently)."""
+        t = self.theme
+        tone_color = {"blue": "#3b82f6", "violet": "#8b5cf6", "red": "#ef4444"}[tone]
+        frame = QFrame()
+        frame.setStyleSheet(
+            f"background: {t['input_bg']}; border: 1px solid {t['border']}; "
+            f"border-radius: 10px;"
+        )
+        h = QHBoxLayout(frame)
+        h.setContentsMargins(10, 6, 6, 6)
+        h.setSpacing(10)
+        h.addWidget(_make_glyph_tile(_TILE_SVG_CATEGORY, tone_color, self.dark))
+
+        # Transparent combo + themed popup. Hide the native drop-down arrow
+        # entirely — we draw our own chevron button to the right.
+        combo.setStyleSheet(_dialog_combo_inline_qss(t, tone_color, hide_arrow=True))
+        combo.setCursor(Qt.CursorShape.PointingHandCursor)
+        _style_combo_popup(combo, t, tone_color)
+        h.addWidget(combo, 1)
+
+        chevron = QPushButton()
+        chevron.setCursor(Qt.CursorShape.PointingHandCursor)
+        chevron.setFlat(True)
+        chevron.setFixedSize(28, 28)
+        chevron.setIcon(QIcon(_render_svg_str_pixmap(
+            _TILE_SVG_CHEVRON_DOWN, tone_color, size=18
+        )))
+        chevron.setIconSize(QSize(18, 18))
+        chevron.setStyleSheet(
+            "QPushButton { background: transparent; border: none; padding: 0; }"
+            f" QPushButton:hover {{ background: rgba("
+            f"{int(tone_color[1:3], 16)},{int(tone_color[3:5], 16)},"
+            f"{int(tone_color[5:7], 16)},0.12); border-radius: 6px; }}"
+        )
+        chevron.clicked.connect(combo.showPopup)
+        h.addWidget(chevron)
+        return frame
+
+    def _pick_dir(self, line_edit):
+        start = line_edit.text().strip() or os.path.join(HOME, "Downloads")
+        chosen = QFileDialog.getExistingDirectory(self, "Save in", start)
+        if chosen:
+            line_edit.setText(chosen)
+            self._user_dir_override = True
+
+    def _dir_field(self, line_edit, tone="blue", browse_label="Browse\u2026"):
+        """Same tile-styled wrapper as StreamDialog._dir_field, scoped to the
+        Core (blue) accent.  We keep this duplicated rather than inheriting
+        because the two dialogs don't share a useful UI base."""
+        t = self.theme
+        tone_color = {"blue": "#3b82f6", "violet": "#8b5cf6", "red": "#ef4444"}[tone]
+        hover_bg = (
+            "rgba(59,130,246,0.10)"  if tone == "blue"  else
+            "rgba(139,92,246,0.10)"  if tone == "violet" else
+            "rgba(239,68,68,0.10)"
+        )
+        sel_rgb = (
+            "rgba(59,130,246,0.35)"  if tone == "blue"  else
+            "rgba(139,92,246,0.35)"  if tone == "violet" else
+            "rgba(239,68,68,0.35)"
+        )
+        frame = QFrame()
+        frame.setStyleSheet(
+            f"background: {t['input_bg']}; border: 1px solid {t['border']}; "
+            f"border-radius: 10px;"
+        )
+        h = QHBoxLayout(frame)
+        h.setContentsMargins(10, 8, 8, 8); h.setSpacing(10)
+        h.addWidget(_make_glyph_tile(_TILE_SVG_FOLDER, tone_color, self.dark))
+
+        line_edit.setStyleSheet(
+            f"QLineEdit {{ background: transparent; border: none; color: {t['text']}; "
+            f"font-family: {PLEX_SANS}; font-size: 13.5px; "
+            f"selection-background-color: {sel_rgb}; "
+            f"selection-color: {t['text']}; }}"
+        )
+        h.addWidget(line_edit, 1)
+
+        browse = QPushButton(browse_label)
+        browse.setCursor(Qt.CursorShape.PointingHandCursor)
+        browse.setStyleSheet(
+            f"QPushButton {{ background: {t['card']}; color: {t['text']}; "
+            f"border: 1px solid {t['border']}; border-radius: 7px; "
+            f"padding: 4px 10px; font-family: {PLEX_SANS}; font-size: 12px; "
+            f"font-weight: 600; }} "
+            f"QPushButton:hover {{ background: {hover_bg}; "
+            f"border-color: {tone_color}; color: {tone_color}; }}"
+        )
+        browse.clicked.connect(lambda: self._pick_dir(line_edit))
+        h.addWidget(browse)
+        return frame
+
+    # ── Behaviour ─────────────────────────────────────────────────────────────
+    def _on_filename_changed(self, text):
+        if self._state() == "idle" and not self._user_dir_override:
+            auto = choose_folder(text)
+            self._save_dir = auto
+            self.save_dir_edit.setText(auto)
+            # Sync category dropdown to the detected one for the new filename.
+            cat = get_category(text)
+            idx = self.category_combo.findData(cat)
+            if idx >= 0 and idx != self.category_combo.currentIndex():
+                # Block recursion: changing the combo would otherwise re-call us.
+                self.category_combo.blockSignals(True)
+                self.category_combo.setCurrentIndex(idx)
+                self.category_combo.blockSignals(False)
+
+    def _on_category_changed(self, _idx):
+        if self._state() != "idle" or self._user_dir_override:
+            return
+        chosen = self.category_combo.currentData()
+        if chosen:
+            new_dir = os.path.join(HOME, "Downloads", chosen)
+            self._save_dir = new_dir
+            self.save_dir_edit.setText(new_dir)
+
+    def _on_browse(self):
+        start = self.save_dir_edit.text().strip() or os.path.join(HOME, "Downloads")
+        chosen = QFileDialog.getExistingDirectory(self, "Save in", start)
+        if chosen:
+            self.save_dir_edit.setText(chosen)
+            self._user_dir_override = True
+
+    def _state(self):
+        """idle | active | complete | error — mirrors progress section state."""
+        return self.progress._state if hasattr(self, "progress") else "idle"
+
+    def _on_primary_clicked(self):
+        state = self._state()
+        if state == "complete":
+            self._open_folder()
+        elif state == "idle":
+            self._start_download()
+
+    def _on_cancel_clicked(self):
+        state = self._state()
+        if state in ("downloading",):
+            resp = QMessageBox.question(
+                self, "Cancel download?",
+                "Cancel this download? The partial file will be deleted.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if resp != QMessageBox.StandardButton.Yes:
+                return
+            if self.dl_thread and self.dl_thread.isRunning():
+                self.dl_thread.stop()
+            if self._dl_path and os.path.exists(self._dl_path):
+                try:
+                    os.remove(self._dl_path)
+                except OSError:
+                    pass
+        self.close()
 
     def _start_download(self):
-        self.start_btn.setEnabled(False)
-        self.cancel_btn.setEnabled(True)
-        folder = choose_folder(self._filename)
-        base, ext = os.path.splitext(self._filename)
-        unique_name, counter = self._filename, 1
+        filename = self.filename_edit.text().strip() or self._filename
+        folder = self.save_dir_edit.text().strip() or self._save_dir
+        os.makedirs(folder, exist_ok=True)
+
+        base, ext = os.path.splitext(filename)
+        unique_name, counter = filename, 1
         while os.path.exists(os.path.join(folder, unique_name)):
             unique_name = f"{base} ({counter}){ext}"
             counter += 1
+
         self._dl_path = os.path.join(folder, unique_name)
         self._display_name = unique_name
-        self.file_label.setText(f"Saving as: {unique_name}")
+        self.progress.mark_active()
+        self.primary_btn.setEnabled(False)
+
         self.download_started.emit(self._url, unique_name, folder)
 
         self.dl_thread = DownloadThread(self._url, unique_name, is_video=False, referer=self._referer)
@@ -2915,58 +5314,335 @@ class CoreDownloaderDialog(QDialog):
         self.dl_thread.start()
 
     def _on_progress(self, pct):
-        self.progress_bar.setValue(pct)
-        self.download_progress.emit(self._url, pct,
-            getattr(self, '_last_size', ''),
-            getattr(self, '_last_speed', ''),
-            getattr(self, '_last_eta', ''))
+        self.progress.set_pct(pct)
+        self.download_progress.emit(
+            self._url, pct, self._last_size, self._last_speed, self._last_eta,
+        )
 
     def _on_speed(self, s):
         self._last_speed = s
-        self._refresh_info()
+        self.progress.set_speed_text(s)
 
     def _on_downloaded(self, s):
         self._last_size = s
-        self._refresh_info()
+        self.progress.set_size_text(s)
 
     def _on_eta(self, s):
         self._last_eta = s
-        self._refresh_info()
-
-    def _refresh_info(self):
-        parts = []
-        if getattr(self, '_last_size', ''):  parts.append(self._last_size)
-        if getattr(self, '_last_speed', ''): parts.append(self._last_speed)
-        if getattr(self, '_last_eta', ''):   parts.append(f"ETA {self._last_eta}")
-        self.info_label.setText("  •  ".join(parts))
+        self.progress.set_eta_text(s)
 
     def _on_finished(self, msg):
-        self.start_btn.setVisible(False)
-        self.cancel_btn.setVisible(False)
         if msg == "Finished":
-            self.progress_bar.setValue(100)
-            self.info_label.setText("Download complete.")
-            self.open_file_btn.setVisible(True)
+            self.progress.mark_complete()
+            # Swap the in-flight footer (Cancel / Download) for the post-finish
+            # pair (Open Folder / Open File), matching Stream + YouTube.
+            self.cancel_btn.setVisible(False)
+            self.primary_btn.setVisible(False)
             self.open_folder_btn.setVisible(True)
+            self.open_file_btn.setVisible(True)
         else:
-            self.info_label.setText(f"Status: {msg}")
+            self.progress.mark_error(f"Status: {msg}")
+            self.primary_btn.setText("Retry")
+            self.primary_btn.setStyleSheet(_dialog_btn_qss(self.theme, "primaryGreen"))
+            self.primary_btn.setEnabled(True)
+            self.primary_btn.clicked.disconnect()
+            self.primary_btn.clicked.connect(self._retry)
         self.download_finished.emit(self._url, msg)
 
-    def _cancel(self):
-        if self.dl_thread and self.dl_thread.isRunning():
-            self.dl_thread.stop()
-        self.cancel_btn.setEnabled(False)
-
-    def _open_file(self):
-        if self._dl_path and os.path.exists(self._dl_path):
-            subprocess.Popen(['xdg-open', self._dl_path])
-        self.close()
+    def _retry(self):
+        # Reset progress state and reconnect the primary button to start.
+        self.progress.mark_idle()
+        self.primary_btn.setText("Download")
+        self.primary_btn.setStyleSheet(_dialog_btn_qss(self.theme, "primaryGreen"))
+        self.primary_btn.clicked.disconnect()
+        self.primary_btn.clicked.connect(self._on_primary_clicked)
+        self._start_download()
 
     def _open_folder(self):
-        folder = os.path.dirname(self._dl_path) if self._dl_path else ''
+        folder = os.path.dirname(self._dl_path) if self._dl_path else self.save_dir_edit.text().strip()
         if folder and os.path.exists(folder):
             subprocess.Popen(['xdg-open', folder])
         self.close()
+
+    def _open_downloaded_file(self):
+        path = getattr(self, '_dl_path', '')
+        if path and os.path.exists(path):
+            subprocess.Popen(['xdg-open', path])
+        elif path:
+            subprocess.Popen(['xdg-open', os.path.dirname(path)])
+        self.close()
+
+    def _open_downloaded_folder(self):
+        path = getattr(self, '_dl_path', '')
+        folder = os.path.dirname(path) if path else self.save_dir_edit.text().strip()
+        if folder and os.path.exists(folder):
+            subprocess.Popen(['xdg-open', folder])
+        self.close()
+
+
+# ── Variant C sidebar hero card ──────────────────────────────────────────────
+class _HeroBarColumn(QWidget):
+    """One clickable day-column in the hero card's 7-bar week chart."""
+    def __init__(self, hero, idx):
+        super().__init__(hero)
+        self._hero = hero
+        self._idx = idx
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFixedHeight(58)  # bar(42) + gap(4) + label(~12)
+        self.setMinimumWidth(16)
+
+    def mousePressEvent(self, ev):
+        if ev.button() == Qt.MouseButton.LeftButton:
+            self._hero.set_selected(self._idx)
+        super().mousePressEvent(ev)
+
+    def paintEvent(self, ev):
+        from PyQt6.QtGui import QFont as _QFont
+        day = self._hero._days[self._idx] if self._idx < len(self._hero._days) else None
+        if day is None:
+            return
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        w, h = self.width(), self.height()
+        bar_area_h = 42
+        gap = 4
+        label_h = h - bar_area_h - gap
+        is_sel = (self._idx == self._hero._selected_idx)
+        is_today = day["is_today"]
+        # Column background tint when selected
+        if is_sel:
+            col_path = QPainterPath()
+            col_path.addRoundedRect(QRectF(0, 0, w, bar_area_h + gap + label_h), 6, 6)
+            p.fillPath(col_path, QColor(96, 165, 250, int(0.12 * 255)))
+        # Bar geometry
+        v = max(0.0, min(1.0, float(day.get("v", 0.0))))
+        bar_h = max(3, int(round(bar_area_h * v))) if v > 0 else 3
+        bar_w = max(6, w - 6)
+        bar_x = (w - bar_w) // 2
+        bar_y = bar_area_h - bar_h
+        bar_rect = QRectF(bar_x, bar_y, bar_w, bar_h)
+        bar_path = QPainterPath()
+        bar_path.addRoundedRect(bar_rect, 2, 2)
+        if is_sel:
+            grad = QLinearGradient(0, bar_y, 0, bar_y + bar_h)
+            grad.setColorAt(0.0, QColor("#60a5fa"))
+            grad.setColorAt(1.0, QColor("#2563eb"))
+            # Glow
+            for i, alpha in ((4, 30), (2, 70)):
+                glow = QPainterPath()
+                glow.addRoundedRect(bar_rect.adjusted(-i, -i, i, i), 4, 4)
+                p.fillPath(glow, QColor(59, 130, 246, alpha))
+            p.fillPath(bar_path, QBrush(grad))
+        elif is_today:
+            p.fillPath(bar_path, QColor(96, 165, 250, int(0.45 * 255)))
+        else:
+            p.fillPath(bar_path, QColor(255, 255, 255, int(0.18 * 255)))
+        # Day label
+        if is_sel:
+            label_color = QColor("#60a5fa")
+            weight = QFont.Weight.ExtraBold
+        elif is_today:
+            label_color = QColor("#cbd5e1")
+            weight = QFont.Weight.Medium
+        else:
+            label_color = QColor("#64748b")
+            weight = QFont.Weight.Medium
+        font = _QFont(self._hero._font_family)
+        font.setPointSizeF(7.5)
+        font.setWeight(weight)
+        p.setFont(font)
+        p.setPen(label_color)
+        from PyQt6.QtCore import QRectF as _QRectF
+        p.drawText(_QRectF(0, bar_area_h + gap, w, label_h),
+                   int(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop),
+                   day["label"])
+        p.end()
+
+
+class _SidebarHeroCard(QWidget):
+    """Variant C dashboard hero card: gradient bg + orb + day stats + week chart."""
+    def __init__(self, parent=None, font_family="IBM Plex Sans", mono_family="IBM Plex Mono",
+                 bolt_svg_path=None):
+        super().__init__(parent)
+        self.setObjectName("heroCard")
+        self._font_family = font_family
+        self._mono_family = mono_family
+        self._bolt_path = bolt_svg_path
+        self._days = []
+        self._selected_idx = 6
+        self.setMinimumHeight(220)
+        self._build()
+
+    def _build(self):
+        from PyQt6.QtWidgets import QGridLayout
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(12, 12, 12, 14)
+        outer.setSpacing(0)
+
+        # Header: bolt + day label + date
+        hdr = QHBoxLayout()
+        hdr.setContentsMargins(0, 0, 0, 0)
+        hdr.setSpacing(6)
+        self._bolt_lbl = QLabel()
+        self._bolt_lbl.setFixedSize(12, 12)
+        self._bolt_lbl.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        if self._bolt_path and os.path.exists(self._bolt_path):
+            try:
+                self._bolt_lbl.setPixmap(_render_svg_pixmap(self._bolt_path, 12))
+            except Exception:
+                pass
+        hdr.addWidget(self._bolt_lbl, 0, Qt.AlignmentFlag.AlignVCenter)
+        self._day_lbl = QLabel("TODAY")
+        self._day_lbl.setStyleSheet(
+            f"color:#cbd5e1; font-family:'{self._font_family}'; font-size:10px;"
+            "font-weight:800; letter-spacing:1.2px; background:transparent;"
+        )
+        hdr.addWidget(self._day_lbl, 0, Qt.AlignmentFlag.AlignVCenter)
+        hdr.addStretch()
+        self._date_lbl = QLabel("")
+        self._date_lbl.setStyleSheet(
+            f"color:#64748b; font-family:'{self._mono_family}'; font-size:10px;"
+            "background:transparent;"
+        )
+        hdr.addWidget(self._date_lbl, 0, Qt.AlignmentFlag.AlignVCenter)
+        outer.addLayout(hdr)
+        outer.addSpacing(10)
+
+        # Big number
+        self._big_lbl = QLabel("0.00")
+        self._big_lbl.setTextFormat(Qt.TextFormat.RichText)
+        self._big_lbl.setStyleSheet("background:transparent;")
+        outer.addWidget(self._big_lbl)
+        outer.addSpacing(12)
+
+        # 3-stat grid
+        stats_row = QHBoxLayout()
+        stats_row.setContentsMargins(0, 0, 0, 0)
+        stats_row.setSpacing(5)
+        self._stat_cells = []
+        self._stat_value_lbls = []
+        for label_text in ("FILES", "ACTIVE", "UPTIME"):
+            cell = QWidget()
+            cell.setObjectName("heroStatCell")
+            cell.setStyleSheet("""
+                QWidget#heroStatCell {
+                    background: rgba(255,255,255,0.06);
+                    border: 1px solid rgba(255,255,255,0.08);
+                    border-radius: 8px;
+                }
+            """)
+            cv = QVBoxLayout(cell)
+            cv.setContentsMargins(3, 7, 3, 7)
+            cv.setSpacing(2)
+            lbl = QLabel(label_text)
+            lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            lbl.setStyleSheet(
+                f"color:#94a3b8; font-family:'{self._font_family}'; font-size:8px;"
+                "font-weight:700; letter-spacing:0.8px; background:transparent;"
+                "border: none;"
+            )
+            val = QLabel("—")
+            val.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            val.setStyleSheet(
+                f"color:#f1f5f9; font-family:'{self._mono_family}'; font-size:11px;"
+                "font-weight:700; background:transparent; border:none;"
+            )
+            cv.addWidget(lbl)
+            cv.addWidget(val)
+            stats_row.addWidget(cell, 1)
+            self._stat_cells.append(cell)
+            self._stat_value_lbls.append(val)
+        outer.addLayout(stats_row)
+        outer.addSpacing(12)
+
+        # 7-bar chart
+        chart_row = QHBoxLayout()
+        chart_row.setContentsMargins(0, 0, 0, 0)
+        chart_row.setSpacing(4)
+        self._bars = []
+        for i in range(7):
+            col = _HeroBarColumn(self, i)
+            chart_row.addWidget(col, 1)
+            self._bars.append(col)
+        outer.addLayout(chart_row)
+
+    def set_data(self, days, selected_idx=None):
+        """days: list of 7 dicts. Selected resets to today when bounds shift."""
+        self._days = days
+        if selected_idx is not None:
+            self._selected_idx = max(0, min(6, selected_idx))
+        elif self._selected_idx >= len(days):
+            self._selected_idx = len(days) - 1
+        self._refresh()
+
+    def set_selected(self, idx):
+        if 0 <= idx < len(self._days):
+            self._selected_idx = idx
+            self._refresh()
+
+    def _refresh(self):
+        if not self._days:
+            return
+        d = self._days[self._selected_idx]
+        # Header
+        if d["is_today"]:
+            self._day_lbl.setText("TODAY")
+            self._date_lbl.setText("")
+        else:
+            self._day_lbl.setText(d["weekday_full"].upper())
+            self._date_lbl.setText(d["date_str"])
+        # Big number
+        gb = d["gb"]
+        self._big_lbl.setText(
+            f"<span style=\"font-family:'{self._font_family}';font-size:28px;font-weight:800;color:#ffffff;letter-spacing:-1px;\">{gb:.2f}</span>"
+            f"<span style=\"font-family:'{self._font_family}';font-size:13px;color:#94a3b8;\">&nbsp;GB</span>"
+            f"<span style=\"font-family:'{self._font_family}';font-size:11px;color:#94a3b8;\">&nbsp;downloaded</span>"
+        )
+        # 3-stat values
+        files_val, active_val, uptime_val = d["files_text"], d["active_text"], d["uptime_text"]
+        active_color = "#22c55e" if d.get("active_nonzero") else "#f1f5f9"
+        self._stat_value_lbls[0].setStyleSheet(
+            f"color:#f1f5f9; font-family:'{self._mono_family}'; font-size:11px;"
+            "font-weight:700; background:transparent; border:none;"
+        )
+        self._stat_value_lbls[0].setText(files_val)
+        self._stat_value_lbls[1].setStyleSheet(
+            f"color:{active_color}; font-family:'{self._mono_family}'; font-size:11px;"
+            "font-weight:700; background:transparent; border:none;"
+        )
+        self._stat_value_lbls[1].setText(active_val)
+        self._stat_value_lbls[2].setStyleSheet(
+            f"color:#f1f5f9; font-family:'{self._mono_family}'; font-size:11px;"
+            "font-weight:700; background:transparent; border:none;"
+        )
+        self._stat_value_lbls[2].setText(uptime_val)
+        # Repaint chart
+        for b in self._bars:
+            b.update()
+
+    def paintEvent(self, ev):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        r = self.rect()
+        path = QPainterPath()
+        path.addRoundedRect(QRectF(r), 14, 14)
+        p.setClipPath(path)
+        grad = QLinearGradient(QPointF(r.left(), r.top()), QPointF(r.right(), r.bottom()))
+        grad.setColorAt(0.0, QColor("#1e3a8a"))
+        grad.setColorAt(0.70, QColor("#0f172a"))
+        grad.setColorAt(1.0, QColor("#0f172a"))
+        p.fillPath(path, QBrush(grad))
+        # Decorative orb: right:-30, top:-30, 100x100
+        cx = r.width() - 30 + 50
+        cy = -30 + 50
+        orb = QRadialGradient(QPointF(cx, cy), 50)
+        orb.setColorAt(0.0, QColor(59, 130, 246, int(0.30 * 255)))
+        orb.setColorAt(0.70, QColor(59, 130, 246, 0))
+        orb.setColorAt(1.0, QColor(59, 130, 246, 0))
+        p.setBrush(QBrush(orb))
+        p.setPen(Qt.PenStyle.NoPen)
+        p.drawEllipse(QPointF(cx, cy), 50, 50)
+        p.end()
 
 
 # ── Main window ──────────────────────────────────────────────────────────────
@@ -2982,28 +5658,34 @@ class DownloadManager(QMainWindow):
         self.row_progress = {}
         self.yt_url_to_row = {}
         self.history = load_history()
+        self._session_start = time.time()
         # URL → {mode, quality, audio_fmt} for YT resume without re-fetching formats
         self.yt_settings = {e["url"]: e["yt_settings"] for e in self.history
                             if e.get("url") and e.get("yt_settings")}
         self._settings = load_settings()
         self.dark_mode = self._settings.get("dark_mode", False)
         self.notify_enabled = self._settings.get("notifications", True)
+        # Session-only: deliberately not persisted so a forgotten toggle can't
+        # unexpectedly power off the machine on a later launch.
+        self.shutdown_on_finish = False
+        self._shutdown_dialog = None
 
         script_dir = os.path.dirname(os.path.abspath(__file__))
         app_icon = QIcon()
-        for candidate in [
-            os.path.join(script_dir, "icons", "linux-downloader.svg"),
-            os.path.join(script_dir, "linux-downloader.svg"),
-        ]:
+        # Prefer the pre-rendered PNG set over the SVG. Qt's QSvgRenderer mangles
+        # the app icon's radial gradients / rounded-corner clip-path (renders it
+        # as a harsh near-rectangle); the PNGs are rendered with librsvg so they
+        # match the design exactly. Feed every size so Qt picks the right bitmap.
+        for sz in (16, 32, 48, 64, 128, 256, 512):
+            candidate = os.path.join(script_dir, "icons", "linux-downloader-%d.png" % sz)
             if os.path.exists(candidate):
-                app_icon = QIcon(candidate)
-                break
+                app_icon.addFile(candidate, QSize(sz, sz))
         if app_icon.isNull():
             app_icon = QIcon.fromTheme("linux-downloader")
         if app_icon.isNull():
             for candidate in [
-                os.path.join(script_dir, "icons", "linux-downloader-256.png"),
-                os.path.join(script_dir, "icons", "linux-downloader-128.png"),
+                os.path.join(script_dir, "icons", "linux-downloader.svg"),
+                os.path.join(script_dir, "linux-downloader.svg"),
             ]:
                 if os.path.exists(candidate):
                     app_icon = QIcon(candidate)
@@ -3022,6 +5704,32 @@ class DownloadManager(QMainWindow):
             if fams:
                 self._title_font_family = fams[0]
 
+        # Load bundled IBM Plex Sans + Mono for the Variant C dashboard sidebar.
+        self._plex_sans_family = "IBM Plex Sans"
+        self._mono_font_family = "IBM Plex Mono"
+        fonts_dir = os.path.join(script_dir, "assets", "fonts")
+        plex_sans_files = [
+            "IBMPlexSans-Regular.ttf", "IBMPlexSans-Medium.ttf",
+            "IBMPlexSans-SemiBold.ttf", "IBMPlexSans-Bold.ttf",
+        ]
+        plex_mono_files = [
+            "IBMPlexMono-Regular.ttf", "IBMPlexMono-SemiBold.ttf",
+        ]
+        for fname in plex_sans_files:
+            fpath = os.path.join(fonts_dir, fname)
+            if os.path.exists(fpath):
+                fid = QFontDatabase.addApplicationFont(fpath)
+                fams = QFontDatabase.applicationFontFamilies(fid)
+                if fams:
+                    self._plex_sans_family = fams[0]
+        for fname in plex_mono_files:
+            fpath = os.path.join(fonts_dir, fname)
+            if os.path.exists(fpath):
+                fid = QFontDatabase.addApplicationFont(fpath)
+                fams = QFontDatabase.applicationFontFamilies(fid)
+                if fams:
+                    self._mono_font_family = fams[0]
+
         self._build_ui()
         self._load_history_into_table()
         self._apply_theme()
@@ -3035,6 +5743,11 @@ class DownloadManager(QMainWindow):
         self.taskbar_timer = QTimer()
         self.taskbar_timer.timeout.connect(self._update_taskbar_progress)
         self.taskbar_timer.start(1000)
+        # Refresh the hero card every 30s so the UPTIME stat ticks even when
+        # no downloads are active.
+        self._hero_timer = QTimer()
+        self._hero_timer.timeout.connect(self._refresh_hero_card)
+        self._hero_timer.start(30_000)
 
     def _theme(self):
         return THEMES["dark"] if self.dark_mode else THEMES["light"]
@@ -3148,10 +5861,17 @@ class DownloadManager(QMainWindow):
         item.setToolTip(status_text)
 
     def _insert_row_items(self, row, filename, path, url, status, size, category, date="", progress=None):
-        name_item = QTableWidgetItem(f"  {filename}")
+        # The file-list delegate paints the icon and sub-meta itself, so the
+        # display string is the bare filename and the icon comes from the
+        # category data role rather than QTableWidgetItem.setIcon().
+        name_item = QTableWidgetItem(filename)
         name_item.setData(Qt.ItemDataRole.UserRole, path)
         name_item.setData(Qt.ItemDataRole.UserRole + 2, url)
-        name_item.setIcon(get_file_icon(filename))
+        name_item.setData(FL_ROLE_CATEGORY, category)
+        # Sub-meta shows the file's intrinsic size — strip any "done / " prefix
+        # that the size string might carry (e.g. finished rows save "X / X").
+        meta_size = size.split(" / ", 1)[1].strip() if isinstance(size, str) and " / " in size else size
+        name_item.setData(FL_ROLE_TOTAL, meta_size)
         name_item.setFlags(name_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
 
         prog_item = QTableWidgetItem()
@@ -3167,7 +5887,6 @@ class DownloadManager(QMainWindow):
         eta_item  = QTableWidgetItem("—")
 
         for item in [dl_item, spd_item, stat_item, eta_item]:
-            item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
 
         self._apply_status_style(stat_item, status)
@@ -3178,11 +5897,10 @@ class DownloadManager(QMainWindow):
         self.table.setItem(row, 3, spd_item)
         self.table.setItem(row, 4, eta_item)
         date_item = QTableWidgetItem(date)
-        date_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
         date_item.setFlags(date_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
         self.table.setItem(row, 5, stat_item)
         self.table.setItem(row, 6, date_item)
-        self.table.setRowHeight(row, 40)
+        self.table.setRowHeight(row, FL_ROW_HEIGHT)
 
         self.all_rows.append({"row": row, "category": category})
         self.row_progress[row] = _progress
@@ -3222,6 +5940,216 @@ class DownloadManager(QMainWindow):
             return f'{attr}="rgb({r},{g},{b})" {opacity_attr}="{a}"'
 
         return QByteArray(rgba_re.sub(repl, svg).encode("utf-8"))
+
+    def _render_category_icon(self, label, size):
+        """Render the gorgeous squircle SVG for a sidebar category at `size` px."""
+        filename = CATEGORY_ICON_FILE.get(label)
+        if not filename:
+            return None
+        icon_path = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            "assets", "category_icons", filename,
+        )
+        if not os.path.exists(icon_path):
+            return None
+        try:
+            return _render_svg_pixmap(icon_path, size)
+        except Exception:
+            return None
+
+    def _parse_size_to_bytes(self, size_str):
+        """Parse strings like '12.0 MB / 12.0 MB' or '285.9 MB' → bytes (first number)."""
+        if not size_str:
+            return 0
+        try:
+            first = size_str.split("/")[0].strip()
+            parts = first.split()
+            if len(parts) < 2:
+                return 0
+            num = float(parts[0])
+            unit = parts[1].upper()
+        except Exception:
+            return 0
+        mult = {"B": 1, "KB": 1024, "MB": 1024 ** 2, "GB": 1024 ** 3, "TB": 1024 ** 4}
+        return int(num * mult.get(unit, 0))
+
+    def _format_uptime(self, seconds):
+        seconds = max(0, int(seconds))
+        h, rem = divmod(seconds, 3600)
+        m = rem // 60
+        return f"{h}h {m:02d}m"
+
+    def _compute_week_data(self):
+        """Build the 7-day list (Monday → Sunday of the current week) for the hero card."""
+        import datetime as _dt
+        today = _dt.date.today()
+        monday = today - _dt.timedelta(days=today.weekday())
+        weekday_initials = ["M", "T", "W", "T", "F", "S", "S"]
+        weekday_full = [
+            "MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY",
+            "FRIDAY", "SATURDAY", "SUNDAY",
+        ]
+        # Aggregate finished history entries by YYYY-MM-DD
+        per_day_bytes = {}
+        per_day_files = {}
+        for entry in self.history:
+            date_str = entry.get("date", "")
+            if not date_str:
+                continue
+            day_key = date_str.split(" ")[0]
+            per_day_bytes[day_key] = per_day_bytes.get(day_key, 0) + self._parse_size_to_bytes(entry.get("size", ""))
+            per_day_files[day_key] = per_day_files.get(day_key, 0) + 1
+        # Active counts from the live table
+        active_now = 0
+        total_now = 0
+        if hasattr(self, "table"):
+            for row in range(self.table.rowCount()):
+                total_now += 1
+                stat = self.table.item(row, 5)
+                if stat and stat.text() == "Downloading":
+                    active_now += 1
+        # Build week dicts
+        days = []
+        gb_values = []
+        for i in range(7):
+            d = monday + _dt.timedelta(days=i)
+            key = d.strftime("%Y-%m-%d")
+            gb = per_day_bytes.get(key, 0) / (1024 ** 3)
+            gb_values.append(gb)
+            days.append({
+                "date": d,
+                "key": key,
+                "label": weekday_initials[i],
+                "weekday_full": weekday_full[i],
+                "date_str": d.strftime("%b %d").lstrip("0").replace(" 0", " "),
+                "is_today": (d == today),
+                "gb": gb,
+                "files": per_day_files.get(key, 0),
+            })
+        max_gb = max(gb_values) if gb_values else 0
+        for d in days:
+            d["v"] = (d["gb"] / max_gb) if max_gb > 0 else 0.0
+            d["files_text"] = str(d["files"])
+            if d["is_today"]:
+                d["active_text"] = f"{active_now}/{total_now}" if total_now else "0/0"
+                d["active_nonzero"] = active_now > 0
+                d["uptime_text"] = self._format_uptime(time.time() - self._session_start)
+            else:
+                d["active_text"] = "—"
+                d["active_nonzero"] = False
+                d["uptime_text"] = "—"
+        return days
+
+    def _refresh_hero_card(self):
+        if not hasattr(self, "_hero_card"):
+            return
+        days = self._compute_week_data()
+        prev_idx = getattr(self._hero_card, "_selected_idx", 6)
+        # On first paint, default to today (last bar). After that, preserve user click.
+        if not getattr(self, "_hero_initialized", False):
+            today_idx = next((i for i, d in enumerate(days) if d["is_today"]), 6)
+            self._hero_card.set_data(days, selected_idx=today_idx)
+            self._hero_initialized = True
+        else:
+            self._hero_card.set_data(days, selected_idx=prev_idx)
+
+    def _build_storage_card(self):
+        """Create the bottom-of-sidebar storage usage card (Variant A spec)."""
+        from PyQt6.QtWidgets import QProgressBar
+
+        card = QWidget()
+        card.setObjectName("storageCard")
+        outer = QVBoxLayout(card)
+        outer.setContentsMargins(14, 8, 14, 14)
+        outer.setSpacing(0)
+
+        inner = QWidget()
+        inner.setObjectName("storageInner")
+        v = QVBoxLayout(inner)
+        v.setContentsMargins(13, 12, 13, 12)
+        v.setSpacing(7)
+
+        # Header row: HDD glyph + caption
+        cap_row = QHBoxLayout()
+        cap_row.setContentsMargins(0, 0, 0, 0)
+        cap_row.setSpacing(7)
+        glyph_color = "#cbd5e1" if self.dark_mode else "#475569"
+        self._storage_glyph = QLabel()
+        self._storage_glyph.setObjectName("storageGlyph")
+        self._storage_glyph.setPixmap(
+            _render_svg_str_pixmap(_TILE_SVG_HDD, glyph_color, size=14)
+        )
+        self._storage_glyph.setFixedSize(14, 14)
+        cap_row.addWidget(self._storage_glyph)
+        cap = QLabel("DOWNLOAD STORAGE")
+        cap.setObjectName("storageCap")
+        cap_row.addWidget(cap)
+        cap_row.addStretch()
+        v.addLayout(cap_row)
+
+        # Value row: "142.8 GB" + "of 500 GB"
+        val_row = QHBoxLayout()
+        val_row.setContentsMargins(0, 0, 0, 0)
+        val_row.setSpacing(0)
+        self._storage_value = QLabel("— GB")
+        self._storage_value.setObjectName("storageValue")
+        val_row.addWidget(self._storage_value)
+        val_row.addStretch()
+        self._storage_total = QLabel("")
+        self._storage_total.setObjectName("storageTotal")
+        val_row.addWidget(self._storage_total)
+        v.addLayout(val_row)
+
+        # Progress bar
+        self._storage_bar = QProgressBar()
+        self._storage_bar.setObjectName("storageBar")
+        self._storage_bar.setRange(0, 100)
+        self._storage_bar.setValue(0)
+        self._storage_bar.setTextVisible(False)
+        self._storage_bar.setFixedHeight(6)
+        v.addWidget(self._storage_bar)
+
+        # Footer: "% used"  + "GB free"
+        foot_row = QHBoxLayout()
+        foot_row.setContentsMargins(0, 0, 0, 0)
+        foot_row.setSpacing(0)
+        self._storage_pct = QLabel("")
+        self._storage_pct.setObjectName("storagePct")
+        foot_row.addWidget(self._storage_pct)
+        foot_row.addStretch()
+        self._storage_free = QLabel("")
+        self._storage_free.setObjectName("storageFree")
+        foot_row.addWidget(self._storage_free)
+        v.addLayout(foot_row)
+
+        outer.addWidget(inner)
+        self._refresh_storage_card()
+        return card
+
+    def _refresh_storage_card(self):
+        """Recompute disk-usage figures for the storage card."""
+        if not hasattr(self, "_storage_value"):
+            return
+        target = os.path.join(HOME, "Downloads")
+        if not os.path.exists(target):
+            target = HOME
+        try:
+            usage = shutil.disk_usage(target)
+        except Exception:
+            return
+        gb = 1024 ** 3
+        used_gb = (usage.total - usage.free) / gb
+        total_gb = usage.total / gb
+        free_gb = usage.free / gb
+        pct = (used_gb / total_gb * 100) if total_gb else 0
+        self._storage_value.setText(
+            f"<span style='font-size:15px;font-weight:700;'>{used_gb:.1f}</span> "
+            f"<span style='font-size:11px;font-weight:500;color:#64748b;'>GB</span>"
+        )
+        self._storage_total.setText(f"of {total_gb:.0f} GB")
+        self._storage_pct.setText(f"{pct:.0f}% used")
+        self._storage_free.setText(f"{free_gb:.1f} GB free")
+        self._storage_bar.setValue(int(round(pct)))
 
     def _make_toolbar_svg_btn(self, icon_filename, tooltip, label_text,
                               _unused_color=None, _unused_bg=None):
@@ -3378,6 +6306,11 @@ class DownloadManager(QMainWindow):
         self._notif_action.setChecked(self.notify_enabled)
         self._notif_action.triggered.connect(self._toggle_notifications)
         view_menu.addAction(self._notif_action)
+        self._shutdown_action = QAction("Shut Down When Downloads Finish", self)
+        self._shutdown_action.setCheckable(True)
+        self._shutdown_action.setChecked(self.shutdown_on_finish)
+        self._shutdown_action.triggered.connect(self._toggle_shutdown_on_finish)
+        view_menu.addAction(self._shutdown_action)
         view_menu.addSeparator()
         reset_cols_action = QAction("Reset Column Widths", self)
         reset_cols_action.triggered.connect(self._reset_column_widths)
@@ -3400,99 +6333,149 @@ class DownloadManager(QMainWindow):
         root.setSpacing(0)
 
         self._sidebar = QWidget()
-        self._sidebar.setFixedWidth(210)
+        self._sidebar.setFixedWidth(250)
         self._sidebar.setObjectName("sidebar")
         sidebar_layout = QVBoxLayout(self._sidebar)
-        sidebar_layout.setContentsMargins(12, 0, 12, 12)
+        sidebar_layout.setContentsMargins(0, 0, 0, 0)
         sidebar_layout.setSpacing(0)
 
-        from PyQt6.QtWidgets import QFrame
+        from PyQt6.QtWidgets import QFrame, QScrollArea
 
         self._sidebar_title = QWidget()
         title_layout = QHBoxLayout(self._sidebar_title)
-        title_layout.setContentsMargins(8, 16, 8, 16)
-        title_layout.setSpacing(12)
+        title_layout.setContentsMargins(18, 16, 18, 12)
+        title_layout.setSpacing(11)
 
         icon_label = QLabel()
-        icon_label.setFixedSize(36, 36)
+        icon_label.setFixedSize(34, 34)
         icon_label.setScaledContents(True)
-        pix = self.app_icon.pixmap(36, 36) if not self.app_icon.isNull() else None
+        pix = self.app_icon.pixmap(34, 34) if not self.app_icon.isNull() else None
         if pix is None or pix.isNull():
             script_dir = os.path.dirname(os.path.abspath(__file__))
             png_path = os.path.join(script_dir, "icons", "linux-downloader-128.png")
             if os.path.exists(png_path):
-                pix = QPixmap(png_path).scaled(36, 36, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+                pix = QPixmap(png_path).scaled(34, 34, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
         if pix and not pix.isNull():
             icon_label.setPixmap(pix)
         title_layout.addWidget(icon_label, 0, Qt.AlignmentFlag.AlignVCenter)
 
+        wordmark_col = QVBoxLayout()
+        wordmark_col.setContentsMargins(0, 0, 0, 0)
+        wordmark_col.setSpacing(1)
         self._title_label = GradientTextLabel(
             "LDM", family=self._title_font_family,
-            size=22, letter_spacing=5,
+            size=16, letter_spacing=3,
         )
-        title_layout.addWidget(self._title_label, 0, Qt.AlignmentFlag.AlignVCenter)
+        wordmark_col.addWidget(self._title_label, 0, Qt.AlignmentFlag.AlignLeft)
+        self._title_subtitle = FlatBearingLabel("DOWNLOAD MANAGER")
+        self._title_subtitle.setObjectName("brandSubtitle")
+        wordmark_col.addWidget(self._title_subtitle, 0, Qt.AlignmentFlag.AlignLeft)
+        title_layout.addLayout(wordmark_col)
         title_layout.addStretch()
         sidebar_layout.addWidget(self._sidebar_title)
 
-        self._sidebar_sep = QFrame()
-        self._sidebar_sep.setObjectName("sidebarSep")
-        self._sidebar_sep.setFixedHeight(1)
-        sidebar_layout.addSpacing(4)
-        sidebar_layout.addWidget(self._sidebar_sep)
-        sidebar_layout.addSpacing(10)
+        # ── Variant C hero (dashboard) card ───────────────────────────────────
+        hero_wrap = QWidget()
+        hero_wrap_layout = QHBoxLayout(hero_wrap)
+        hero_wrap_layout.setContentsMargins(14, 0, 14, 14)
+        hero_wrap_layout.setSpacing(0)
+        bolt_path = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            "assets", "sidebar_icons", "bolt.svg",
+        )
+        self._hero_card = _SidebarHeroCard(
+            font_family=getattr(self, "_plex_sans_family", "IBM Plex Sans"),
+            mono_family=getattr(self, "_mono_font_family", "IBM Plex Mono"),
+            bolt_svg_path=bolt_path,
+        )
+        hero_wrap_layout.addWidget(self._hero_card)
+        sidebar_layout.addWidget(hero_wrap)
 
+        # CATEGORIES caption row: "CATEGORIES"  ……  "72 total"
+        cat_caption_wrap = QWidget()
+        cat_caption_layout = QHBoxLayout(cat_caption_wrap)
+        cat_caption_layout.setContentsMargins(14, 0, 14, 8)
+        cat_caption_layout.setSpacing(0)
         self._cat_section_label = QLabel("CATEGORIES")
         self._cat_section_label.setObjectName("catSectionLabel")
-        sidebar_layout.addWidget(self._cat_section_label)
+        cat_caption_layout.addWidget(self._cat_section_label)
+        cat_caption_layout.addStretch()
+        self._cat_total_label = QLabel("0 total")
+        self._cat_total_label.setObjectName("catTotalLabel")
+        cat_caption_layout.addWidget(self._cat_total_label)
+        sidebar_layout.addWidget(cat_caption_wrap)
+
+        # Hidden sentinel kept for backwards compatibility (older code may touch it).
+        self._sidebar_sep = QFrame()
+        self._sidebar_sep.setObjectName("sidebarSep")
+        self._sidebar_sep.setFixedHeight(0)
+        self._sidebar_sep.setVisible(False)
 
         self._cat_scroll = QWidget()
         self._cat_scroll.setObjectName("catScroll")
         cat_layout = QVBoxLayout(self._cat_scroll)
-        cat_layout.setContentsMargins(0, 4, 0, 4)
+        cat_layout.setContentsMargins(8, 0, 8, 0)
         cat_layout.setSpacing(2)
 
         self._cat_buttons = []
         self._cat_badges = []
-        self._cat_accents = []
+        self._cat_accents = []  # kept (always invisible) so theme code can address them
+        self._cat_icons = []
+        self._cat_text_labels = []
         self._current_cat_row = 0
         for i, (label, emoji, color) in enumerate(CATEGORIES):
             btn = QWidget()
             btn.setObjectName(f"catBtn_{i}")
             btn.setAttribute(Qt.WidgetAttribute.WA_Hover, True)
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
-            btn.setFixedHeight(40)
             btn_layout = QHBoxLayout(btn)
-            btn_layout.setContentsMargins(0, 0, 14, 0)
-            btn_layout.setSpacing(0)
+            btn_layout.setContentsMargins(8, 5, 8, 5)
+            btn_layout.setSpacing(9)
 
+            # Accent kept zero-width — Variant C has no left-bar accent.
             accent = QWidget()
             accent.setObjectName(f"catAccent_{i}")
-            accent.setFixedWidth(3)
-            accent.setFixedHeight(22)
-            btn_layout.addWidget(accent)
-            btn_layout.addSpacing(15)
+            accent.setFixedWidth(0)
+            accent.setFixedHeight(0)
+            accent.setVisible(False)
 
-            text_label = QLabel(f"{emoji}  {label}")
+            icon_lbl = QLabel()
+            icon_lbl.setObjectName(f"catIcon_{i}")
+            icon_lbl.setFixedSize(22, 22)
+            icon_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            icon_lbl.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+            pix22 = self._render_category_icon(label, 22)
+            if pix22 is not None:
+                icon_lbl.setPixmap(pix22)
+            btn_layout.addWidget(icon_lbl, 0, Qt.AlignmentFlag.AlignVCenter)
+
+            text_label = QLabel(label)
             text_label.setObjectName(f"catText_{i}")
-            btn_layout.addWidget(text_label)
-            btn_layout.addStretch()
+            text_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+            btn_layout.addWidget(text_label, 1, Qt.AlignmentFlag.AlignVCenter)
 
             badge = QLabel("")
             badge.setObjectName(f"catBadge_{i}")
-            badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            badge.setFixedHeight(20)
-            badge.setMinimumWidth(22)
+            badge.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            badge.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
             badge.setVisible(False)
-            btn_layout.addWidget(badge)
+            btn_layout.addWidget(badge, 0, Qt.AlignmentFlag.AlignVCenter)
 
             btn.mousePressEvent = lambda e, idx=i: self._on_cat_clicked(idx)
             cat_layout.addWidget(btn)
             self._cat_buttons.append(btn)
             self._cat_badges.append(badge)
             self._cat_accents.append(accent)
+            self._cat_icons.append(icon_lbl)
+            self._cat_text_labels.append(text_label)
 
         cat_layout.addStretch()
         sidebar_layout.addWidget(self._cat_scroll, 1)
+
+        # ── Storage card ──────────────────────────────────────────────────────
+        self._storage_card = self._build_storage_card()
+        sidebar_layout.addWidget(self._storage_card)
+
         root.addWidget(self._sidebar)
 
         self._content_widget = QWidget()
@@ -3571,38 +6554,57 @@ class DownloadManager(QMainWindow):
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         for col in range(self.table.columnCount()):
             self.table.horizontalHeader().setSectionResizeMode(col, QHeaderView.ResizeMode.Interactive)
-        self.table.setColumnWidth(0, 270)
-        self.table.setColumnWidth(1, 190)
-        self.table.setColumnWidth(2, 100)
-        self.table.setColumnWidth(3, 85)
-        self.table.setColumnWidth(4, 70)
-        self.table.setColumnWidth(5, 90)
-        self.table.setColumnWidth(6, 145)
-        self.table.horizontalHeader().setStretchLastSection(True)
+        self.table.setColumnWidth(0, 360)
+        self.table.setColumnWidth(1, 220)
+        self.table.setColumnWidth(2, 150)
+        self.table.setColumnWidth(3, 0)
+        self.table.setColumnWidth(4, 0)
+        self.table.setColumnWidth(5, 140)
+        self.table.setColumnWidth(6, 160)
+        # Speed / ETA live in the bottom status chip instead of dedicated
+        # columns — see _refresh_status_chip().
+        self.table.setColumnHidden(3, True)
+        self.table.setColumnHidden(4, True)
+        self.table.horizontalHeader().setStretchLastSection(False)
+        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         self.table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         # ── Restore saved column widths ──────────────────────────────
         saved_widths = self._settings.get("column_widths", {})
         for col_str, width in saved_widths.items():
             self.table.setColumnWidth(int(col_str), width)
         self.table.horizontalHeader().setMinimumSectionSize(50)
-        self.table.setShowGrid(True)
+        self.table.setShowGrid(False)
         self.table.setWordWrap(False)
         self.table.setTextElideMode(Qt.TextElideMode.ElideRight)
         self.table.verticalHeader().setVisible(False)
-        self.table.setIconSize(QSize(18, 18))
-        self.table.setAlternatingRowColors(True)
+        self.table.verticalHeader().setDefaultSectionSize(FL_ROW_HEIGHT)
+        self.table.setIconSize(QSize(28, 28))
+        self.table.setAlternatingRowColors(False)
         self.table.setSortingEnabled(False)
         self.table.horizontalHeader().sectionClicked.connect(self._sort_by_column)
         self.table.horizontalHeader().sectionResized.connect(self._on_column_resized)
-        self.progress_delegate = ProgressDelegate(self.table)
-        self.table.setItemDelegateForColumn(1, self.progress_delegate)
-        self._filename_delegate = FilenameFontDelegate(parent=self.table)
-        self.table.setItemDelegateForColumn(0, self._filename_delegate)  # File Name (Bangla fallback)
-        self._numeric_delegate = NumericFontDelegate(
-            family=self._title_font_family, weight=QFont.Weight.Medium, parent=self.table)
-        self.table.setItemDelegateForColumn(2, self._numeric_delegate)  # Downloaded
-        self.table.setItemDelegateForColumn(3, self._numeric_delegate)  # Speed
-        self.table.setItemDelegateForColumn(4, self._numeric_delegate)  # ETA
+
+        # File-list redesign delegates — one per column. See the README in
+        # LDM_file_list_v1/ for the visual spec they implement.
+        sans = getattr(self, "_plex_sans_family", "IBM Plex Sans")
+        mono = getattr(self, "_mono_font_family", "IBM Plex Mono")
+        self._fl_name_delegate     = FlNameDelegate(self.table, sans, mono)
+        self._fl_progress_delegate = FlProgressDelegate(self.table, sans, mono)
+        self._fl_downloaded_delegate = FlDownloadedDelegate(self.table, sans, mono)
+        self._fl_speed_delegate    = FlSpeedDelegate(self.table, sans, mono)
+        self._fl_eta_delegate      = FlEtaDelegate(self.table, sans, mono)
+        self._fl_status_delegate   = FlStatusDelegate(self.table, sans, mono)
+        self._fl_date_delegate     = FlDateDelegate(self.table, sans, mono)
+        self.table.setItemDelegateForColumn(0, self._fl_name_delegate)
+        self.table.setItemDelegateForColumn(1, self._fl_progress_delegate)
+        self.table.setItemDelegateForColumn(2, self._fl_downloaded_delegate)
+        self.table.setItemDelegateForColumn(3, self._fl_speed_delegate)
+        self.table.setItemDelegateForColumn(4, self._fl_eta_delegate)
+        self.table.setItemDelegateForColumn(5, self._fl_status_delegate)
+        self.table.setItemDelegateForColumn(6, self._fl_date_delegate)
+        # Kept for compatibility with code that reads `progress_delegate`.
+        self.progress_delegate = self._fl_progress_delegate
+
         self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self.show_context_menu)
 
@@ -3640,11 +6642,38 @@ class DownloadManager(QMainWindow):
         self.table.model().rowsInserted.connect(lambda *_: self._update_empty_state())
         self.table.model().rowsRemoved.connect(lambda *_: self._update_empty_state())
 
-        # Status bar
+        # Status bar — summary text on the left, speed/ETA chip on the right.
+        # The chip surfaces speed and ETA for the currently selected
+        # downloading row (the columns themselves are hidden from the table).
+        self._status_row = QWidget()
+        self._status_row.setFixedHeight(28)
+        status_row_layout = QHBoxLayout(self._status_row)
+        status_row_layout.setContentsMargins(4, 0, 4, 0)
+        status_row_layout.setSpacing(12)
+
         self._status_bar = QLabel("Ready")
-        self._status_bar.setFixedHeight(24)
-        self._status_bar.setContentsMargins(4, 0, 4, 0)
-        content_layout.addWidget(self._status_bar)
+        status_row_layout.addWidget(self._status_bar, 1)
+
+        self._status_metric = QWidget()
+        self._status_metric.setObjectName("statusMetric")
+        metric_layout = QHBoxLayout(self._status_metric)
+        metric_layout.setContentsMargins(0, 0, 0, 0)
+        metric_layout.setSpacing(14)
+        mono = getattr(self, "_mono_font_family", "IBM Plex Mono")
+        speed_font = QFont(mono); speed_font.setPixelSize(12); speed_font.setWeight(QFont.Weight.Bold)
+        eta_font   = QFont(mono); eta_font.setPixelSize(12); eta_font.setWeight(QFont.Weight.Medium)
+        self._status_speed_label = QLabel("")
+        self._status_speed_label.setFont(speed_font)
+        self._status_speed_label.setStyleSheet("color: #16a34a; background: transparent;")
+        self._status_eta_label = QLabel("")
+        self._status_eta_label.setFont(eta_font)
+        self._status_eta_label.setStyleSheet("color: #475569; background: transparent;")
+        metric_layout.addWidget(self._status_speed_label)
+        metric_layout.addWidget(self._status_eta_label)
+        self._status_metric.hide()
+        status_row_layout.addWidget(self._status_metric, 0, Qt.AlignmentFlag.AlignRight)
+
+        content_layout.addWidget(self._status_row)
 
         root.addWidget(self._content_widget)
         outer.addWidget(body)
@@ -3706,48 +6735,50 @@ class DownloadManager(QMainWindow):
     def _apply_table_style(self):
         t = self._theme()
 
+        # Card chrome — white surface, 14px radius, thin border, soft shadow.
+        # Delegates paint each row's interior; the table itself only provides
+        # the outer card and the header strip.
         self.table.setStyleSheet(f"""
             QTableWidget {{
-                background-color: {t['surface']};
-                border: 1px solid {t['border']};
-                border-radius: 12px;
+                background-color: #ffffff;
+                border: 1px solid #e2e8f0;
+                border-radius: 14px;
                 gridline-color: transparent;
                 outline: none;
-                selection-background-color: {t['selected']};
-                selection-color: {t['selected_text']};
+                selection-background-color: #eff6ff;
+                selection-color: #1d4ed8;
                 font-size: 13px;
                 color: {t['text']};
             }}
             QTableWidget::item {{
-                padding: 10px 14px;
+                padding: 0px;
                 border: none;
-                border-bottom: 1px solid {t['grid']};
-            }}
-            QTableWidget::item:alternate {{
-                background-color: {t['alt_row']};
             }}
             QTableWidget::item:selected {{
-                background-color: {t['selected']};
-                color: {t['selected_text']};
+                background-color: #eff6ff;
+                color: #1d4ed8;
             }}
             QHeaderView::section {{
-                background-color: {t['header']};
-                color: {t['muted']};
-                font-size: 11px;
+                background-color: #f8fafc;
+                color: #94a3b8;
+                font-size: 10px;
                 font-weight: 700;
-                padding: 10px 14px;
+                padding: 11px 14px;
                 border: none;
-                border-bottom: 1px solid {t['border']};
+                border-bottom: 1px solid #e2e8f0;
+                text-transform: uppercase;
             }}
             QHeaderView::section:first {{
-                border-top-left-radius: 12px;
+                border-top-left-radius: 14px;
+                padding-left: 14px;
             }}
             QHeaderView::section:last {{
-                border-top-right-radius: 12px;
+                border-top-right-radius: 14px;
+                padding-right: 18px;
             }}
             QHeaderView::section:hover {{
-                background-color: {t['menu_hover']};
-                color: {t['menu_hover_text']};
+                background-color: #f1f5f9;
+                color: #475569;
             }}
             QHeaderView {{
                 background-color: {t['header']};
@@ -3791,15 +6822,17 @@ class DownloadManager(QMainWindow):
         self.table.setAlternatingRowColors(True)
         self.table.setShowGrid(False)
         self.table.verticalHeader().setVisible(False)
-        self.table.verticalHeader().setDefaultSectionSize(40)
+        self.table.verticalHeader().setDefaultSectionSize(FL_ROW_HEIGHT)
         self.table.setTextElideMode(Qt.TextElideMode.ElideRight)
 
         # Qt CSS doesn't support letter-spacing reliably on headers — apply via QFont
-        header_font = QFont(self.font().family())
-        header_font.setPixelSize(11)
-        header_font.setBold(True)
-        header_font.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 0.5)
+        header_font = QFont(getattr(self, "_plex_sans_family", self.font().family()))
+        header_font.setPixelSize(10)
+        header_font.setWeight(QFont.Weight.Bold)
+        header_font.setCapitalization(QFont.Capitalization.AllUppercase)
+        header_font.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 0.9)
         self.table.horizontalHeader().setFont(header_font)
+        self.table.horizontalHeader().setFixedHeight(36)
 
     def _apply_theme(self):
         t = self._theme()
@@ -3829,31 +6862,45 @@ class DownloadManager(QMainWindow):
             border-bottom: none;
         """)
         self._title_label.set_accent(accent)
-
-        # Subtle separator between wordmark and categories
-        sep_color = t.get("border", "#cbd5e1")
-        self._sidebar_sep.setStyleSheet(f"""
-            QFrame#sidebarSep {{
-                background-color: {sep_color};
-                border: none;
-                margin: 0 10px;
+        # Color is applied via setColor() (FlatBearingLabel ignores QSS color
+        # because it does its own painting). The QSS only sets font geometry.
+        self._title_subtitle.setColor(t['faint'])
+        self._title_subtitle.setStyleSheet(f"""
+            QLabel#brandSubtitle {{
+                font-size: 10px;
+                font-weight: 600;
+                letter-spacing: 0.5px;
+                background: transparent;
             }}
         """)
+
+        # Hidden — kept for compatibility with the old layout.
+        self._sidebar_sep.setStyleSheet("QFrame#sidebarSep { background: transparent; }")
 
         self._cat_section_label.setStyleSheet(f"""
             QLabel#catSectionLabel {{
                 color: {t['faint']};
                 font-size: 10px;
-                font-weight: 600;
-                letter-spacing: 1.5px;
-                padding: 4px 20px 6px 20px;
+                font-weight: 700;
+                letter-spacing: 1.2px;
                 background: transparent;
             }}
         """)
+        if hasattr(self, "_cat_total_label"):
+            self._cat_total_label.setStyleSheet(f"""
+                QLabel#catTotalLabel {{
+                    color: {t['faint']};
+                    font-family: '{getattr(self, '_mono_font_family', 'IBM Plex Mono')}';
+                    font-size: 10px;
+                    font-weight: 600;
+                    background: transparent;
+                }}
+            """)
         self._cat_scroll.setStyleSheet(f"""
             QWidget#catScroll {{ background: transparent; }}
         """)
         self._style_cat_buttons()
+        self._style_storage_card()
         self._style_empty_state()
 
         # ── Content area ───────────────────────────────────────────────────────
@@ -3939,6 +6986,87 @@ class DownloadManager(QMainWindow):
         self._settings["notifications"] = self.notify_enabled
         save_settings(self._settings)
 
+    def _toggle_shutdown_on_finish(self):
+        self.shutdown_on_finish = not self.shutdown_on_finish
+        self._shutdown_action.setChecked(self.shutdown_on_finish)
+        if self.shutdown_on_finish:
+            self._show_toast("PC will shut down when all downloads finish")
+        else:
+            self._show_toast("Auto shutdown disabled")
+
+    def _has_active_downloads(self):
+        for row in range(self.table.rowCount()):
+            stat = self.table.item(row, 5)
+            if stat and stat.text() in ("Downloading", "Queued"):
+                return True
+        return False
+
+    def _maybe_shutdown(self):
+        if not self.shutdown_on_finish:
+            return
+        if self._has_active_downloads():
+            return
+        if self._shutdown_dialog is not None:
+            return
+        self._begin_shutdown_countdown()
+
+    def _begin_shutdown_countdown(self):
+        seconds = 30
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Shutting Down")
+        dlg.setModal(True)
+        layout = QVBoxLayout(dlg)
+        label = QLabel()
+        label.setWordWrap(True)
+        layout.addWidget(label)
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        cancel_btn = QPushButton("Cancel")
+        btn_row.addWidget(cancel_btn)
+        layout.addLayout(btn_row)
+
+        state = {"remaining": seconds}
+        def render():
+            label.setText(
+                f"All downloads finished.\n\n"
+                f"PC will shut down in {state['remaining']} seconds."
+            )
+        render()
+
+        timer = QTimer(dlg)
+        timer.setInterval(1000)
+
+        def tick():
+            state["remaining"] -= 1
+            if state["remaining"] <= 0:
+                timer.stop()
+                dlg.accept()
+                self._do_shutdown()
+                return
+            render()
+        timer.timeout.connect(tick)
+
+        def on_cancel():
+            timer.stop()
+            self.shutdown_on_finish = False
+            self._shutdown_action.setChecked(False)
+            dlg.reject()
+        cancel_btn.clicked.connect(on_cancel)
+        dlg.finished.connect(lambda _=None: setattr(self, "_shutdown_dialog", None))
+
+        self._shutdown_dialog = dlg
+        timer.start()
+        dlg.show()
+
+    def _do_shutdown(self):
+        try:
+            subprocess.Popen(
+                ["systemctl", "poweroff"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+        except Exception as e:
+            self._show_toast(f"Shutdown failed: {e}")
+
     def _reset_column_widths(self):
         defaults = {0: 270, 1: 199, 2: 100, 3: 85, 4: 70, 5: 90, 6: 110}
         for col, width in defaults.items():
@@ -3963,6 +7091,10 @@ class DownloadManager(QMainWindow):
                 badge.setText("")
                 badge.setVisible(False)
 
+        if hasattr(self, "_cat_total_label"):
+            self._cat_total_label.setText(f"{counts.get('All Downloads', 0)} total")
+        self._refresh_hero_card()
+
     def _on_column_resized(self, col, old_width, new_width):
         widths = self._settings.setdefault("column_widths", {})
         widths[str(col)] = new_width
@@ -3980,69 +7112,128 @@ class DownloadManager(QMainWindow):
 
     def _style_cat_buttons(self):
         t = THEMES["dark" if self.dark_mode else "light"]
+        text_color = "#0f172a" if not self.dark_mode else t['text']
+        mono = getattr(self, "_mono_font_family", "IBM Plex Mono")
         for i, (label, emoji, color) in enumerate(CATEGORIES):
             btn = self._cat_buttons[i]
             badge = self._cat_badges[i]
-            accent = self._cat_accents[i]
             is_sel = (i == self._current_cat_row)
+            r, g, b = int(color[1:3], 16), int(color[3:5], 16), int(color[5:7], 16)
             if is_sel:
-                r, g, b = int(color[1:3], 16), int(color[3:5], 16), int(color[5:7], 16)
                 btn.setStyleSheet(f"""
                     QWidget#catBtn_{i} {{
-                        background: rgba({r},{g},{b}, 0.15);
-                        border-radius: 12px;
+                        background: rgba({r},{g},{b}, 0.10);
+                        border-radius: 7px;
                     }}
                     QLabel#catText_{i} {{
                         color: {color};
-                        font-size: 14px;
+                        font-size: 12px;
                         font-weight: 700;
                         background: transparent;
                     }}
                 """)
-                accent.setStyleSheet(f"""
-                    QWidget#catAccent_{i} {{
-                        background-color: {color};
-                        border-radius: 1px;
-                    }}
-                """)
                 badge.setStyleSheet(f"""
                     QLabel#catBadge_{i} {{
-                        background: rgba({r},{g},{b}, 0.18);
                         color: {color};
-                        font-size: 11px;
-                        font-weight: 600;
-                        border-radius: 10px;
-                        padding: 0px 6px;
+                        font-family: '{mono}';
+                        font-size: 10.5px;
+                        font-weight: 700;
+                        background: transparent;
                     }}
                 """)
             else:
                 btn.setStyleSheet(f"""
                     QWidget#catBtn_{i} {{
                         background: transparent;
-                        border-radius: 12px;
+                        border-radius: 7px;
+                    }}
+                    QWidget#catBtn_{i}:hover {{
+                        background: rgba({r},{g},{b}, 0.06);
                     }}
                     QLabel#catText_{i} {{
-                        color: {t['muted']};
-                        font-size: 14px;
+                        color: {text_color};
+                        font-size: 12px;
                         font-weight: 500;
                         background: transparent;
                     }}
                 """)
-                accent.setStyleSheet(f"""
-                    QWidget#catAccent_{i} {{
-                        background-color: transparent;
-                    }}
-                """)
                 badge.setStyleSheet(f"""
                     QLabel#catBadge_{i} {{
-                        background: rgba(255,255,255,0.06);
-                        color: {t['faint']};
-                        font-size: 11px;
+                        color: #94a3b8;
+                        font-family: '{mono}';
+                        font-size: 10.5px;
                         font-weight: 600;
-                        border-radius: 10px;
-                        padding: 0px 6px;
+                        background: transparent;
                     }}
                 """)
+
+    def _style_storage_card(self):
+        if not hasattr(self, "_storage_card"):
+            return
+        if hasattr(self, "_storage_glyph"):
+            glyph_color = "#cbd5e1" if self.dark_mode else "#475569"
+            self._storage_glyph.setPixmap(
+                _render_svg_str_pixmap(_TILE_SVG_HDD, glyph_color, size=14)
+            )
+        t = THEMES["dark" if self.dark_mode else "light"]
+        if self.dark_mode:
+            bg_top, bg_bot = "rgba(255,255,255,0.04)", "rgba(255,255,255,0.02)"
+            border = "rgba(255,255,255,0.08)"
+            cap_color = "#cbd5e1"
+            value_color = t['text']
+            unit_color = "#94a3b8"
+            total_color = "#64748b"
+            pct_color = "#94a3b8"
+            track_color = "rgba(255,255,255,0.08)"
+        else:
+            bg_top, bg_bot = "#f8fafc", "#f1f5f9"
+            border = "#e2e8f0"
+            cap_color = "#475569"
+            value_color = "#0f172a"
+            unit_color = "#64748b"
+            total_color = "#94a3b8"
+            pct_color = "#64748b"
+            track_color = "#e2e8f0"
+        self._storage_card.setStyleSheet(f"""
+            QWidget#storageCard {{ background: transparent; }}
+            QWidget#storageInner {{
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 {bg_top}, stop:1 {bg_bot});
+                border: 1px solid {border};
+                border-radius: 12px;
+            }}
+            QLabel#storageCap {{
+                color: {cap_color};
+                font-size: 10px;
+                font-weight: 700;
+                letter-spacing: 0.8px;
+                background: transparent;
+            }}
+            QLabel#storageValue {{
+                color: {value_color};
+                background: transparent;
+            }}
+            QLabel#storageTotal {{
+                color: {total_color};
+                font-size: 10px;
+                background: transparent;
+            }}
+            QLabel#storagePct, QLabel#storageFree {{
+                color: {pct_color};
+                font-size: 10px;
+                background: transparent;
+            }}
+            QProgressBar#storageBar {{
+                background-color: {track_color};
+                border: none;
+                border-radius: 3px;
+            }}
+            QProgressBar#storageBar::chunk {{
+                background-color: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #3b82f6, stop:1 #2563eb);
+                border-radius: 3px;
+            }}
+        """)
 
     def _update_empty_state(self):
         if not hasattr(self, "_table_stack"):
@@ -4404,6 +7595,7 @@ class DownloadManager(QMainWindow):
                 self._add_to_history(url, filename, path, "Finished", size, category)
                 self.finished_urls[self._social_dedup_key(url)] = path
                 self._notify("Download Complete", f"{filename} finished downloading.")
+                self._maybe_shutdown()
             else:
                 self._update_cell(row, 3, "—")
                 self._update_cell(row, 4, "—")
@@ -4501,6 +7693,7 @@ class DownloadManager(QMainWindow):
         else:
             self.setWindowTitle("Linux Download Manager")
             self._status_bar.setText(f"  ✓ {finished_rows} completed  |  Total: {total_rows} downloads")
+        self._refresh_status_chip()
 
     def is_duplicate(self, url):
         now = time.time()
@@ -5116,11 +8309,22 @@ class DownloadManager(QMainWindow):
                 item.setToolTip(text)
         else:
             new_item = QTableWidgetItem(text)
-            new_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             new_item.setFlags(new_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
             if col == 5:
                 new_item.setToolTip(text)
             self.table.setItem(row, col, new_item)
+        # Keep the file-list sub-meta (EXT · TOTAL_SIZE) in sync with the
+        # Downloaded cell. Use the total side of "done / total" when present.
+        if col == 2:
+            name_item = self.table.item(row, 0)
+            if name_item is not None and text:
+                total = text.split(" / ", 1)[1].strip() if " / " in text else text.strip()
+                if total and total != "—":
+                    name_item.setData(FL_ROLE_TOTAL, total)
+        # Speed/ETA/status changes on the selected row need to flow into the
+        # bottom status chip (since those columns are hidden from the table).
+        if col in (3, 4, 5) and row == self.table.currentRow():
+            self._refresh_status_chip()
 
     def _on_finished(self, msg, row, url, category):
         # Read filename and path from the live row — the worker may have
@@ -5149,6 +8353,7 @@ class DownloadManager(QMainWindow):
                 size = self.table.item(row, 2).text() if self.table.item(row, 2) else "—"
                 self._add_to_history(url, filename, path, "Finished", size, category)
                 self._notify("Download Complete", f"{filename} finished downloading.")
+                self._maybe_shutdown()
             else:
                 self._update_cell(row, 3, "—")
                 self._update_cell(row, 4, "—")
@@ -5174,7 +8379,29 @@ class DownloadManager(QMainWindow):
             self._resume_download(row)
 
     def _on_selection_changed(self):
-        pass
+        self._refresh_status_chip()
+
+    def _refresh_status_chip(self):
+        """Show speed + ETA in the bottom status row when the selected row
+        is currently downloading. Hide the chip otherwise."""
+        if not hasattr(self, "_status_metric"):
+            return
+        row = self.table.currentRow()
+        if row < 0:
+            self._status_metric.hide()
+            return
+        stat_item = self.table.item(row, 5)
+        if not stat_item or stat_item.text() != "Downloading":
+            self._status_metric.hide()
+            return
+        speed = (self.table.item(row, 3).text() if self.table.item(row, 3) else "").strip()
+        eta   = (self.table.item(row, 4).text() if self.table.item(row, 4) else "").strip()
+        if (not speed or speed == "—") and (not eta or eta == "—"):
+            self._status_metric.hide()
+            return
+        self._status_speed_label.setText(f"↓ {speed}" if speed and speed != "—" else "")
+        self._status_eta_label.setText(f"{eta} left" if eta and eta != "—" else "")
+        self._status_metric.show()
     
     def _open_donate(self):
         t = self._theme()
@@ -5417,11 +8644,25 @@ def _ensure_ytdlp_config():
         pass
 
 
+def _load_dialog_fonts():
+    fonts_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "fonts")
+    if not os.path.isdir(fonts_dir):
+        return
+    for fname in os.listdir(fonts_dir):
+        if fname.lower().endswith(".ttf"):
+            QFontDatabase.addApplicationFont(os.path.join(fonts_dir, fname))
+
+
 if __name__ == "__main__":
     if not os.environ.get("QT_QPA_PLATFORMTHEME"):
         os.environ["QT_QPA_PLATFORMTHEME"] = "gtk3"
     _ensure_ytdlp_config()
     app = QApplication(sys.argv)
+    app.setApplicationName("Linux Download Manager")
+    # Ties the window to its .desktop file so the correct icon/app-id is used
+    # under Wayland (and X11 WM_CLASS) — required for Flatpak icon association.
+    app.setDesktopFileName("io.github.matewinslet.LinuxDownloader")
+    _load_dialog_fonts()
     window = DownloadManager()
     window.show()
     sys.exit(app.exec())

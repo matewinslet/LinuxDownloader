@@ -1,0 +1,34 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="80" height="80" viewBox="0 0 80 80">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#c084fc"/>
+      <stop offset="1" stop-color="#6d28d9"/>
+    </linearGradient>
+    <linearGradient id="hl" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="rgba(255,255,255,0.42)"/>
+      <stop offset="0.55" stop-color="rgba(255,255,255,0)"/>
+    </linearGradient>
+    <radialGradient id="gloss" cx="0.5" cy="0" r="0.9">
+      <stop offset="0" stop-color="rgba(255,255,255,0.28)"/>
+      <stop offset="1" stop-color="rgba(255,255,255,0)"/>
+    </radialGradient>
+    <radialGradient id="head" cx="0.4" cy="0.35" r="0.7">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="0.5" stop-color="#f1f5f9"/>
+      <stop offset="1" stop-color="#cbd5e1"/>
+    </radialGradient>
+  </defs>
+  <rect width="80" height="80" rx="22" fill="url(#bg)"/>
+  <rect width="80" height="80" rx="22" fill="url(#gloss)"/>
+  <rect width="80" height="80" rx="22" fill="url(#hl)"/>
+  <rect x="33" y="16" width="3.4" height="38" fill="#ffffff" stroke="rgba(0,0,0,0.25)" stroke-width="0.4"/>
+  <rect x="53" y="14" width="3.4" height="38" fill="#ffffff" stroke="rgba(0,0,0,0.25)" stroke-width="0.4"/>
+  <path d="M33 16 L57 14 L57 22 L33 24 Z" fill="#ffffff" stroke="rgba(0,0,0,0.25)" stroke-width="0.4" stroke-linejoin="round"/>
+  <path d="M33 26 L57 24 L57 30 L33 32 Z" fill="#ffffff" stroke="rgba(0,0,0,0.25)" stroke-width="0.4" stroke-linejoin="round"/>
+  <ellipse cx="29" cy="55" rx="9" ry="6.5" fill="url(#head)" stroke="rgba(0,0,0,0.3)" stroke-width="0.5" transform="rotate(-18 29 55)"/>
+  <ellipse cx="49" cy="53" rx="9" ry="6.5" fill="url(#head)" stroke="rgba(0,0,0,0.3)" stroke-width="0.5" transform="rotate(-18 49 53)"/>
+  <ellipse cx="26" cy="52" rx="2.5" ry="1.2" fill="rgba(255,255,255,0.8)" transform="rotate(-18 26 52)"/>
+  <ellipse cx="46" cy="50" rx="2.5" ry="1.2" fill="rgba(255,255,255,0.8)" transform="rotate(-18 46 50)"/>
+  <rect x="0.5" y="0.5" width="79" height="79" rx="21.5" fill="none" stroke="rgba(255,255,255,0.28)" stroke-width="1"/>
+  <rect x="0" y="0" width="80" height="80" rx="22" fill="none" stroke="rgba(0,0,0,0.18)" stroke-width="0.6"/>
+</svg>

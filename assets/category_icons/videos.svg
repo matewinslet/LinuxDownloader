@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="80" height="80" viewBox="0 0 80 80">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#f87171"/>
+      <stop offset="1" stop-color="#991b1b"/>
+    </linearGradient>
+    <linearGradient id="hl" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="rgba(255,255,255,0.42)"/>
+      <stop offset="0.55" stop-color="rgba(255,255,255,0)"/>
+    </linearGradient>
+    <radialGradient id="gloss" cx="0.5" cy="0" r="0.9">
+      <stop offset="0" stop-color="rgba(255,255,255,0.28)"/>
+      <stop offset="1" stop-color="rgba(255,255,255,0)"/>
+    </radialGradient>
+    <linearGradient id="film" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#475569"/>
+      <stop offset="1" stop-color="#0f172a"/>
+    </linearGradient>
+  </defs>
+  <rect width="80" height="80" rx="22" fill="url(#bg)"/>
+  <rect width="80" height="80" rx="22" fill="url(#gloss)"/>
+  <rect width="80" height="80" rx="22" fill="url(#hl)"/>
+  <rect x="14" y="20" width="52" height="40" rx="4" fill="url(#film)" stroke="rgba(0,0,0,0.5)" stroke-width="0.6"/>
+  <rect x="16" y="22.5" width="4" height="3.5" rx="0.6" fill="#f1f5f9"/>
+  <rect x="26" y="22.5" width="4" height="3.5" rx="0.6" fill="#f1f5f9"/>
+  <rect x="36" y="22.5" width="4" height="3.5" rx="0.6" fill="#f1f5f9"/>
+  <rect x="46" y="22.5" width="4" height="3.5" rx="0.6" fill="#f1f5f9"/>
+  <rect x="56" y="22.5" width="4" height="3.5" rx="0.6" fill="#f1f5f9"/>
+  <rect x="16" y="54" width="4" height="3.5" rx="0.6" fill="#f1f5f9"/>
+  <rect x="26" y="54" width="4" height="3.5" rx="0.6" fill="#f1f5f9"/>
+  <rect x="36" y="54" width="4" height="3.5" rx="0.6" fill="#f1f5f9"/>
+  <rect x="46" y="54" width="4" height="3.5" rx="0.6" fill="#f1f5f9"/>
+  <rect x="56" y="54" width="4" height="3.5" rx="0.6" fill="#f1f5f9"/>
+  <rect x="22" y="29" width="36" height="22" rx="1.5" fill="#1e293b" stroke="rgba(255,255,255,0.15)" stroke-width="0.5"/>
+  <path d="M34 34 L34 46 L46 40 Z" fill="#ffffff" stroke="rgba(0,0,0,0.25)" stroke-width="0.5" stroke-linejoin="round"/>
+  <line x1="18" y1="22" x2="62" y2="22" stroke="rgba(255,255,255,0.18)" stroke-width="0.5"/>
+  <rect x="0.5" y="0.5" width="79" height="79" rx="21.5" fill="none" stroke="rgba(255,255,255,0.28)" stroke-width="1"/>
+  <rect x="0" y="0" width="80" height="80" rx="22" fill="none" stroke="rgba(0,0,0,0.18)" stroke-width="0.6"/>
+</svg>
