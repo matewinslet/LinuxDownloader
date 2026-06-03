@@ -48,3 +48,6 @@ firefox-extension/web-ext-artifacts/
 
 # Local flatpak test manifest
 *.local.json
+
+# AMO build artifact
+firefox-extension/.amo-upload-uuid

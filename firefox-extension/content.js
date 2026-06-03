@@ -14,14 +14,14 @@
   }
 
   // ── Stream detection ──────────────────────────────────────────────────────
-  function detectStream() {
-    const video = document.querySelector('video');
+  function detectStream(video) {
+    if (!video) video = document.querySelector('video');
     if (!video) return { url: null, isHLS: false };
     let url = null, isHLS = false;
     if (video.src && !video.src.startsWith('blob:')) {
       url = video.src; isHLS = url.includes('.m3u8');
     } else {
-      const source = document.querySelector('video source');
+      const source = video.querySelector('source');
       if (source && source.src && !source.src.startsWith('blob:')) {
         url = source.src; isHLS = url.includes('.m3u8');
       }
@@ -112,7 +112,7 @@
       var path = u.pathname;
       return (
         /[?&]v=\d+/.test(u.search)           ||  // /watch?v=123
-        /\/reel\/[A-Za-z0-9_\-]+/.test(path) ||  // /reel/ID
+        /\/reel(\/|$)/.test(path)             ||  // /reel/ID or bare /reel/ (LDM shows paste dialog for bare)
         /\/videos\/\d+/.test(path)            ||  // /username/videos/ID
         /\/share\/[vr]\//.test(path)              // /share/v/ID or /share/r/ID
       );
@@ -183,7 +183,8 @@
     if (host.includes('instagram.com')) {
       patterns = [/^\/(?:p|reel|reels|tv)\/[A-Za-z0-9_\-]+\/?$/];
     } else if (host.includes('facebook.com') || host.includes('fb.watch')) {
-      patterns = [/\/(?:reel|watch|videos)\//, /[?&]v=\d+/];
+      // Require an ID after reel/watch/videos — bare /reel/ anchors are useless
+      patterns = [/\/(?:reel|videos)\/\d+/, /\/watch\/\?v=\d+/, /[?&]v=\d+/];
     } else if (host.includes('twitter.com') || host.includes('x.com')) {
       patterns = [/\/status\/\d+/];
     }
@@ -225,8 +226,7 @@
     }
 
     // Facebook video page: address bar URL → yt-dlp directly.
-    // Button only appears on video pages (isSuppressedPage blocks the feed),
-    // so window.location.href is always a valid permalink here.
+    // isFacebookVideoPage requires an ID in the URL, so this is always a valid permalink.
     if (isFacebookVideoPage(pageUrl)) {
       const filename = resolveFilename(pageUrl, document.title);
       return Promise.resolve(relayToBridge(pageUrl, 'stream_hls', filename));
@@ -271,18 +271,20 @@
       });
     }
 
-    // Non-social: check m3u8 store (vidara, vidnest etc.)
+    // Non-social: check this specific video's own src first (handles pages
+    // with multiple <video> elements — tab-level m3u8 store is shared and
+    // would otherwise return the same URL for every Capture button).
+    const own = detectStream(videoEl);
+    if (own.url) {
+      const filename = resolveFilename(own.url, document.title);
+      return relayToBridge(own.url, 'stream_hls', filename);
+    }
+    // No direct src (blob-backed player) — fall back to tab-level m3u8 store.
     return new Promise((resolve, reject) => {
       chrome.runtime.sendMessage({ action: 'getM3u8' }, (resp) => {
         if (!chrome.runtime.lastError && resp && resp.url) {
           const filename = resolveFilename(resp.url, document.title);
           resolve(relayToBridge(resp.url, 'stream_hls', filename));
-          return;
-        }
-        const result = detectStream();
-        if (result.url) {
-          const filename = resolveFilename(result.url, document.title);
-          resolve(relayToBridge(result.url, 'stream_hls', filename));
           return;
         }
         const filename = resolveFilename(pageUrl, document.title);
@@ -337,21 +339,6 @@
     return true;
   });
 
-  // ── Active overlay registry ────────────────────────────────────────────────
-  // Declared here — before createOverlay/removeOverlay — so there are no var-
-  // hoisting surprises if call order ever changes.
-  var _ldmActiveOverlays = [];
-
-  function _cleanOrphanedOverlays() {
-    _ldmActiveOverlays = _ldmActiveOverlays.filter(function(item) {
-      if (!item.video.isConnected) {
-        try { item.host.remove(); } catch(e) {}
-        return false;
-      }
-      return true;
-    });
-  }
-
   // ── Floating overlay ──────────────────────────────────────────────────────
   function createOverlay(video) {
     if (video.hasAttribute('data-ldm-overlay')) return;
@@ -375,11 +362,11 @@
     const label   = isYT ? '&#9654; YouTube' : '&#11015;&#65038; Capture';
     const hoverBg = isYT ? 'rgba(220,38,38,0.18)' : 'rgba(56,189,248,0.18)';
 
-    // ── Wrapper (layout only — no positioning here) ───────────────────────────
-    // Positioning lives on `host` (light DOM) so the containing block is always
-    // document.body regardless of what any site does to inner elements.
+    // ── Wrapper ───────────────────────────────────────────────────────────────
     const wrapper = document.createElement('div');
     Object.assign(wrapper.style, {
+      position:      'absolute',
+      zIndex:        '2147483647',
       display:       'flex',
       alignItems:    'stretch',
       pointerEvents: 'all',
@@ -480,48 +467,43 @@
     wrapper.appendChild(btn);
     wrapper.appendChild(closeBtn);
 
-    // ── Host: the positioned element in the light DOM ─────────────────────────
-    // Isolate from page CSS via Shadow DOM, but keep the *positioning* on host
-    // (light DOM, direct child of document.body) so that `position: absolute`
-    // always resolves against document.body's containing block — not against
-    // whatever random positioned ancestor a site's inner elements might have.
+    // Isolate from page CSS (e.g. bunkr rules that override flex-row layout).
     var host = document.createElement('div');
-    Object.assign(host.style, {
-      position: 'absolute',
-      zIndex:   '2147483647',
-      top:      '0',
-      left:     '0',
-    });
     host.attachShadow({ mode: 'open' }).appendChild(wrapper);
     document.body.appendChild(host);
 
-    positionOverlay(video, host);
+    positionOverlay(video, wrapper);
     video._ldmBtn  = wrapper;
     video._ldmHost = host;
     _ldmActiveOverlays.push({ host: host, video: video });
   }
 
-  // positionOverlay(video, host) — sets top/left on the light-DOM host element.
-  // host is always a direct child of document.body, so coordinates are simply
-  // viewport-relative + scroll offset = document-relative. No containing-block
-  // ambiguity from page CSS.
-  function positionOverlay(video, host) {
+  function positionOverlay(video, wrapper) {
     const r = video.getBoundingClientRect();
-    const wrapper = host.shadowRoot && host.shadowRoot.firstChild;
-    if (r.width < 100 || r.height < 60) {
-      if (wrapper) wrapper.style.display = 'none';
-      return;
-    }
-    if (wrapper) wrapper.style.display = 'flex';
-    const btnH   = (wrapper && wrapper.offsetHeight) || 28;
+    if (r.width < 100 || r.height < 60) { wrapper.style.display = 'none'; return; }
+    wrapper.style.display = 'flex';
+    const btnH   = wrapper.offsetHeight || 28;
     const scrollX = window.scrollX || window.pageXOffset || 0;
     const scrollY = window.scrollY || window.pageYOffset || 0;
     if (r.top > btnH + 4) {
-      host.style.top  = `${r.top + scrollY - btnH - 4}px`;
+      wrapper.style.top  = `${r.top + scrollY - btnH - 4}px`;
     } else {
-      host.style.top  = `${r.top + scrollY + 6}px`;
+      wrapper.style.top  = `${r.top + scrollY + 6}px`;
     }
-    host.style.left = `${r.right + scrollX - 160}px`;
+    wrapper.style.left = `${r.right + scrollX - 160}px`;
+  }
+
+  // Active overlay registry — used to purge hosts orphaned by SPA re-renders
+  var _ldmActiveOverlays = [];
+
+  function _cleanOrphanedOverlays() {
+    _ldmActiveOverlays = _ldmActiveOverlays.filter(function(item) {
+      if (!item.video.isConnected) {
+        try { item.host.remove(); } catch(e) {}
+        return false;
+      }
+      return true;
+    });
   }
 
   function removeOverlay(video) {
@@ -531,8 +513,6 @@
       delete video._ldmHost;
       delete video._ldmBtn;
     }
-    // Only remove overlay attribute if not permanently dismissed —
-    // dismissed videos should never get the overlay back until page reload.
     if (!video.hasAttribute('data-ldm-dismissed')) {
       video.removeAttribute('data-ldm-overlay');
     }
@@ -558,34 +538,34 @@
     video.addEventListener('playing', function() { fetchAndStoreCdnEntry(video); }, { passive: true });
   }
 
-  // IntersectionObserver: create overlay on first entry; reposition on re-entry
-  // (handles lazy-load layout shifts). No removeOverlay on exit — with
-  // position:absolute on host, the button is at a document coordinate and
-  // scrolls off-screen naturally when its video does.
+  // IntersectionObserver: with position:absolute the button scrolls with its
+  // video naturally. We only need to CREATE on first entry and REPOSITION on
+  // re-entry (layout shifts from lazy-load). On Facebook reel pages we ALSO
+  // hide the button when its video drops out of view — reels are full-viewport
+  // so stale buttons from prior reels otherwise stack on top of the active one.
   const videoVisibilityObserver = new IntersectionObserver(function(entries) {
     entries.forEach(function(entry) {
       const v = entry.target;
       if (entry.isIntersecting) {
         if (!v.hasAttribute('data-ldm-dismissed')) {
-          // Small delay to let swipe animations finish (TikTok) before positioning
           setTimeout(function() {
-            if (v.hasAttribute('data-ldm-overlay') && v._ldmHost) {
-              // Already has overlay — reposition in case of layout shift
-              positionOverlay(v, v._ldmHost);
+            if (v.hasAttribute('data-ldm-overlay') && v._ldmBtn) {
+              positionOverlay(v, v._ldmBtn);
+              if (v._ldmHost) v._ldmHost.style.display = '';
             } else if (!v.hasAttribute('data-ldm-overlay')) {
               createOverlay(v);
               attachPlayTracker(v);
             }
           }, 200);
         }
+      } else if (isFacebookVideoPage(window.location.href) && v._ldmHost) {
+        v._ldmHost.style.display = 'none';
       }
-      // Intentionally no removeOverlay on !isIntersecting — see note above.
     });
   }, { threshold: 0.8 });
 
   function attachToVideos() {
     if (isSuppressedPage(window.location.href)) return;
-    // Purge hosts whose video was removed by React/SPA re-renders
     _cleanOrphanedOverlays();
     document.querySelectorAll('video').forEach(function(v) {
       createOverlay(v);
@@ -603,8 +583,7 @@
     });
   }
 
-  // Debounce MutationObserver so rapid React/SPA DOM bursts don't hammer
-  // attachToVideos hundreds of times per render cycle.
+  // Debounce MutationObserver so React/SPA DOM bursts collapse into one call
   var _ldmAttachTimer = null;
   function _debouncedAttach() {
     clearTimeout(_ldmAttachTimer);
@@ -616,19 +595,48 @@
     { childList: true, subtree: true }
   );
 
-  // Reposition all active overlays on window resize (viewport width change
-  // shifts every video's document coordinates).
-  var _ldmResizeTimer = null;
-  window.addEventListener('resize', function() {
-    clearTimeout(_ldmResizeTimer);
-    _ldmResizeTimer = setTimeout(function() {
+  // SPA URL change detector. Facebook Reels swaps videos via pushState; on each
+  // reel the URL updates to /reel/ID. Without this poll the FIRST reel can miss
+  // its overlay (attachToVideos may have run while URL was still the suppressed
+  // feed page), and stale overlays from prior reels stack on the active one.
+  // Polling location.href is simpler than patching history from a content
+  // script's isolated world (page-side references survive the patch).
+  var _ldmLastUrl = window.location.href;
+  setInterval(function() {
+    if (window.location.href === _ldmLastUrl) return;
+    _ldmLastUrl = window.location.href;
+    if (window.location.hostname.includes('facebook.com')) {
       _ldmActiveOverlays.forEach(function(item) {
-        if (item.video.isConnected) {
-          positionOverlay(item.video, item.host);
-        }
+        try { item.host.remove(); } catch(e) {}
+        try {
+          item.video.removeAttribute('data-ldm-overlay');
+          delete item.video._ldmHost;
+          delete item.video._ldmBtn;
+        } catch(e) {}
       });
-    }, 150);
-  }, { passive: true });
+      _ldmActiveOverlays = [];
+    }
+    setTimeout(attachToVideos, 300);
+  }, 250);
+
+  // Facebook reel backstop. The IntersectionObserver only fires when the
+  // video crosses the 0.8 visibility threshold — if FB mounts the first reel's
+  // <video> with size 0 and lays it out without re-crossing the threshold
+  // (or never crosses it because of CSS transforms), createOverlay is never
+  // re-attempted after its initial size-check bail-out. Poll once a second for
+  // visible videos missing an overlay and attach one.
+  setInterval(function() {
+    if (!isFacebookVideoPage(window.location.href)) return;
+    document.querySelectorAll('video').forEach(function(v) {
+      if (v.hasAttribute('data-ldm-overlay')) return;
+      if (v.hasAttribute('data-ldm-dismissed')) return;
+      var r = v.getBoundingClientRect();
+      if (r.width >= 120 && r.height >= 80) {
+        createOverlay(v);
+        attachPlayTracker(v);
+      }
+    });
+  }, 1000);
 
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', attachToVideos);
@@ -637,4 +645,3 @@
   }
 
 })();
-
