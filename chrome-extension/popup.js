@@ -1,4 +1,4 @@
-// popup.js - Linux Download Manager
+// popup.js - Linux Download Manager (Chrome MV3)
 
 // Capture Stream — smart routing: YouTube → YouTubeDialog, else stream
 document.getElementById('captureBtn').addEventListener('click', async () => {
@@ -9,7 +9,6 @@ document.getElementById('captureBtn').addEventListener('click', async () => {
                 lower.includes('youtu.be/') ||
                 lower.includes('youtube.com/shorts');
 
-  // YouTube — route directly to YouTubeDialog
   if (isYT) {
     const bridgeUrl = `http://127.0.0.1:9999/?url=${encodeURIComponent(tab.url)}&filename=youtube&type=youtube`;
     bridgeSend(bridgeUrl)
@@ -22,8 +21,7 @@ document.getElementById('captureBtn').addEventListener('click', async () => {
     return;
   }
 
-  // CF-only domains (luluvdo etc.) — page URL → yt-dlp
-  const cfDomains = ['luluvdo.com', 'lulustream.com', 'doodstream.com', 'dood.watch', 'dood.to', 'redgifs.com'];
+  const cfDomains = ['luluvdo.com', 'lulustream.com', 'doodstream.com', 'dood.watch', 'dood.to'];
   const isCF = cfDomains.some(d => tab.url.includes(d));
   if (isCF) {
     const pageUrl = normalizeUrl(tab.url);
@@ -38,7 +36,6 @@ document.getElementById('captureBtn').addEventListener('click', async () => {
     return;
   }
 
-  // Social domains (Facebook, Instagram, Twitter/X) — try CDN store first
   const socialDomains = ['facebook.com', 'fb.watch', 'instagram.com', 'twitter.com', 'x.com'];
   const isSocial = socialDomains.some(d => tab.url.includes(d));
   if (isSocial) {
@@ -61,17 +58,14 @@ document.getElementById('captureBtn').addEventListener('click', async () => {
         .catch(() => { btn.innerText = 'Error: App Closed?'; btn.style.background = '#c0392b'; });
       return;
     }
-    // No CDN URL — fall through to page URL → yt-dlp below
   }
 
-  // Check background for a passively stored m3u8 (vidara etc.)
   const stored = await new Promise(r =>
     chrome.runtime.sendMessage({ action: 'getM3u8ForTab', tabId: tab.id }, r)
   );
   if (stored && stored.url) {
-    const captureUrl      = normalizeApiUrl(stored.url);
-    const captureFilename = resolveFilename(captureUrl, tab.title);
-    const bridgeUrl = `http://127.0.0.1:9999/?url=${encodeURIComponent(captureUrl)}&filename=${encodeURIComponent(captureFilename)}&type=stream_hls&referer=${encodeURIComponent(tab.url)}`;
+    const captureFilename = resolveFilename(stored.url, tab.title);
+    const bridgeUrl = `http://127.0.0.1:9999/?url=${encodeURIComponent(stored.url)}&filename=${encodeURIComponent(captureFilename)}&type=stream_hls&referer=${encodeURIComponent(tab.url)}`;
     bridgeSend(bridgeUrl)
       .then(() => {
         btn.innerHTML = '&#10003; Sent to LDM!';
@@ -82,19 +76,19 @@ document.getElementById('captureBtn').addEventListener('click', async () => {
     return;
   }
 
-  // No m3u8 stored — try DOM scan across frames
+  // DOM scan across frames
   let found = null;
   try {
-    const frames = await browser.webNavigation.getAllFrames({ tabId: tab.id });
+    const frames = await chrome.webNavigation.getAllFrames({ tabId: tab.id });
     for (const frame of frames) {
       try {
-        const resp = await browser.tabs.sendMessage(
+        const resp = await chrome.tabs.sendMessage(
           tab.id, { action: 'grab' }, { frameId: frame.frameId }
         );
         if (resp && resp.url) { found = resp; break; }
-      } catch(e) {}
+      } catch (e) {}
     }
-  } catch(e) {}
+  } catch (e) {}
 
   if (found && found.url) {
     const captureUrl      = found.url;
@@ -111,9 +105,7 @@ document.getElementById('captureBtn').addEventListener('click', async () => {
     return;
   }
 
-  // Nothing found — likely a site that needs play pressed first (vidara etc.)
-  // Try page URL anyway; StreamDialog will show a clear message if it fails.
-  const pageUrl     = normalizeUrl(tab.url);
+  const pageUrl      = normalizeUrl(tab.url);
   const pageFilename = resolveFilename(pageUrl, tab.title);
   const bridgeUrl = `http://127.0.0.1:9999/?url=${encodeURIComponent(pageUrl)}&filename=${encodeURIComponent(pageFilename)}&type=stream_hls&referer=${encodeURIComponent(pageUrl)}`;
   bridgeSend(bridgeUrl)
@@ -129,23 +121,9 @@ function normalizeUrl(url) {
   try {
     var u = new URL(url);
     u.pathname = u.pathname.replace(/^\/e\//, '/').replace(/^\/embed\//, '/');
-    if (u.hostname.includes('redgifs.com')) {
-      u.pathname = u.pathname.replace(/^\/ifr\//, '/watch/');
-    }
     ['__cft__', '__tn__', '_nc_cat', '_nc_sid', 'paipv', 'eav'].forEach(p => u.searchParams.delete(p));
     return u.toString();
-  } catch(e) { return url; }
-}
-
-function normalizeApiUrl(url) {
-  try {
-    var u = new URL(url);
-    if (u.hostname === 'api.redgifs.com') {
-      var m = u.pathname.match(/^\/v2\/gifs\/([^\/]+)\//);
-      if (m) return 'https://www.redgifs.com/watch/' + m[1];
-    }
-  } catch(e) {}
-  return url;
+  } catch (e) { return url; }
 }
 
 function resolveSocialFilename(entry, pageUrl, pageTitle) {
@@ -161,7 +139,7 @@ function resolveSocialFilename(entry, pageUrl, pageTitle) {
       if (host.includes('facebook') || host.includes('fb.watch')) return 'facebook_' + entry.videoId + '.mp4';
     }
     return 'social_video_' + ts + '.mp4';
-  } catch(e) { return 'social_video.mp4'; }
+  } catch (e) { return 'social_video.mp4'; }
 }
 
 // Unlock Right-click
@@ -186,21 +164,24 @@ document.getElementById('youtubeBtn').addEventListener('click', async () => {
   const bridgeUrl = `http://127.0.0.1:9999/?url=${encodeURIComponent(url)}&filename=youtube&type=youtube`;
   bridgeSend(bridgeUrl)
     .then(() => { document.getElementById('youtubeBtn').innerHTML = '&#10003; Sent to LDM!'; })
-    .catch(() => { document.getElementById('youtubeBtn').innerText = 'Error: App Closed?'; document.getElementById('youtubeBtn').style.background = '#c0392b'; });
+    .catch(() => {
+      document.getElementById('youtubeBtn').innerText = 'Error: App Closed?';
+      document.getElementById('youtubeBtn').style.background = '#c0392b';
+    });
 });
 
-// Auto Intercept toggle
+// Auto Intercept toggle — stored in chrome.storage.local
 const toggle = document.getElementById('interceptToggle');
 const sub    = document.getElementById('toggleSub');
-browser.storage.local.get('interceptEnabled').then((result) => {
+chrome.storage.local.get('interceptEnabled', function (result) {
   const enabled = result.interceptEnabled !== false;
   toggle.checked = enabled;
-  sub.textContent = enabled ? 'Sending to Linux DM' : 'Firefox handles downloads';
+  sub.textContent = enabled ? 'Sending to Linux DM' : 'Chrome handles downloads';
 });
 toggle.addEventListener('change', () => {
   const enabled = toggle.checked;
-  browser.storage.local.set({ interceptEnabled: enabled });
-  sub.textContent = enabled ? 'Sending to Linux DM' : 'Firefox handles downloads';
+  chrome.storage.local.set({ interceptEnabled: enabled });
+  sub.textContent = enabled ? 'Sending to Linux DM' : 'Chrome handles downloads';
 });
 
 // Collect cookies for the captured page/stream so authenticated downloads work
@@ -209,8 +190,8 @@ function collectBridgeCookies(url, referer) {
   const urls = [];
   if (url) urls.push(url);
   if (referer && referer !== url) urls.push(referer);
-  const api = (typeof browser !== 'undefined' && browser.cookies) ? browser.cookies
-            : (typeof chrome !== 'undefined' && chrome.cookies) ? chrome.cookies : null;
+  const api = (typeof chrome !== 'undefined' && chrome.cookies) ? chrome.cookies
+            : (typeof browser !== 'undefined' && browser.cookies) ? browser.cookies : null;
   if (!urls.length || !api || !api.getAll) return Promise.resolve([]);
   const jobs = urls.map(u => Promise.resolve(api.getAll({ url: u })).catch(() => []));
   return Promise.all(jobs).then(lists => {

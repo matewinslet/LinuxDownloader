@@ -134,9 +134,23 @@ var skipExts = [
   ".md", ".rst", ".tex", ".csv", ".log", ".env",
   ".c", ".cpp", ".h", ".java", ".rb", ".go", ".rs", ".php",
   ".wasm", ".map",
-  // HLS / DASH stream segments — never intercept these individually
+  // fonts
+  ".woff", ".woff2", ".ttf", ".otf", ".eot",
+  // subtitles / captions
+  ".vtt", ".srt", ".ass", ".ssa", ".sub",
+  // 3D / game / animation assets
+  ".riv", ".glb", ".gltf", ".fbx", ".obj", ".usdz", ".spine", ".atlas",
+  // data blobs
+  ".bin", ".dat", ".db", ".sqlite",
+  // HLS / DASH stream segments
   ".enc", ".key", ".aes", ".m4s", ".frag", ".chunk"
 ];
+
+// Strip CDN cache-buster version suffixes before extension checks.
+// e.g. "sw_en_1.vtt.v1737700893" → "sw_en_1.vtt"
+function stripVersionSuffix(path) {
+  return path.replace(/\.(v?\d{6,})$/i, "");
+}
 
 var videoAudioMimes = [
   'video/mp4', 'video/x-matroska', 'video/webm', 'video/avi',
@@ -162,43 +176,61 @@ function isVideoAudio(url, contentType) {
   return false;
 }
 
-// Domains that must never be intercepted — captcha providers, auth/security
-// APIs, browser infrastructure, CDN control planes, and other non-download
-// endpoints that happen to return binary Content-Types.
+// Extensions that map to one of LDM's download categories
+// (Videos / Music / Documents / Compressed / Programs — mirrors file_types in
+// download_manager.py). Files outside this set are left to the browser's own
+// downloader: we only auto-capture types LDM actually sorts into a category.
+var allowedCategoryExts = [
+  // Videos
+  '.mp4', '.mkv', '.avi', '.mov', '.webm', '.ts',
+  // Music
+  '.mp3', '.flac', '.aac', '.wav', '.ogg', '.m4a',
+  // Documents
+  '.pdf', '.doc', '.docx', '.txt', '.ppt', '.pptx',
+  // Compressed
+  '.zip', '.rar', '.7z', '.tar', '.gz',
+  // Programs
+  '.exe', '.bin', '.appimage', '.deb', '.rpm', '.iso',
+];
+function inAllowedCategory(filename) {
+  if (!filename) return false;
+  var name = stripVersionSuffix(filename.split('?')[0].toLowerCase());
+  for (var i = 0; i < allowedCategoryExts.length; i++) {
+    if (name.endsWith(allowedCategoryExts[i])) return true;
+  }
+  return false;
+}
+
+// Domains never intercepted — captcha, auth, infrastructure, AI tools
 var skipDomains = [
-  // LDM own UI / AI tools
-  "claude.ai", "anthropic.com",
-  "chatgpt.com", "chat.openai.com",
-  // Captcha providers — challenge blobs are application/octet-stream
-  "hcaptcha.com",          // api.hcaptcha.com/getcaptcha/...
-  "recaptcha.net",
-  "challenges.cloudflare.com",
-  "turnstile.cloudflare.com",
-  "captcha.com",
-  "funcaptcha.com", "arkoselabs.com",
-  "mtcaptcha.com",
-  "geetest.com",
-  // Auth / SSO / fingerprinting
+  "claude.ai", "anthropic.com", "chatgpt.com", "chat.openai.com",
+  "hcaptcha.com", "recaptcha.net", "challenges.cloudflare.com",
+  "turnstile.cloudflare.com", "funcaptcha.com", "arkoselabs.com",
+  "captcha.com", "mtcaptcha.com", "geetest.com",
   "accounts.google.com", "oauth2.googleapis.com",
-  "auth0.com", "okta.com",
-  "login.microsoftonline.com",
-  // Google infrastructure
+  "auth0.com", "okta.com", "login.microsoftonline.com",
   "google.com", "googleapis.com", "gstatic.com",
   "googleusercontent.com", "googlevideo.com",
   "lh3.google", "lh4.google", "lh5.google", "lh6.google",
   "youtube.com", "youtu.be",
-  // Developer / paste tools
   "stackoverflow.com", "codepen.io", "jsfiddle.net",
   "pastebin.com", "gist.github.com",
-  // Facebook infrastructure (social video stored via isSocialCDN, not intercepted)
   "edge-chat.facebook.com", "mqtt",
-  // Cloud storage control planes (actual file downloads handled separately)
   "mega.co.nz", "mega.nz",
-  // Analytics / CDN infrastructure
-  "cloudflare.com",
-  "fastly.com",
-  "akamaihd.net",
 ];
+
+// Rewrite API/embed URLs to canonical watch-page URLs so yt-dlp handles them.
+// api.redgifs.com/v2/gifs/{id}/sd.m3u8 → www.redgifs.com/watch/{id}
+function normalizeApiUrl(url) {
+  try {
+    var u = new URL(url);
+    if (u.hostname === 'api.redgifs.com') {
+      var m = u.pathname.match(/^\/v2\/gifs\/([^\/]+)\//);
+      if (m) return 'https://www.redgifs.com/watch/' + m[1];
+    }
+  } catch(e) {}
+  return url;
+}
 
 browser.webRequest.onHeadersReceived.addListener(
   function(details) {
@@ -206,7 +238,6 @@ browser.webRequest.onHeadersReceived.addListener(
     var url = details.url;
     var lowerUrl = url.toLowerCase();
     console.log("LDM intercept check:", url);
-    // Skip all domains that should never be intercepted
     for (var sd = 0; sd < skipDomains.length; sd++) {
       if (lowerUrl.includes(skipDomains[sd])) return {};
     }
@@ -222,9 +253,8 @@ browser.webRequest.onHeadersReceived.addListener(
     var trackingPathPatterns = [
       "/fp/", "/fp?", "/fingerprint", "/beacon", "/pixel",
       "/telemetry", "/collect", "/track?", "/track/", "/r/collect",
-      // Captcha challenge endpoints
       "/getcaptcha/", "/captcha/", "/challenge/", "/v2/anchor", "/v2/reload",
-      "/v3/", "/recaptcha/", "/hcaptcha/",
+      "/recaptcha/", "/hcaptcha/",
     ];
     try {
       var u = new URL(url);
@@ -366,8 +396,12 @@ browser.webRequest.onHeadersReceived.addListener(
       if (ct.includes("text/x-python")) return {};
       if (ct.includes("text/x-sh")) return {};
       if (ct.includes("application/x-python")) return {};
+      if (ct.startsWith("font/")) return {};
+      if (ct.includes("application/font-")) return {};
+      if (ct.includes("application/x-font-")) return {};
+      if (ct.includes("model/gltf")) return {};
     }
-    var urlPath = url.split("?")[0].toLowerCase();
+    var urlPath = stripVersionSuffix(url.split("?")[0].toLowerCase());
     for (var k = 0; k < skipExts.length; k++) {
       if (urlPath.endsWith(skipExts[k])) return {};
     }
@@ -377,14 +411,41 @@ browser.webRequest.onHeadersReceived.addListener(
     }
     var filename = "";
     if (contentDisposition) {
-      var match = contentDisposition.value.match(/filename[^=]*=\s*["']?([^"'\s;]+)/i);
-      if (match) filename = decodeURIComponent(match[1].trim());
+      // RFC 5987 form takes priority: filename*=UTF-8''<percent-encoded>.
+      // Match the charset/lang block as one unit so the value capture can't
+      // bleed back into "UTF-8" (which the old regex captured as the name).
+      var cdVal = contentDisposition.value;
+      var rfc = cdVal.match(/filename\*\s*=\s*[\w-]+'[^']*'([^;\r\n]+)/i);
+      if (rfc) {
+        try { filename = decodeURIComponent(rfc[1].trim()); }
+        catch (e) { filename = rfc[1].trim(); }
+      }
+      if (!filename) {
+        var q = cdVal.match(/filename\s*=\s*"([^"]+)"/i);
+        if (q) filename = q[1].trim();
+      }
+      if (!filename) {
+        var bare = cdVal.match(/filename\s*=\s*([^;\r\n]+)/i);
+        if (bare) filename = bare[1].trim().replace(/^["']|["']$/g, '');
+      }
     }
     if (!filename) {
       filename = url.split("?")[0].split("/").pop() || "download";
     }
+    try { filename = decodeURIComponent(filename); } catch (e) {}
+    // Tracking / identity APIs (e.g. first-id.fr/firstId, .../api/v1/info) ship
+    // a Content-Disposition: attachment or octet-stream body to dodge caches,
+    // which trips the intercept on a request the user never asked to save —
+    // they landed in the list as bogus "info" / "firstId" downloads. A genuine
+    // file download resolves to a name with an extension; a bare, extension-less
+    // name on an XHR/fetch ("other") request is an API response, not a file.
+    if ((details.type === "xmlhttprequest" || details.type === "other") &&
+        filename.indexOf(".") === -1) {
+      return {};
+    }
+    var filenameLower = stripVersionSuffix(filename.toLowerCase());
     for (var m = 0; m < skipExts.length; m++) {
-      if (filename.toLowerCase().endsWith(skipExts[m])) return {};
+      if (filenameLower.endsWith(skipExts[m])) return {};
     }
     // Skip HLS/DASH segment URLs — numbered chunks served by CDNs
     var segmentPatterns = [
@@ -411,7 +472,7 @@ browser.webRequest.onHeadersReceived.addListener(
     );
     if (isManifest || isHLSType) {
       if (!isCFProtected(url)) {
-        tabM3u8Store[details.tabId] = url;
+        tabM3u8Store[details.tabId] = normalizeApiUrl(url);
       }
       return {};
     }
@@ -419,6 +480,10 @@ browser.webRequest.onHeadersReceived.addListener(
     // Video/audio: intercept if it's a direct navigation or explicit attachment.
     // Inline video/audio (embedded players) pass through — Capture button handles them.
     if (isVideoAudio(url, contentType) && !isAttachment && !isDirectVideoNav) return {};
+
+    // Category allow-list: only auto-capture files whose extension maps to one
+    // of LDM's download categories. Anything else is left to the browser.
+    if (!inAllowedCategory(filename)) return {};
 
     // Attachment downloads only — intercept and send to LDM
     if (handledUrls.has(url)) {
@@ -454,28 +519,100 @@ browser.downloads.onCreated.addListener(function(downloadItem) {
   if (!hasExt && mime === "application/octet-stream") return;
   if (!hasExt && mime === "") return;
   if (!interceptEnabled) return;
+  // Blocked hosts (claude.ai, figma.com, …) are intentionally left to Firefox.
+  // sendToPython() already no-ops on them, but we must also skip the erase()
+  // below — otherwise Firefox downloads the file fine yet we wipe it from its
+  // download list, making it look like the download vanished.
+  if (isBlockedHost(url)) return;
+  // Only route category files through LDM; let the browser keep the rest.
+  if (!inAllowedCategory(filename)) return;
   sendToPython(url, filename || "download", "file", "");
   browser.downloads.erase({ id: downloadItem.id });
 });
 
+// Hosts whose downloads must never be routed through LDM (Claude artifacts,
+// design handoffs, etc. — the user explicitly opted these out).
+var BLOCKED_HOSTS = ["claude.ai", "anthropic.com", "figma.com"];
+
+function isBlockedHost(url) {
+  if (!url) return false;
+  // blob:/filesystem: wrap an inner origin; URL.hostname returns "" for them,
+  // so peel the wrapper before parsing.
+  var u = url;
+  var low = u.toLowerCase();
+  if (low.indexOf("blob:") === 0 || low.indexOf("filesystem:") === 0) {
+    u = u.slice(u.indexOf(":") + 1);
+  }
+  try {
+    var host = new URL(u).hostname.toLowerCase();
+    for (var i = 0; i < BLOCKED_HOSTS.length; i++) {
+      var h = BLOCKED_HOSTS[i];
+      if (host === h || host.endsWith("." + h)) return true;
+    }
+  } catch (e) {}
+  return false;
+}
+
+// Collect cookies for the target (and page) URL so LDM can authenticate
+// downloads without reading the browser profile from disk — required for the
+// Flatpak build, which is sandboxed away from ~/.mozilla et al.
+function collectBridgeCookies(url, referer) {
+  var urls = [];
+  if (url) urls.push(url);
+  if (referer && referer !== url) urls.push(referer);
+  if (!urls.length || !browser.cookies || !browser.cookies.getAll) {
+    return Promise.resolve([]);
+  }
+  var jobs = urls.map(function(u) {
+    return browser.cookies.getAll({ url: u }).catch(function() { return []; });
+  });
+  return Promise.all(jobs).then(function(lists) {
+    var seen = {}, out = [];
+    lists.forEach(function(list) {
+      (list || []).forEach(function(c) {
+        var k = c.domain + "|" + c.path + "|" + c.name;
+        if (seen[k]) return;
+        seen[k] = 1;
+        out.push({
+          domain: c.domain, name: c.name, value: c.value, path: c.path,
+          secure: c.secure, httpOnly: c.httpOnly, hostOnly: c.hostOnly,
+          expirationDate: c.expirationDate, session: c.session
+        });
+      });
+    });
+    return out;
+  }).catch(function() { return []; });
+}
+
 function sendToPython(url, filename, type, referer) {
+  if (isBlockedHost(url)) return;
   referer = referer || "";
-  var bridgeUrl = "http://127.0.0.1:9999/?url=" + encodeURIComponent(url) +
-    "&filename=" + encodeURIComponent(filename) +
-    "&type=" + type +
-    "&referer=" + encodeURIComponent(referer);
-  fetch(bridgeUrl).catch(function() {
-    console.error("Linux Download Manager is not running.");
+  collectBridgeCookies(url, referer).then(function(cookies) {
+    // text/plain keeps it a "simple" request (no CORS preflight); the app
+    // parses the body as JSON regardless of the declared content type.
+    fetch("http://127.0.0.1:9999/", {
+      method: "POST",
+      headers: { "Content-Type": "text/plain" },
+      body: JSON.stringify({
+        url: url, filename: filename, type: type,
+        referer: referer, cookies: cookies
+      })
+    }).catch(function() {
+      console.error("Linux Download Manager is not running.");
+    });
   });
 }
 
 // Relay bridge calls from content scripts (avoids iframe CORS blocks)
 browser.runtime.onMessage.addListener(function(message, sender, sendResponse) {
   if (message.action === 'bridge') {
-    // Forward the originating tab URL as Referer — required by hotlink-protected
-    // CDNs (e.g. phncdn 404s segment requests without it).
-    var bridgeReferer = (sender.tab && sender.tab.url) || '';
-    sendToPython(message.url, message.filename || 'download', message.type || 'file', bridgeReferer);
+    // Carry the page URL through as referer. LDM uses it both as the
+    // outgoing Referer header for CDN fetches and to recover when a
+    // captured CDN URL on its own can't yield a playable video (e.g.
+    // Twitter DASH .m4s segments — yt-dlp's TwitterIE needs the tweet
+    // status URL to extract the full video).
+    var ref = (message.referer || (sender && sender.tab && sender.tab.url) || '');
+    sendToPython(message.url, message.filename || 'download', message.type || 'file', ref);
     sendResponse({ ok: true });
   }
   // Return stored m3u8 for current tab (called from content.js Capture button)
