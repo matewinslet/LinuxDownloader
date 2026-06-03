@@ -1,13 +1,14 @@
 {
   "manifest_version": 3,
   "name": "Linux Download Manager",
-  "version": "2.9.7",
+  "version": "3.1.0",
   "description": "Silent Download Interceptor + Video Sender",
   "permissions": [
     "downloads",
     "activeTab",
     "scripting",
     "contextMenus",
+    "cookies",
     "webRequest",
     "webRequestBlocking",
     "storage",

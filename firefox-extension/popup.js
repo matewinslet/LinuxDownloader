@@ -12,7 +12,7 @@ document.getElementById('captureBtn').addEventListener('click', async () => {
   // YouTube — route directly to YouTubeDialog
   if (isYT) {
     const bridgeUrl = `http://127.0.0.1:9999/?url=${encodeURIComponent(tab.url)}&filename=youtube&type=youtube`;
-    fetch(bridgeUrl)
+    bridgeSend(bridgeUrl)
       .then(() => {
         btn.innerHTML = '&#10003; Sent to YouTube Downloader!';
         btn.style.background = '#dc2626';
@@ -23,12 +23,12 @@ document.getElementById('captureBtn').addEventListener('click', async () => {
   }
 
   // CF-only domains (luluvdo etc.) — page URL → yt-dlp
-  const cfDomains = ['luluvdo.com', 'lulustream.com', 'doodstream.com', 'dood.watch', 'dood.to'];
+  const cfDomains = ['luluvdo.com', 'lulustream.com', 'doodstream.com', 'dood.watch', 'dood.to', 'redgifs.com'];
   const isCF = cfDomains.some(d => tab.url.includes(d));
   if (isCF) {
     const pageUrl = normalizeUrl(tab.url);
     const bridgeUrl = `http://127.0.0.1:9999/?url=${encodeURIComponent(pageUrl)}&filename=${encodeURIComponent(resolveFilename(pageUrl, tab.title))}&type=stream_hls&referer=${encodeURIComponent(pageUrl)}`;
-    fetch(bridgeUrl)
+    bridgeSend(bridgeUrl)
       .then(() => {
         btn.innerHTML = '&#10003; Sent to LDM!';
         btn.style.background = '#27ae60';
@@ -52,7 +52,7 @@ document.getElementById('captureBtn').addEventListener('click', async () => {
       const type       = entry.isTwimg ? 'stream_hls' : 'video_stream';
       const filename   = resolveSocialFilename(entry, tab.url, tab.title);
       const bridgeUrl  = `http://127.0.0.1:9999/?url=${encodeURIComponent(entry.cdnUrl)}&filename=${encodeURIComponent(filename)}&type=${type}&referer=${encodeURIComponent(pageUrl)}`;
-      fetch(bridgeUrl)
+      bridgeSend(bridgeUrl)
         .then(() => {
           btn.innerHTML = '&#10003; Sent to LDM!';
           btn.style.background = '#27ae60';
@@ -69,9 +69,10 @@ document.getElementById('captureBtn').addEventListener('click', async () => {
     chrome.runtime.sendMessage({ action: 'getM3u8ForTab', tabId: tab.id }, r)
   );
   if (stored && stored.url) {
-    const captureFilename = resolveFilename(stored.url, tab.title);
-    const bridgeUrl = `http://127.0.0.1:9999/?url=${encodeURIComponent(stored.url)}&filename=${encodeURIComponent(captureFilename)}&type=stream_hls&referer=${encodeURIComponent(tab.url)}`;
-    fetch(bridgeUrl)
+    const captureUrl      = normalizeApiUrl(stored.url);
+    const captureFilename = resolveFilename(captureUrl, tab.title);
+    const bridgeUrl = `http://127.0.0.1:9999/?url=${encodeURIComponent(captureUrl)}&filename=${encodeURIComponent(captureFilename)}&type=stream_hls&referer=${encodeURIComponent(tab.url)}`;
+    bridgeSend(bridgeUrl)
       .then(() => {
         btn.innerHTML = '&#10003; Sent to LDM!';
         btn.style.background = '#27ae60';
@@ -100,7 +101,7 @@ document.getElementById('captureBtn').addEventListener('click', async () => {
     const captureFilename = resolveFilename(captureUrl, tab.title);
     const captureType     = found.isHLS ? 'stream_hls' : 'video_stream';
     const bridgeUrl = `http://127.0.0.1:9999/?url=${encodeURIComponent(captureUrl)}&filename=${encodeURIComponent(captureFilename)}&type=${captureType}&referer=${encodeURIComponent(tab.url)}`;
-    fetch(bridgeUrl)
+    bridgeSend(bridgeUrl)
       .then(() => {
         btn.innerHTML = '&#10003; Sent to LDM!';
         btn.style.background = '#27ae60';
@@ -115,7 +116,7 @@ document.getElementById('captureBtn').addEventListener('click', async () => {
   const pageUrl     = normalizeUrl(tab.url);
   const pageFilename = resolveFilename(pageUrl, tab.title);
   const bridgeUrl = `http://127.0.0.1:9999/?url=${encodeURIComponent(pageUrl)}&filename=${encodeURIComponent(pageFilename)}&type=stream_hls&referer=${encodeURIComponent(pageUrl)}`;
-  fetch(bridgeUrl)
+  bridgeSend(bridgeUrl)
     .then(() => {
       btn.innerHTML = '&#9654; Sent — press Play if no window opens';
       btn.style.background = '#f97316';
@@ -128,9 +129,23 @@ function normalizeUrl(url) {
   try {
     var u = new URL(url);
     u.pathname = u.pathname.replace(/^\/e\//, '/').replace(/^\/embed\//, '/');
+    if (u.hostname.includes('redgifs.com')) {
+      u.pathname = u.pathname.replace(/^\/ifr\//, '/watch/');
+    }
     ['__cft__', '__tn__', '_nc_cat', '_nc_sid', 'paipv', 'eav'].forEach(p => u.searchParams.delete(p));
     return u.toString();
   } catch(e) { return url; }
+}
+
+function normalizeApiUrl(url) {
+  try {
+    var u = new URL(url);
+    if (u.hostname === 'api.redgifs.com') {
+      var m = u.pathname.match(/^\/v2\/gifs\/([^\/]+)\//);
+      if (m) return 'https://www.redgifs.com/watch/' + m[1];
+    }
+  } catch(e) {}
+  return url;
 }
 
 function resolveSocialFilename(entry, pageUrl, pageTitle) {
@@ -169,7 +184,7 @@ document.getElementById('youtubeBtn').addEventListener('click', async () => {
     return;
   }
   const bridgeUrl = `http://127.0.0.1:9999/?url=${encodeURIComponent(url)}&filename=youtube&type=youtube`;
-  fetch(bridgeUrl)
+  bridgeSend(bridgeUrl)
     .then(() => { document.getElementById('youtubeBtn').innerHTML = '&#10003; Sent to LDM!'; })
     .catch(() => { document.getElementById('youtubeBtn').innerText = 'Error: App Closed?'; document.getElementById('youtubeBtn').style.background = '#c0392b'; });
 });
@@ -187,6 +202,54 @@ toggle.addEventListener('change', () => {
   browser.storage.local.set({ interceptEnabled: enabled });
   sub.textContent = enabled ? 'Sending to Linux DM' : 'Firefox handles downloads';
 });
+
+// Collect cookies for the captured page/stream so authenticated downloads work
+// inside the Flatpak sandbox (which can't read the browser profile from disk).
+function collectBridgeCookies(url, referer) {
+  const urls = [];
+  if (url) urls.push(url);
+  if (referer && referer !== url) urls.push(referer);
+  const api = (typeof browser !== 'undefined' && browser.cookies) ? browser.cookies
+            : (typeof chrome !== 'undefined' && chrome.cookies) ? chrome.cookies : null;
+  if (!urls.length || !api || !api.getAll) return Promise.resolve([]);
+  const jobs = urls.map(u => Promise.resolve(api.getAll({ url: u })).catch(() => []));
+  return Promise.all(jobs).then(lists => {
+    const seen = {}, out = [];
+    lists.forEach(list => (list || []).forEach(c => {
+      const k = c.domain + '|' + c.path + '|' + c.name;
+      if (seen[k]) return; seen[k] = 1;
+      out.push({ domain: c.domain, name: c.name, value: c.value, path: c.path,
+                 secure: c.secure, httpOnly: c.httpOnly, hostOnly: c.hostOnly,
+                 expirationDate: c.expirationDate, session: c.session });
+    }));
+    return out;
+  }).catch(() => []);
+}
+
+// Accepts the legacy GET bridge URL, attaches cookies, and POSTs to LDM.
+// Returns a promise so existing .then()/.catch() chains keep working.
+async function bridgeSend(bridgeUrl) {
+  try {
+    const u = new URL(bridgeUrl);
+    const p = u.searchParams;
+    const target  = p.get('url') || '';
+    const referer = p.get('referer') || '';
+    const cookies = await collectBridgeCookies(target, referer);
+    return fetch('http://127.0.0.1:9999/', {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain' },
+      body: JSON.stringify({
+        url: target,
+        filename: p.get('filename') || '',
+        type: p.get('type') || 'file',
+        referer: referer,
+        cookies: cookies
+      })
+    });
+  } catch (e) {
+    return fetch(bridgeUrl);
+  }
+}
 
 // Filename resolver
 function resolveFilename(url, pageTitle) {
