@@ -45,3 +45,6 @@ firefox-extension/web-ext-artifacts/
 .idea/
 .DS_Store
 *.swp
+
+# Local flatpak test manifest
+*.local.json
