@@ -672,6 +672,46 @@ def cookie_opts():
     return {}
 
 
+# Hosts that block yt-dlp's default urllib TLS fingerprint (HTTP 410 Gone /
+# TLS handshake timeouts) while serving a real browser fine. PornHub started
+# fingerprinting JA3 in 2026; the only reliable fix is routing the request
+# through curl_cffi so the TLS/HTTP2 fingerprint looks like a real browser.
+_IMPERSONATE_HOSTS = (
+    "pornhub.com", "pornhubpremium.com", "pornhub.org", "pornhub.net",
+    "youporn.com", "redtube.com", "tube8.com", "thumbzilla.com",
+)
+
+_impersonate_supported = None  # cached one-time probe for curl_cffi availability
+
+
+def _can_impersonate():
+    global _impersonate_supported
+    if _impersonate_supported is None:
+        try:
+            from yt_dlp.networking._curlcffi import CurlCFFIRH  # noqa: F401
+            _impersonate_supported = True
+        except Exception:
+            _impersonate_supported = False
+    return _impersonate_supported
+
+
+def impersonate_opts(url=""):
+    """yt-dlp options that route requests through a browser-impersonating
+    client for hosts known to block the default TLS fingerprint. Returns {}
+    for every other host (no behaviour change) and when curl_cffi is missing,
+    so it degrades gracefully to the plain urllib path."""
+    try:
+        host = (urlparse(url).hostname or "").lower()
+    except Exception:
+        return {}
+    if not any(host == h or host.endswith("." + h) for h in _IMPERSONATE_HOSTS):
+        return {}
+    if not _can_impersonate():
+        return {}
+    from yt_dlp.networking.impersonate import ImpersonateTarget
+    return {"impersonate": ImpersonateTarget("chrome")}
+
+
 class BridgeHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         try:
@@ -1664,6 +1704,7 @@ class FetchFormatsThread(QThread):
                 'noplaylist': True,
                 'http_headers': {'User-Agent': HEADERS['User-Agent']},
                 **cookie_opts(),
+                **impersonate_opts(self.url),
             }
             print("[YT-FETCH] Calling extract_info...", flush=True)
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -1776,6 +1817,7 @@ class YouTubeDownloadThread(QThread):
             self.ydl_opts['progress_hooks'] = [self.hook]
             self.ydl_opts['noplaylist'] = True
             self.ydl_opts.update(cookie_opts())
+            self.ydl_opts.update(impersonate_opts(self.url))
             with yt_dlp.YoutubeDL(self.ydl_opts) as ydl:
                 info = ydl.extract_info(self.url, download=True)
                 if info is None:
@@ -4724,6 +4766,7 @@ class DownloadThread(QThread):
                 'ignoreerrors': False,
                 'http_headers': {'User-Agent': HEADERS['User-Agent']},
                 'nocheckcertificate': True,
+                **impersonate_opts(self.url),
             }
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(self.url, download=True)
