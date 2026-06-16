@@ -136,7 +136,7 @@ THEMES = {
 }
 
 file_types = {
-    "Videos":     ["mp4", "mkv", "avi", "mov", "webm", "ts"],
+    "Videos":     ["mp4", "mkv", "avi", "mov", "webm", "ts", "mpeg", "mpg", "m4v", "flv"],
     "Music":      ["mp3", "flac", "aac", "wav", "ogg", "m4a"],
     "Documents":  ["pdf", "doc", "docx", "txt", "ppt", "pptx"],
     "Compressed": ["zip", "rar", "7z", "tar", "gz"],
@@ -264,6 +264,8 @@ def get_file_icon(filename):
         "mp4": "video-x-generic", "mkv": "video-x-generic",
         "avi": "video-x-generic", "mov": "video-x-generic",
         "webm": "video-x-generic", "ts": "video-x-generic",
+        "mpeg": "video-x-generic", "mpg": "video-x-generic",
+        "m4v": "video-x-generic", "flv": "video-x-generic",
         "mp3": "audio-x-generic", "flac": "audio-x-generic",
         "aac": "audio-x-generic", "wav": "audio-x-generic",
         "ogg": "audio-x-generic", "m4a": "audio-x-generic",
@@ -709,7 +711,17 @@ def impersonate_opts(url=""):
     if not _can_impersonate():
         return {}
     from yt_dlp.networking.impersonate import ImpersonateTarget
-    return {"impersonate": ImpersonateTarget("chrome")}
+    # These hosts tarpit flagged IPs (TCP accepted, no response → 20s timeout)
+    # when hit too fast. Give the request a longer socket window and several
+    # automatic retries so a transient throttle recovers instead of failing
+    # the whole download outright.
+    return {
+        "impersonate":      ImpersonateTarget("chrome"),
+        "socket_timeout":   30,
+        "retries":          5,
+        "fragment_retries": 10,
+        "extractor_retries": 3,
+    }
 
 
 class BridgeHandler(BaseHTTPRequestHandler):
@@ -830,6 +842,63 @@ _GOFILE_WT = None
 _GOFILE_AUTHED_CONTENT = set()
 _GOFILE_LAST_ERR = ""
 _GOFILE_LOCK = threading.Lock()
+
+# ── Bunkr ────────────────────────────────────────────────────────────────────
+# Bunkr download pages (dl.bunkr.<tld>/file/<id>) no longer expose the file in
+# their URL — the path is just a numeric id and the page is HTML. The real file
+# sits behind a 2-step JS flow the app has to replay:
+#   1) POST {"id": <id>} to /api/_001_v2  → {mediafiles, path, original}
+#   2) GET  <sign-service>/sign?path=<path>  → {token, ex}  (short-lived)
+#   final = mediafiles + path + ?n=<name>&token=<token>&ex=<ex>
+# yt-dlp's generic extractor can't do this, so the bare id URL used to be handed
+# to the stream dialog and silently fail.
+BUNKR_SIGN_SERVICE_URL = "https://glb-apisign.cdn.cr/sign"
+
+
+def bunkr_file_id(url):
+    try:
+        m = re.search(r"/file/(\w+)", urlparse(url).path or "")
+    except Exception:
+        return None
+    return m.group(1) if m else None
+
+
+def is_bunkr_url(url):
+    try:
+        host = (urlparse(url).hostname or "").lower()
+    except Exception:
+        return False
+    return "bunkr" in host and bool(bunkr_file_id(url))
+
+
+def resolve_bunkr_url(url):
+    """Resolve a Bunkr download page to its direct, signed CDN URL.
+    Returns (direct_url, filename) on success or (None, None) on any failure,
+    so callers can fall back to the original behaviour."""
+    fid = bunkr_file_id(url)
+    if not fid:
+        return None, None
+    try:
+        from urllib.parse import urlencode
+        parts = urlparse(url)
+        base = f"{parts.scheme}://{parts.netloc}"
+        s = requests.Session()
+        s.headers.update({"User-Agent": HEADERS["User-Agent"], "Referer": url})
+        meta = s.post(f"{base}/api/_001_v2", json={"id": fid},
+                      timeout=20).json()
+        raw = meta["mediafiles"] + meta["path"]
+        name = meta.get("original") or ""
+        sign = s.get(BUNKR_SIGN_SERVICE_URL,
+                     params={"path": unquote(urlparse(raw).path)},
+                     timeout=20).json()
+        q = {"token": sign["token"], "ex": sign["ex"]}
+        if name:
+            q["n"] = name
+        direct = raw + ("&" if "?" in raw else "?") + urlencode(q)
+        return direct, name
+    except Exception:
+        return None, None
+
 
 def is_gofile_url(url):
     try:
@@ -8401,6 +8470,16 @@ class DownloadManager(QMainWindow):
         if is_youtube_url(url):
             self.open_youtube_dialog(prefill_url=url)
             return
+        # Bunkr download pages hide the file behind a signed-URL JS flow; resolve
+        # it to the direct CDN link (with its real filename) and download that as
+        # a plain file. Falls through to default handling if resolution fails.
+        if is_bunkr_url(url):
+            direct, real_name = resolve_bunkr_url(url)
+            if direct:
+                self._check_and_enqueue(
+                    direct, real_name or f"bunkr_{bunkr_file_id(url)}",
+                    False, "")
+                return
         lurl  = url.lower()
         path  = url.split("?")[0]
         name  = path.split("/")[-1] or ""
