@@ -1,0 +1,22 @@
+pkgbase = linux-download-manager
+	pkgdesc = Download files and videos with browser integration (Qt6, yt-dlp)
+	pkgver = 2.0.0
+	pkgrel = 1
+	url = https://github.com/matewinslet/LinuxDownloader
+	arch = x86_64
+	license = MIT
+	makedepends = git
+	makedepends = python
+	makedepends = python-pip
+	depends = python
+	depends = ffmpeg
+	depends = libxcb
+	depends = xcb-util-cursor
+	depends = libxkbcommon-x11
+	depends = fontconfig
+	optdepends = deno: JavaScript runtime for YouTube downloads
+	optdepends = curl: used by some download backends
+	source = git+https://github.com/matewinslet/LinuxDownloader.git#tag=v2.0
+	sha256sums = SKIP
+
+pkgname = linux-download-manager

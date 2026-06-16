@@ -1,0 +1,37 @@
+# Maintainer: Tanjim <tpodbcs@gmail.com>
+pkgname=linux-download-manager
+pkgver=2.0.0
+pkgrel=1
+pkgdesc="Download files and videos with browser integration (Qt6, yt-dlp)"
+arch=('x86_64')
+url="https://github.com/matewinslet/LinuxDownloader"
+license=('MIT')
+# Runtime: system interpreter + Qt/xcb libs. The version-sensitive Python deps
+# (fresh yt-dlp, pinned curl_cffi<0.15) are bundled in a venv at build time so
+# they can't drift out from under the app — see packaging/requirements.txt.
+depends=('python' 'ffmpeg' 'libxcb' 'xcb-util-cursor' 'libxkbcommon-x11' 'fontconfig')
+makedepends=('git' 'python' 'python-pip')
+optdepends=('deno: JavaScript runtime for YouTube downloads'
+            'curl: used by some download backends')
+source=("git+https://github.com/matewinslet/LinuxDownloader.git#tag=v2.0")
+sha256sums=('SKIP')
+
+package() {
+  cd "$srcdir/LinuxDownloader"
+
+  # App tree + bundled venv into /opt/linux-downloader.
+  SRC_DIR="$PWD" bash packaging/build-bundle.sh "$pkgdir"
+
+  install -Dm755 packaging/linux-downloader "$pkgdir/usr/bin/linux-downloader"
+  install -Dm644 packaging/linux-download-manager.desktop \
+    "$pkgdir/usr/share/applications/linux-download-manager.desktop"
+
+  for sz in 16 32 48 64 128 256 512; do
+    install -Dm644 "icons/linux-downloader-${sz}.png" \
+      "$pkgdir/usr/share/icons/hicolor/${sz}x${sz}/apps/linux-downloader.png"
+  done
+  install -Dm644 icons/linux-downloader.svg \
+    "$pkgdir/usr/share/icons/hicolor/scalable/apps/linux-downloader.svg"
+
+  install -Dm644 LICENSE.txt "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}
