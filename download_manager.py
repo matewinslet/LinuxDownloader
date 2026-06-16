@@ -675,8 +675,8 @@ def cookie_opts():
 
 
 # Hosts that block yt-dlp's default urllib TLS fingerprint (HTTP 410 Gone /
-# TLS handshake timeouts) while serving a real browser fine. PornHub started
-# fingerprinting JA3 in 2026; the only reliable fix is routing the request
+# TLS handshake timeouts) while serving a real browser fine. Some media hosts
+# began fingerprinting JA3 in 2026; the only reliable fix is routing the request
 # through curl_cffi so the TLS/HTTP2 fingerprint looks like a real browser.
 _IMPERSONATE_HOSTS = (
     "pornhub.com", "pornhubpremium.com", "pornhub.org", "pornhub.net",

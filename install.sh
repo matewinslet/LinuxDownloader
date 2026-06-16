@@ -82,7 +82,7 @@ echo "  Done."
 echo "► [3/6] Installing Python packages (PyQt6, requests, yt-dlp, curl_cffi)..."
 # curl_cffi is pinned <0.15: yt-dlp 2026.3.17 only supports 0.10.x–0.14.x and
 # refuses to load 0.15+, which silently disables browser impersonation and
-# breaks JA3-fingerprinting hosts like PornHub (HTTP 410 Gone).
+# breaks hosts that fingerprint the TLS/JA3 handshake (HTTP 410 Gone).
 pip3 install PyQt6 requests yt-dlp browser-cookie3 "curl_cffi>=0.10,<0.15" pycryptodome --break-system-packages -q 2>/dev/null || \
 pip3 install PyQt6 requests yt-dlp browser-cookie3 "curl_cffi>=0.10,<0.15" pycryptodome -q
 echo "  Done."
