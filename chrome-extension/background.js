@@ -119,11 +119,13 @@ var skipExts = [
 var videoAudioMimes = [
   'video/mp4', 'video/x-matroska', 'video/webm', 'video/avi',
   'video/quicktime', 'video/mp2t', 'video/vnd.dlna.mpeg-tts',
+  'video/mpeg',
   'audio/mpeg', 'audio/flac', 'audio/wav', 'audio/aac',
   'audio/ogg', 'audio/x-m4a',
 ];
 var videoAudioExts = [
   '.mp4', '.mkv', '.webm', '.avi', '.mov', '.ts', '.flv', '.m4v',
+  '.mpeg', '.mpg',
   '.mp3', '.flac', '.wav', '.aac', '.ogg', '.m4a',
 ];
 
@@ -147,7 +149,7 @@ function isVideoAudio(url, contentType) {
 // downloader: we only auto-capture types LDM actually sorts into a category.
 var allowedCategoryExts = [
   // Videos
-  '.mp4', '.mkv', '.avi', '.mov', '.webm', '.ts',
+  '.mp4', '.mkv', '.avi', '.mov', '.webm', '.ts', '.mpeg', '.mpg', '.m4v', '.flv',
   // Music
   '.mp3', '.flac', '.aac', '.wav', '.ogg', '.m4a',
   // Documents
