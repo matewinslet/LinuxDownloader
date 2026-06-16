@@ -7,8 +7,11 @@ URL:            https://github.com/matewinslet/LinuxDownloader
 BuildArch:      x86_64
 
 # The app bundles its Python deps in a venv (built in %%install), so at runtime
-# it only needs the system interpreter and the Qt/xcb runtime libraries.
-Requires:       python3
+# it only needs the matching interpreter and the Qt/xcb runtime libraries.
+# Pin python3.12 (the version the bundle is built against, in the fedora:40 CI
+# container) — Fedora ships a python3.12 package even on 41/42, so this keeps
+# the package working across Fedora releases regardless of the default Python.
+Requires:       python3.12
 Requires:       ffmpeg
 Requires:       xcb-util-cursor
 Requires:       libxkbcommon-x11
