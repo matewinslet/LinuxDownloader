@@ -27,6 +27,15 @@ python3 -m venv "$APPDIR/venv"
 "$APPDIR/venv/bin/pip" install --quiet --upgrade pip
 "$APPDIR/venv/bin/pip" install --quiet -r "$SRC_DIR/packaging/requirements.txt"
 
+# 2b. Pin the venv to the EXACT interpreter (/usr/bin/pythonX.Y) instead of the
+#     system default `python3`. Otherwise, when a distro moves its default
+#     Python forward (e.g. Fedora 41+/python3.13), the default `python3` no
+#     longer matches this venv's compiled wheels and the app won't start. The
+#     packages then depend on that exact pythonX.Y, which distros keep shipping
+#     across releases.
+PYVER="$(python3 -c 'import sys;print("%d.%d"%sys.version_info[:2])')"
+ln -sfn "/usr/bin/python${PYVER}" "$APPDIR/venv/bin/python3"
+
 # 3. Trim bloat so the package is as small as a bundled Qt app can be.
 find "$APPDIR/venv" -type d -name '__pycache__' -prune -exec rm -rf {} + 2>/dev/null || true
 "$APPDIR/venv/bin/pip" cache purge 2>/dev/null || true
