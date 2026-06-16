@@ -900,6 +900,90 @@ def resolve_bunkr_url(url):
         return None, None
 
 
+# ── MixDrop ───────────────────────────────────────────────────────────────────
+# MixDrop hides the real .mp4 behind a Dean-Edwards-packed JS blob on the embed
+# (/e/<id>) page that assigns `MDCore.wurl` at runtime. yt-dlp has no extractor
+# for it, so we replay the flow: fetch the embed page, unpack the packer, read
+# the protocol-relative wurl, and hand the direct URL (with a MixDrop Referer,
+# which its CDN requires) to the downloader. MixDrop rotates TLDs
+# (mixdrop.ag/.co/.to/.club/.vc/...), so match on the host stem. Match the exact
+# spelling only — lookalike domains (miixdrop.net etc.) are not real mirrors.
+_MIXDROP_HOST_RE = re.compile(r"^(?:www\.)?mixdrop\.", re.I)
+
+
+def mixdrop_file_id(url):
+    try:
+        m = re.search(r"/[ef]/(\w+)", urlparse(url).path or "")
+    except Exception:
+        return None
+    return m.group(1) if m else None
+
+
+def is_mixdrop_url(url):
+    try:
+        host = (urlparse(url).hostname or "").lower()
+    except Exception:
+        return False
+    return bool(_MIXDROP_HOST_RE.match(host)) and bool(mixdrop_file_id(url))
+
+
+def _unpack_packed_js(packed):
+    """Decode a Dean-Edwards p.a.c.k.e.r payload back to its original source."""
+    m = re.search(r"\}\('(.*)',\s*(\d+),\s*(\d+),\s*'(.*)'\.split\('\|'\)",
+                  packed, re.DOTALL)
+    if not m:
+        return ""
+    payload, radix, count = m.group(1), int(m.group(2)), int(m.group(3))
+    symtab = m.group(4).split("|")
+    payload = payload.encode("latin-1", "backslashreplace").decode("unicode_escape")
+    alphabet = "0123456789abcdefghijklmnopqrstuvwxyz"
+
+    def base(n):
+        return (("" if n < radix else base(n // radix)) +
+                (chr(n % radix + 29) if n % radix > 35 else alphabet[n % radix]))
+
+    lookup = {}
+    for i in range(count):
+        key = base(i)
+        lookup[key] = symtab[i] if i < len(symtab) and symtab[i] else key
+    return re.sub(r"\b\w+\b", lambda t: lookup.get(t.group(0), t.group(0)), payload)
+
+
+def resolve_mixdrop_url(url):
+    """Resolve a MixDrop embed/file URL to its direct CDN URL.
+    Returns (direct_url, filename, referer) on success or (None, None, None) on
+    any failure, so callers can fall back to the original behaviour."""
+    fid = mixdrop_file_id(url)
+    if not fid:
+        return None, None, None
+    try:
+        parts = urlparse(url)
+        netloc = parts.netloc or "mixdrop.ag"
+        base_url = f"{parts.scheme or 'https'}://{netloc}"
+        embed = f"{base_url}/e/{fid}"
+        s = requests.Session()
+        s.headers.update({"User-Agent": HEADERS["User-Agent"],
+                          "Referer": base_url + "/"})
+        html = s.get(embed, timeout=20).text
+        blk = re.search(r"eval\(function\(p,a,c,k,e,d\).*?\.split\('\|'\)[^<]*?\)\)",
+                        html, re.DOTALL)
+        src = _unpack_packed_js(blk.group(0)) if blk else html
+        m = re.search(r"MDCore\.wurl\s*=\s*[\"']([^\"']+)", src)
+        if not m:
+            return None, None, None
+        wurl = m.group(1)
+        if wurl.startswith("//"):
+            wurl = "https:" + wurl
+        elif wurl.startswith("/"):
+            wurl = base_url + wurl
+        tm = re.search(r"MDCore\.title\s*=\s*[\"']([^\"']+)", src)
+        title = (tm.group(1).strip() if tm else "") or f"mixdrop_{fid}"
+        name = title if title.lower().endswith(".mp4") else title + ".mp4"
+        return wurl, name, embed
+    except Exception:
+        return None, None, None
+
+
 def is_gofile_url(url):
     try:
         host = (urlparse(url).hostname or "").lower()
@@ -8479,6 +8563,16 @@ class DownloadManager(QMainWindow):
                 self._check_and_enqueue(
                     direct, real_name or f"bunkr_{bunkr_file_id(url)}",
                     False, "")
+                return
+        # MixDrop hides the .mp4 behind packed JS that yt-dlp can't read; resolve
+        # it to the direct CDN link and download with a MixDrop Referer (its CDN
+        # rejects requests without one). Falls through if resolution fails.
+        if is_mixdrop_url(url):
+            direct, real_name, referer = resolve_mixdrop_url(url)
+            if direct:
+                self._check_and_enqueue(
+                    direct, real_name or f"mixdrop_{mixdrop_file_id(url)}.mp4",
+                    False, referer or "")
                 return
         lurl  = url.lower()
         path  = url.split("?")[0]
