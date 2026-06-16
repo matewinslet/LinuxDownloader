@@ -31,4 +31,15 @@ python3 -m venv "$APPDIR/venv"
 find "$APPDIR/venv" -type d -name '__pycache__' -prune -exec rm -rf {} + 2>/dev/null || true
 "$APPDIR/venv/bin/pip" cache purge 2>/dev/null || true
 
+# 4. Rewrite the staging/buildroot prefix out of the venv's text files
+#    (shebangs, activate scripts, pyvenv.cfg) so they reference the final
+#    install path. Required for rpm's check-buildroot QA, and correct for the
+#    .deb too (the launcher calls venv/bin/python directly, but the console
+#    scripts and pyvenv.cfg should still point at /opt/linux-downloader).
+RUNTIME_DIR="/opt/linux-downloader"
+if [ "$APPDIR" != "$RUNTIME_DIR" ]; then
+  grep -rIlZ -- "$APPDIR" "$APPDIR/venv" 2>/dev/null \
+    | xargs -0 -r sed -i "s|$APPDIR|$RUNTIME_DIR|g"
+fi
+
 echo "==> Bundle ready: $(du -sh "$APPDIR" | cut -f1)"

@@ -60,5 +60,5 @@ gtk-update-icon-cache -f /usr/share/icons/hicolor &>/dev/null || :
 update-desktop-database /usr/share/applications &>/dev/null || :
 
 %changelog
-* Mon Jun 16 2026 Tanjim <tpodbcs@gmail.com> - 2.0.0-1
+* Tue Jun 16 2026 Tanjim <tpodbcs@gmail.com> - 2.0.0-1
 - Initial RPM packaging (self-contained bundle).
