@@ -8508,6 +8508,25 @@ class DownloadManager(QMainWindow):
             referer  = item[3] if len(item) > 3 else ""
             if self.is_duplicate(url):
                 continue
+            # Bunkr/MixDrop pages hide the real file behind JS that yt-dlp can't
+            # read. The floating capture button forwards the page URL here,
+            # bypassing the manual-entry resolver, so resolve it to the direct
+            # CDN link here too. Falls through if resolution fails.
+            if is_bunkr_url(url):
+                direct, real_name = resolve_bunkr_url(url)
+                if direct:
+                    self.raise_(); self.activateWindow()
+                    self._check_and_enqueue(
+                        direct, real_name or f"bunkr_{bunkr_file_id(url)}", False, "")
+                    continue
+            if is_mixdrop_url(url):
+                direct, real_name, ref = resolve_mixdrop_url(url)
+                if direct:
+                    self.raise_(); self.activateWindow()
+                    self._check_and_enqueue(
+                        direct, real_name or f"mixdrop_{mixdrop_file_id(url)}.mp4",
+                        False, ref or "")
+                    continue
             if msg_type == "youtube":
                 self.raise_()
                 self.activateWindow()
