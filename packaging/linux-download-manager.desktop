@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Linux Download Manager
+GenericName=Download Manager
+Comment=Download files and videos with browser integration
+Exec=linux-downloader %U
+Icon=linux-downloader
+Terminal=false
+Categories=Network;FileTransfer;
+Keywords=download;downloader;video;youtube;yt-dlp;manager;stream;
+StartupWMClass=download_manager.py
+StartupNotify=true
