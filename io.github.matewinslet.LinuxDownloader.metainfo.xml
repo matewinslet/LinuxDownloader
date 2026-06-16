@@ -73,6 +73,14 @@
   </branding>
 
   <releases>
+    <release version="2.0.0" date="2026-06-16">
+      <description>
+        <p>Bunkr download pages now resolve to their direct, signed CDN links automatically.</p>
+        <p>Added MPEG, MPG, M4V and FLV to the recognised video formats.</p>
+        <p>More resilient streaming: longer socket timeouts and automatic retries for throttled hosts.</p>
+        <p>Browser extensions updated to match (auto-capture of the new video formats).</p>
+      </description>
+    </release>
     <release version="1.0.0" date="2026-06-03">
       <description>
         <p>First public release.</p>
