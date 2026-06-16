@@ -1,0 +1,18 @@
+# Runtime Python dependencies for Linux Download Manager (bundled into a venv
+# by the .deb / .rpm / AUR packaging). Built per-platform so the compiled
+# wheels (PyQt6, curl_cffi, pycryptodome) match that distro's Python.
+#
+# curl_cffi MUST stay <0.15: yt-dlp only supports 0.10.x–0.14.x and silently
+# disables browser impersonation on 0.15+, breaking TLS/JA3-fingerprinting
+# hosts (HTTP 410). See install.sh.
+# Pin the whole PyQt6 trio together — pinning only the bindings lets PyQt6-Qt6
+# float to a newer Qt and crashes with an ABI symbol mismatch on import.
+# (These are abi3 wheels, so they work across Python 3.x versions.)
+PyQt6==6.11.0
+PyQt6-Qt6==6.11.1
+PyQt6-sip==13.11.1
+yt-dlp
+requests
+browser-cookie3
+curl_cffi>=0.10,<0.15
+pycryptodome

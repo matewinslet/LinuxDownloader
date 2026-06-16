@@ -1,0 +1,9 @@
+#!/bin/bash
+# Launcher for Linux Download Manager (self-contained bundle install).
+# Runs the app with its bundled Python venv from /opt/linux-downloader.
+APPDIR="/opt/linux-downloader"
+
+# Prefer a user-installed deno (optional, used for YouTube JS) if present.
+export PATH="$HOME/.deno/bin:/usr/local/bin:$PATH"
+
+exec "$APPDIR/venv/bin/python" "$APPDIR/download_manager.py" "$@"
