@@ -51,3 +51,6 @@ firefox-extension/web-ext-artifacts/
 
 # AMO build artifact
 firefox-extension/.amo-upload-uuid
+
+# Internal planning/design notes (not for publication)
+docs/superpowers/
