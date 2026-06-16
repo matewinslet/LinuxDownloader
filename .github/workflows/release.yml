@@ -1,0 +1,70 @@
+name: Build & ship packages
+
+# Builds the native packages and attaches them to the GitHub Release for the
+# tag. Runs automatically when a v* tag is pushed, or on demand via the
+# "Run workflow" button (defaults to v2.0).
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to build and attach assets to'
+        required: true
+        default: 'v2.0'
+
+permissions:
+  contents: write
+
+jobs:
+  deb:
+    name: .deb (Debian/Ubuntu/Mint)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+      - name: Install build deps
+        run: sudo apt-get update && sudo apt-get install -y python3-venv python3.12-venv python3-pip dpkg-dev
+      - name: Build .deb
+        run: bash packaging/build-deb.sh
+      - name: Attach to release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          files: dist/*.deb
+
+  appimage:
+    name: AppImage (portable)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+      - name: Install build deps
+        run: sudo apt-get update && sudo apt-get install -y wget curl file
+      - name: Build AppImage
+        run: bash packaging/build-appimage.sh
+      - name: Attach to release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          files: dist/*.AppImage
+
+  rpm:
+    name: .rpm (Fedora/RHEL/SUSE)
+    runs-on: ubuntu-latest
+    container: fedora:40
+    steps:
+      - name: Install build tools
+        run: dnf install -y git rpm-build python3 python3-pip python3-devel findutils tar gcc libffi-devel
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+      - name: Build .rpm
+        run: bash packaging/rpm/build-rpm.sh
+      - name: Attach to release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          files: dist/*.rpm

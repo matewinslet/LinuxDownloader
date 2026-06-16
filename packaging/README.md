@@ -63,10 +63,37 @@ git add PKGBUILD .SRCINFO && git commit -m "Initial import" && git push
 
 Publishing to the AUR requires your AUR account + registered SSH key.
 
-## Distributing the .deb / .rpm
+## AppImage (portable, any distro)
 
-Attach the built `.deb` / `.rpm` to a GitHub Release (e.g. the `v2.0` release)
-so users can download them directly.
+A single double-click-to-run file — no install. Bundles a manylinux Python and
+all deps via [python-appimage](https://github.com/niess/python-appimage).
+
+```bash
+packaging/build-appimage.sh
+# -> dist/Linux_Download_Manager-2.0.0-x86_64.AppImage
+chmod +x dist/Linux_Download_Manager-2.0.0-x86_64.AppImage
+./dist/Linux_Download_Manager-2.0.0-x86_64.AppImage
+```
+
+Runs on most x86_64 desktops (glibc ≥ 2.17). Very minimal systems may need
+`libxcb-cursor0` present for the Qt xcb platform plugin.
+
+## Automated builds (CI)
+
+`.github/workflows/release.yml` builds **all three** (`.deb` on Ubuntu, `.rpm`
+in a Fedora container, AppImage) and attaches them to the GitHub Release. It
+runs when a `v*` tag is pushed, or on demand via **Actions → Build & ship
+packages → Run workflow** (defaults to `v2.0`). This is how the `.rpm` gets
+built without a local Fedora machine.
+
+## Distributing the packages
+
+CI attaches `.deb` / `.rpm` / `.AppImage` to the tag's GitHub Release
+automatically. To upload a locally built one by hand:
+
+```bash
+gh release upload v2.0 dist/linux-download-manager_2.0.0_amd64.deb
+```
 
 ## Already works today
 
