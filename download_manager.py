@@ -43,6 +43,8 @@ HOME = os.path.expanduser("~")
 def get_firefox_profile():
     """Auto-detect Firefox profile directory across different Linux setups."""
     candidates = [
+        # Firefox 150+ moved the profile root to the XDG path; check it first.
+        os.path.join(HOME, '.config', 'mozilla', 'firefox'),
         os.path.join(HOME, '.mozilla', 'firefox'),
         os.path.join(HOME, '.var', 'app', 'org.mozilla.firefox', 'config', 'mozilla', 'firefox'),
         os.path.join(HOME, '.var', 'app', 'org.mozilla.firefox', '.mozilla', 'firefox'),
@@ -492,6 +494,31 @@ def resolve_luluvdo_url(url):
     return sm.group(1), base + '/'
 
 
+def luluvdo_page_from_url(url):
+    """Map any Luluvdo/Lulustream URL to its canonical /e/<id> page URL.
+    Accepts the page URL itself OR a raw lulu CDN (*.tnmr.org) HLS URL — the CDN
+    path carries the video id, e.g. .../hls2/03/03894/<id>_h/index-v1-a1.m3u8.
+    Returns the page URL (so LuluHLSDownloadThread can mint a FRESH token) or
+    None if it isn't a lulu URL. Pasting the raw CDN m3u8 fails on its own because
+    that token is short-lived and session-bound; rerouting to the page fixes it."""
+    if not url:
+        return None
+    m = re.match(r'(https?://(?:luluvdo|lulustream)\.com)/(?:e/)?([A-Za-z0-9]+)', url)
+    if m:
+        return f"https://luluvdo.com/e/{m.group(2)}"
+    try:
+        host = (urlparse(url).hostname or '').lower()
+        path = urlparse(url).path or ''
+    except Exception:
+        return None
+    if 'tnmr.org' in host or 'lulu' in host:
+        pm = (re.search(r'/([A-Za-z0-9]+)_[A-Za-z0-9]+/[^/]+\.m3u8$', path)
+              or re.search(r'/([A-Za-z0-9]+)/[^/]+\.m3u8$', path))
+        if pm:
+            return f"https://luluvdo.com/e/{pm.group(1)}"
+    return None
+
+
 _PNG_SIG = b'\x89PNG\r\n\x1a\n'
 
 
@@ -588,6 +615,47 @@ def _is_blocked_bridge_host(url):
 
 
 _COOKIES_LOCK = threading.Lock()
+
+def _firefox_cookies_for(host_substrings):
+    """Best-effort {name: value} of Firefox cookies whose host matches any of
+    host_substrings (e.g. 'tnmr.org', 'luluvdo'). Some token CDNs gate behind a
+    bot-challenge cookie the browser holds; replaying it lets LDM through where a
+    cold session gets 403. cookies.sqlite is locked while Firefox runs, so copy
+    it first. Returns {} on any failure (caller proceeds without cookies)."""
+    import sqlite3, tempfile, shutil, glob
+    bases = [
+        os.path.join(HOME, '.config', 'mozilla', 'firefox'),
+        os.path.join(HOME, '.mozilla', 'firefox'),
+        os.path.join(HOME, '.var', 'app', 'org.mozilla.firefox', '.mozilla', 'firefox'),
+        os.path.join(HOME, 'snap', 'firefox', 'common', '.mozilla', 'firefox'),
+    ]
+    dbs = []
+    for b in bases:
+        dbs += glob.glob(os.path.join(b, '*', 'cookies.sqlite'))
+    # Merge ALL profiles (a user may browse the site in only one of several,
+    # e.g. Dev Edition vs default-release). Apply oldest→newest so the most
+    # recently active profile's cookie wins on a name clash — that way a live
+    # cf_clearance is never masked by a stale one or dropped by picking the
+    # wrong single profile.
+    dbs.sort(key=lambda p: os.path.getmtime(p))
+    out = {}
+    for db in dbs:
+        tmp = None
+        try:
+            tmp = tempfile.mktemp(suffix='.sqlite')
+            shutil.copy2(db, tmp)
+            con = sqlite3.connect(tmp)
+            for host, name, value in con.execute("SELECT host, name, value FROM moz_cookies"):
+                if any(s in (host or '') for s in host_substrings):
+                    out[name] = value
+            con.close()
+        except Exception:
+            pass
+        finally:
+            if tmp:
+                try: os.remove(tmp)
+                except Exception: pass
+    return out
 
 def _read_netscape_cookies(path):
     """Parse an existing Netscape cookie file into a dict keyed by
@@ -906,16 +974,25 @@ def resolve_bunkr_url(url):
 # for it, so we replay the flow: fetch the embed page, unpack the packer, read
 # the protocol-relative wurl, and hand the direct URL (with a MixDrop Referer,
 # which its CDN requires) to the downloader. MixDrop rotates TLDs
-# (mixdrop.ag/.co/.to/.club/.vc/...), so match on the host stem. Match the exact
-# spelling only — lookalike domains (miixdrop.net etc.) are not real mirrors.
-_MIXDROP_HOST_RE = re.compile(r"^(?:www\.)?mixdrop\.", re.I)
+# (mixdrop.ag/.co/.to/.club/.vc/...), so match on the host stem. MixDrop has
+# since migrated to the double-i domain miixdrop.net (mixdrop.ag/.to now 301 to
+# it), so accept both the single- and double-i spelling.
+_MIXDROP_HOST_RE = re.compile(r"^(?:www\.)?mii?xdrop\.", re.I)
 
 
 def mixdrop_file_id(url):
+    # Accept the embed/file forms (/e/<id>, /f/<id>) and the bare share form
+    # (mixdrop.net/<id>) that the capture button sometimes hands us without the
+    # /e/ segment. resolve_mixdrop_url() always rebuilds the /e/<id> embed URL,
+    # so a bare id resolves the same as a full one.
     try:
-        m = re.search(r"/[ef]/(\w+)", urlparse(url).path or "")
+        path = urlparse(url).path or ""
     except Exception:
         return None
+    m = re.search(r"/[ef]/(\w+)", path)
+    if m:
+        return m.group(1)
+    m = re.fullmatch(r"/(\w{6,})/?", path)
     return m.group(1) if m else None
 
 
@@ -927,8 +1004,12 @@ def is_mixdrop_url(url):
     return bool(_MIXDROP_HOST_RE.match(host)) and bool(mixdrop_file_id(url))
 
 
-def _unpack_packed_js(packed):
-    """Decode a Dean-Edwards p.a.c.k.e.r payload back to its original source."""
+def _unpack_packed_js_block(packed):
+    """Decode a Dean-Edwards p.a.c.k.e.r payload back to its original source.
+    Takes the FULL `...}('payload',a,c,'k'.split('|'))` block (anchored on the
+    `}(`). Distinct from the module's other unpacker `_unpack_packed_js`, which
+    takes only the args between the outer parens — do NOT merge their names again
+    (a prior collision silently shadowed the luluvdo one and broke it)."""
     m = re.search(r"\}\('(.*)',\s*(\d+),\s*(\d+),\s*'(.*)'\.split\('\|'\)",
                   packed, re.DOTALL)
     if not m:
@@ -967,7 +1048,7 @@ def resolve_mixdrop_url(url):
         html = s.get(embed, timeout=20).text
         blk = re.search(r"eval\(function\(p,a,c,k,e,d\).*?\.split\('\|'\)[^<]*?\)\)",
                         html, re.DOTALL)
-        src = _unpack_packed_js(blk.group(0)) if blk else html
+        src = _unpack_packed_js_block(blk.group(0)) if blk else html
         m = re.search(r"MDCore\.wurl\s*=\s*[\"']([^\"']+)", src)
         if not m:
             return None, None, None
@@ -1281,7 +1362,15 @@ class _FlBaseDelegate(QStyledItemDelegate):
         super().__init__(parent)
         self._sans = sans_family
         self._mono = mono_family
+        # Theme flag — flipped by _apply_table_style() so the row painters pick
+        # dark vs light colors. Defaults light so first paint before theming is
+        # correct on a light install.
+        self.dark = False
         self._start_anim(parent)
+
+    def _c(self, light, dark):
+        """Pick a QColor for the current theme."""
+        return QColor(dark if self.dark else light)
 
     @classmethod
     def _start_anim(cls, view):
@@ -1346,14 +1435,19 @@ class _FlBaseDelegate(QStyledItemDelegate):
         return f
 
     def _paint_cell_chrome(self, painter, option, draw_bottom_border=True):
-        # Card-style row: white bg, soft blue tint when selected, hairline
-        # bottom border that matches the body-row divider in the spec.
-        if option.state & QStyle.StateFlag.State_Selected:
-            painter.fillRect(option.rect, QColor("#eff6ff"))
+        # Card-style row: surface bg, soft blue tint when selected, hairline
+        # bottom divider. Theme-aware so the row interior matches the rest of the
+        # dark-mode chrome instead of staying white.
+        if self.dark:
+            selected, base, divider = QColor(59, 130, 246, 40), QColor("#1e293b"), QColor("#334155")
         else:
-            painter.fillRect(option.rect, QColor("#ffffff"))
+            selected, base, divider = QColor("#eff6ff"), QColor("#ffffff"), QColor("#f1f5f9")
+        if option.state & QStyle.StateFlag.State_Selected:
+            painter.fillRect(option.rect, selected)
+        else:
+            painter.fillRect(option.rect, base)
         if draw_bottom_border:
-            painter.setPen(QPen(QColor("#f1f5f9"), 1))
+            painter.setPen(QPen(divider, 1))
             y = option.rect.bottom()
             painter.drawLine(option.rect.left(), y, option.rect.right(), y)
 
@@ -1441,14 +1535,14 @@ class FlNameDelegate(_FlBaseDelegate):
 
         # Primary line — filename.
         painter.setFont(primary_font)
-        painter.setPen(QColor("#0f172a"))
+        painter.setPen(self._c("#0f172a", "#e2e8f0"))
         elided = fm_p.elidedText(filename, Qt.TextElideMode.ElideRight, text_width)
         painter.drawText(text_x, top + fm_p.ascent(), elided)
 
         # Secondary line — EXT · TOTAL_SIZE.
         if sub_meta:
             painter.setFont(secondary_font)
-            painter.setPen(QColor("#94a3b8"))
+            painter.setPen(self._c("#94a3b8", "#64748b"))
             sub_y = top + fm_p.height() + line_gap + fm_s.ascent()
             elided_sub = fm_s.elidedText(sub_meta, Qt.TextElideMode.ElideRight, text_width)
             painter.drawText(text_x, sub_y, elided_sub)
@@ -1485,15 +1579,18 @@ class FlProgressDelegate(_FlBaseDelegate):
         is_error  = (token["key"] == "error")
 
         if is_queued:
-            # Empty 6px box with 1px dashed #cbd5e1 border, no fill.
+            # Empty 6px box with 1px dashed border, no fill.
             painter.setBrush(Qt.BrushStyle.NoBrush)
-            pen = QPen(QColor("#cbd5e1"), 1, Qt.PenStyle.DashLine)
+            pen = QPen(self._c("#cbd5e1", "#475569"), 1, Qt.PenStyle.DashLine)
             pen.setDashPattern([4, 3])
             painter.setPen(pen)
             painter.drawRoundedRect(bar_rect, 3.0, 3.0)
         else:
             # Track.
-            track = QColor("#fee2e2") if is_error else QColor("#e2e8f0")
+            if is_error:
+                track = QColor("#fee2e2") if not self.dark else QColor(248, 113, 113, 45)
+            else:
+                track = self._c("#e2e8f0", "#334155")
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(track)
             painter.drawRoundedRect(bar_rect, 3.0, 3.0)
@@ -1549,9 +1646,9 @@ class FlProgressDelegate(_FlBaseDelegate):
         # Percent label.
         painter.setFont(pct_font)
         if status == "Finished":
-            painter.setPen(QColor("#16a34a"))
+            painter.setPen(self._c("#16a34a", "#4ade80"))
         else:
-            painter.setPen(QColor("#64748b"))
+            painter.setPen(self._c("#64748b", "#94a3b8"))
         pct_text = f"{pct}%"
         painter.drawText(int(cell_left),
                          int(bar_top + bar_h + 4 + fm.ascent()),
@@ -1590,7 +1687,7 @@ class FlDownloadedDelegate(_FlBaseDelegate):
                     text = a.strip()
             shown = fm.elidedText(text, Qt.TextElideMode.ElideRight, avail)
             painter.setFont(font)
-            painter.setPen(QColor("#334155"))
+            painter.setPen(self._c("#334155", "#cbd5e1"))
             painter.drawText(_center_x(fm.horizontalAdvance(shown)), y, shown)
         else:
             # Try to split "done / total". Falls back to plain rendering.
@@ -1602,15 +1699,15 @@ class FlDownloadedDelegate(_FlBaseDelegate):
                 group_w = fm_b.horizontalAdvance(done) + fm.horizontalAdvance(rest)
                 x = _center_x(group_w)
                 painter.setFont(bold)
-                painter.setPen(QColor("#0f172a"))
+                painter.setPen(self._c("#0f172a", "#e2e8f0"))
                 painter.drawText(x, y, done)
                 painter.setFont(font)
-                painter.setPen(QColor("#94a3b8"))
+                painter.setPen(self._c("#94a3b8", "#64748b"))
                 painter.drawText(x + fm_b.horizontalAdvance(done), y, rest)
             else:
                 shown = fm.elidedText(text, Qt.TextElideMode.ElideRight, avail)
                 painter.setFont(font)
-                painter.setPen(QColor("#334155"))
+                painter.setPen(self._c("#334155", "#cbd5e1"))
                 painter.drawText(_center_x(fm.horizontalAdvance(shown)), y, shown)
         painter.restore()
 
@@ -1628,11 +1725,11 @@ class FlSpeedDelegate(_FlBaseDelegate):
         active = (status == "Downloading") and text not in ("—", "")
         if active:
             font = self._font(self._mono, 11, QFont.Weight.Bold)
-            painter.setPen(QColor("#16a34a"))
+            painter.setPen(self._c("#16a34a", "#4ade80"))
             shown = f"↓ {text}" if not text.startswith("↓") else text
         else:
             font = self._font(self._mono, 11, QFont.Weight.Medium)
-            painter.setPen(QColor("#94a3b8"))
+            painter.setPen(self._c("#94a3b8", "#64748b"))
             shown = "—" if text in ("—", "") else text
         painter.setFont(font)
         fm = QFontMetrics(font)
@@ -1655,9 +1752,9 @@ class FlEtaDelegate(_FlBaseDelegate):
         status = self._status_from(index)
         font = self._font(self._mono, 11, QFont.Weight.Medium)
         if status == "Downloading" and text != "—":
-            painter.setPen(QColor("#475569"))
+            painter.setPen(self._c("#475569", "#cbd5e1"))
         else:
-            painter.setPen(QColor("#94a3b8"))
+            painter.setPen(self._c("#94a3b8", "#64748b"))
             text = "—" if text in ("—", "") else text
         painter.setFont(font)
         fm = QFontMetrics(font)
@@ -1774,7 +1871,7 @@ class FlDateDelegate(_FlBaseDelegate):
         text = self._humanize((index.data(Qt.ItemDataRole.DisplayRole) or "").strip())
         font = self._font(self._mono, 11, QFont.Weight.Medium)
         painter.setFont(font)
-        painter.setPen(QColor("#64748b"))
+        painter.setPen(self._c("#64748b", "#94a3b8"))
         fm = QFontMetrics(font)
         elided = fm.elidedText(text, Qt.TextElideMode.ElideRight,
                                option.rect.width() - 8)
@@ -2657,6 +2754,18 @@ class ProgressSection(QWidget):
     def set_eta_text(self, text):
         self.eta_lbl.setText(f"{text} remaining" if text else "")
 
+    def set_stage(self, text):
+        """Show a transient activity line (e.g. 'Requesting file size…',
+        'Resuming from 1.2 GB…') next to the percentage, without changing the
+        bar state. Overwritten by mark_active's 'downloaded' once bytes flow."""
+        if not text:
+            return
+        self.label_lbl.setText(text)
+        self.label_lbl.setStyleSheet(
+            f"font-family: {PLEX_SANS}; font-size: 12px; color: {self.theme['muted']}; "
+            f"background: transparent;"
+        )
+
     def mark_idle(self):
         self._state = "idle"
         self._apply_bar_style("idle")
@@ -2855,11 +2964,14 @@ class StreamDialog(DownloaderDialogBase):
     download_finished = pyqtSignal(str, str)
     download_name_updated = pyqtSignal(str, str, str)  # url, new_filename, new_path
 
-    def __init__(self, parent=None, url="", filename="", page_referer="", dark=True):
+    def __init__(self, parent=None, url="", filename="", page_referer="", dark=True,
+                 resume=False, save_dir=None):
         super().__init__(parent, dark=dark, window_title="LDM Stream Downloader")
         self._url          = url
         self._filename     = filename
         self._page_referer = page_referer
+        self._resume          = resume
+        self._resume_save_dir = save_dir
         self._last_size    = ""
         self._last_speed   = ""
         self._last_eta     = ""
@@ -2881,6 +2993,14 @@ class StreamDialog(DownloaderDialogBase):
             self._resolved_name = self._filename
         self._build_body()
         self._wire_footer()
+        if resume:
+            # Resume: lock to the existing file's exact name + folder so yt-dlp's
+            # outtmpl matches the fragments it already wrote to YT_DLP_TEMP_DIR
+            # and continues instead of starting over.
+            if filename:
+                self.filename_edit.setText(filename)
+            if save_dir:
+                self.save_dir_edit.setText(save_dir)
 
     # ── UI ────────────────────────────────────────────────────────────────────
     def _build_body(self):
@@ -3023,6 +3143,16 @@ class StreamDialog(DownloaderDialogBase):
         self.force_dl_btn.clicked.connect(self._start_force_download)
         self.force_dl_btn.setVisible(False)
         self.footer_layout.addWidget(self.force_dl_btn)
+
+        # Update yt-dlp — shown when YouTube/Facebook break a stale bundled yt-dlp.
+        # Targets the env LDM actually imports from (the bundled venv), which a
+        # system `pip install -U` would not touch.
+        self.update_ytdlp_btn = QPushButton("Update yt-dlp")
+        self.update_ytdlp_btn.setStyleSheet(_dialog_btn_qss(t, "primaryViolet"))
+        self.update_ytdlp_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.update_ytdlp_btn.clicked.connect(self._start_ytdlp_update)
+        self.update_ytdlp_btn.setVisible(False)
+        self.footer_layout.addWidget(self.update_ytdlp_btn)
 
         self.open_file_btn = QPushButton("Open File")
         self.open_file_btn.setStyleSheet(_dialog_btn_qss(t, "primaryBlue"))
@@ -3203,6 +3333,7 @@ class StreamDialog(DownloaderDialogBase):
         that actually serves video/mp4 content)."""
         self._force_retry = True
         self.force_dl_btn.setVisible(False)
+        self.update_ytdlp_btn.setVisible(False)
         self.download_btn.setVisible(False)
         self.stop_btn.setVisible(True)
         self.stop_btn.setEnabled(True)
@@ -3238,6 +3369,37 @@ class StreamDialog(DownloaderDialogBase):
         self.dl_thread.eta.connect(self._on_eta)
         self.dl_thread.finished.connect(self._on_finished)
         self.dl_thread.start()
+
+    def _start_ytdlp_update(self):
+        """Update the yt-dlp that LDM actually imports (the bundled venv for
+        packaged installs) via `sys.executable -m pip`, so the fix sticks
+        without the user hunting for the right Python."""
+        self.update_ytdlp_btn.setEnabled(False)
+        self.update_ytdlp_btn.setText("Updating…")
+        self.download_btn.setVisible(False)
+        self._set_status("UPDATING YT-DLP…", "active")
+        self.log_box.append("Updating yt-dlp — this can take a minute…")
+        self._ytdlp_update_thread = _YtDlpUpdateThread()
+        self._ytdlp_update_thread.log.connect(self.log_box.append)
+        self._ytdlp_update_thread.done.connect(self._on_ytdlp_update_done)
+        self._ytdlp_update_thread.start()
+
+    def _on_ytdlp_update_done(self, ok):
+        self.update_ytdlp_btn.setEnabled(True)
+        self.update_ytdlp_btn.setText("Update yt-dlp")
+        if ok:
+            self.update_ytdlp_btn.setVisible(False)
+            self.log_box.append(
+                "yt-dlp updated. Please fully restart LDM, then try the download again."
+            )
+            self._set_status("RESTART LDM TO APPLY", "retry")
+            self.progress.mark_error("Restart LDM to apply update")
+        else:
+            self.log_box.append(
+                "Automatic update failed. Open a terminal and run:\n"
+                f"  {sys.executable} -m pip install -U yt-dlp"
+            )
+            self._set_status("UPDATE FAILED", "error")
 
     def _on_paste_submit(self):
         pasted = self.paste_input.text().strip()
@@ -3354,9 +3516,9 @@ class StreamDialog(DownloaderDialogBase):
             self.save_dir_edit.setText(folder)
         # Luluvdo / Lulustream: handled by a dedicated downloader (see
         # LuluHLSDownloadThread). yt-dlp/ffmpeg both 403 against this CDN.
-        _is_lulu_page = bool(re.search(
-            r'(?:luluvdo|lulustream)\.com', self._url, re.I
-        ))
+        # Accept the page URL OR a raw lulu CDN m3u8 (reverse-mapped to the page
+        # URL) — pasting the CDN m3u8 alone fails on its short-lived session token.
+        _lulu_page = luluvdo_page_from_url(self._url)
         user_name = self.filename_edit.text().strip()
         display_name = user_name or self._resolve_display_name(self._url, self._filename)
         base, ext = os.path.splitext(display_name)
@@ -3367,11 +3529,14 @@ class StreamDialog(DownloaderDialogBase):
         # contains a *different* video (CDNs like pvvstream reuse generic names
         # such as vid_480p.mp4 for every video).  Increment (1), (2), … until
         # we find a free slot so we never silently overwrite existing content.
-        _base, _ext = os.path.splitext(display_name)
-        _counter = 1
-        while os.path.exists(os.path.join(folder, display_name)):
-            display_name = f"{_base} ({_counter}){_ext}"
-            _counter += 1
+        # On resume keep the exact name — incrementing it would point yt-dlp at a
+        # fresh outtmpl and discard the fragments already in YT_DLP_TEMP_DIR.
+        if not self._resume:
+            _base, _ext = os.path.splitext(display_name)
+            _counter = 1
+            while os.path.exists(os.path.join(folder, display_name)):
+                display_name = f"{_base} ({_counter}){_ext}"
+                _counter += 1
         base = os.path.splitext(display_name)[0]   # keep base in sync for outtmpl below
         self.filename_edit.setText(display_name)
         http_hdrs = {'User-Agent': HEADERS['User-Agent']}
@@ -3406,19 +3571,24 @@ class StreamDialog(DownloaderDialogBase):
         self.stop_btn.setVisible(True)
         self.stop_btn.setEnabled(True)
         self.progress.mark_active()
-        self._set_status("DOWNLOADING", "active")
+        self._set_status("RESUMING" if self._resume else "DOWNLOADING", "active")
         self._start_elapsed()
         self.download_started.emit(self._url, display_name, folder)
         # Lulustream / Luluvdo page URL: dedicated downloader fetches the
         # whole HLS via Python requests and muxes locally.
-        if _is_lulu_page:
+        if _lulu_page:
             self._retried = True  # don't auto-retry through page-URL fallback
-            self.dl_thread = LuluHLSDownloadThread(self._url, self._dl_path)
+            print(f"[lulu] page={_lulu_page}  src_url={self._url}", flush=True)
+            self.dl_thread = LuluHLSDownloadThread(_lulu_page, self._dl_path)
             self.dl_thread.progress.connect(self._on_progress)
             self.dl_thread.speed.connect(self._on_speed)
             self.dl_thread.size_info.connect(self._on_size)
             self.dl_thread.eta.connect(self._on_eta)
-            self.dl_thread.log.connect(lambda msg: self.log_box.append(msg))
+            # Mirror the dedicated downloader's log to stdout too (the in-app
+            # log box is hidden), so running LDM from a terminal shows the
+            # resolve/segment/403 play-by-play for diagnosis.
+            self.dl_thread.log.connect(
+                lambda msg: (self.log_box.append(msg), print(f"[lulu] {msg}", flush=True)))
             self.dl_thread.finished.connect(self._on_finished)
             self.dl_thread.start()
             return
@@ -3426,6 +3596,8 @@ class StreamDialog(DownloaderDialogBase):
             'format':              'bestvideo+bestaudio/best',
             'outtmpl':             os.path.join(folder, f"{base}.%(ext)s"),
             'paths':               {'temp': YT_DLP_TEMP_DIR},
+            # Continue partially-downloaded fragments from the temp dir on resume.
+            'continuedl':          True,
             'merge_output_format': 'mp4',
             'quiet':               True,
             'no_warnings':         True,
@@ -3451,7 +3623,10 @@ class StreamDialog(DownloaderDialogBase):
         self.dl_thread.log.connect(lambda msg: self.log_box.append(msg))
         self.dl_thread.finished.connect(self._on_finished)
         self.dl_thread.start()
-        self.log_box.append("Starting stream download\u2026")
+        self.log_box.append(
+            "Resuming stream download \u2014 continuing existing fragments\u2026"
+            if self._resume else "Starting stream download\u2026"
+        )
 
     def _on_progress(self, pct):
         self.progress.set_pct(pct)
@@ -3527,15 +3702,17 @@ class StreamDialog(DownloaderDialogBase):
             ), "Paste the video link below to download"
         # Outdated yt-dlp on a major host — extractor returns "no formats" when
         # YouTube/Facebook change their delivery flow. Press-Play won't fix this.
-        if "no video formats" in m and self._url and any(
+        if (
+            "no video formats" in m
+            or "requested format is not available" in m
+        ) and self._url and any(
             h in self._url for h in ('youtube.com', 'youtu.be', 'facebook.com', 'fb.watch')
         ):
             return (
                 "yt-dlp is out of date and can no longer read this site.\n\n"
-                "Open a terminal and run:\n"
-                "  pip install -U yt-dlp --break-system-packages\n\n"
-                "Then restart LDM and try again."
-            ), "yt-dlp out of date — run pip install -U yt-dlp"
+                "Click \"Update yt-dlp\" below to update the copy LDM uses, "
+                "then try the download again."
+            ), "__update_ytdlp__"
         # Play-first errors — yt-dlp couldn't extract because stream not loaded yet
         if "unsupported url" in m or "no video formats" in m or "no suitable" in m:
             return (
@@ -3606,6 +3783,7 @@ class StreamDialog(DownloaderDialogBase):
             self.log_box.append("Download complete!")
             self.stop_btn.setVisible(False)
             self.force_dl_btn.setVisible(False)
+            self.update_ytdlp_btn.setVisible(False)
             self.open_file_btn.setVisible(True)
             self.open_folder_btn.setVisible(True)
             # If force-downloaded via DownloadThread, the thread may have resolved
@@ -3653,6 +3831,13 @@ class StreamDialog(DownloaderDialogBase):
             self.force_dl_btn.setVisible(True)
             self.stop_btn.setVisible(False)
             self.download_btn.setVisible(False)
+        # Stale yt-dlp on YouTube/Facebook — offer in-app update button
+        elif label_msg == "__update_ytdlp__":
+            self.progress.mark_error("yt-dlp out of date")
+            self._set_status("YT-DLP OUT OF DATE", "error")
+            self.update_ytdlp_btn.setVisible(True)
+            self.stop_btn.setVisible(False)
+            self.download_btn.setVisible(True)
         # Facebook paste hint -- show input row so user can paste link
         elif 'Paste the video link' in label_msg or 'Paste the reel link' in label_msg:
             self.progress.mark_error(label_msg)
@@ -3698,6 +3883,34 @@ class _ThumbnailFetchThread(QThread):
         except Exception:
             pass
         self.failed.emit()
+
+
+class _YtDlpUpdateThread(QThread):
+    """Upgrades yt-dlp in the same Python environment LDM runs in.
+
+    Packaged installs (.deb/.rpm/Flatpak) bundle yt-dlp inside their own venv,
+    so a system-wide ``pip install -U`` never reaches the copy LDM imports.
+    Using ``sys.executable -m pip`` always targets the right environment."""
+    log  = pyqtSignal(str)
+    done = pyqtSignal(bool)
+
+    def run(self):
+        cmd = [sys.executable, "-m", "pip", "install", "-U", "yt-dlp"]
+        # System Python (PEP 668) refuses without this flag; venvs don't need it.
+        in_venv = sys.base_prefix != sys.prefix or hasattr(sys, "real_prefix")
+        if not in_venv:
+            cmd.append("--break-system-packages")
+        try:
+            proc = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=300
+            )
+            out = ((proc.stdout or "") + (proc.stderr or "")).strip()
+            for line in out.splitlines()[-6:]:
+                self.log.emit(line)
+            self.done.emit(proc.returncode == 0)
+        except Exception as e:
+            self.log.emit(f"Update failed: {e}")
+            self.done.emit(False)
 
 
 class _ClickableFrame(QFrame):
@@ -3955,6 +4168,15 @@ class YouTubeDialog(DownloaderDialogBase):
         self.open_folder_btn.clicked.connect(self._open_downloaded_folder)
         self.open_folder_btn.setVisible(False)
         self.footer_layout.addWidget(self.open_folder_btn)
+
+        # Update yt-dlp — shown when a stale bundled yt-dlp can no longer read
+        # YouTube. Updates the env LDM imports from (the bundled venv).
+        self.update_ytdlp_btn = QPushButton("Update yt-dlp")
+        self.update_ytdlp_btn.setStyleSheet(_dialog_btn_qss(t, "primaryViolet"))
+        self.update_ytdlp_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.update_ytdlp_btn.clicked.connect(self._start_ytdlp_update)
+        self.update_ytdlp_btn.setVisible(False)
+        self.footer_layout.addWidget(self.update_ytdlp_btn)
 
         self.cancel_dl_btn = QPushButton("Stop")
         self.cancel_dl_btn.setStyleSheet(_dialog_btn_qss(t, "destructive"))
@@ -4302,6 +4524,7 @@ class YouTubeDialog(DownloaderDialogBase):
         self.video_title_lbl.setText("Fetching video info\u2026")
         self.video_meta_lbl.setText("")
         self._set_tags([])
+        self.update_ytdlp_btn.setVisible(False)
         self.fetch_thread = FetchFormatsThread(url)
         self.fetch_thread.info_ready.connect(self._on_info_ready)
         self.fetch_thread.error.connect(self._on_fetch_error)
@@ -4421,10 +4644,42 @@ class YouTubeDialog(DownloaderDialogBase):
 
     def _on_fetch_error(self, err):
         self.video_title_lbl.setText("Could not fetch video info")
-        self.video_meta_lbl.setText(err)
         self._set_tags([])
         self.fetch_btn.setEnabled(True)
         self.fetch_btn.setText("Retry")
+        if self._is_stale_ytdlp_error(err):
+            self.video_meta_lbl.setText(
+                "yt-dlp is out of date — click \"Update yt-dlp\" below."
+            )
+            self.update_ytdlp_btn.setVisible(True)
+        else:
+            self.video_meta_lbl.setText(err)
+
+    def _start_ytdlp_update(self):
+        """Update the yt-dlp LDM actually imports (the bundled venv for packaged
+        installs) via `sys.executable -m pip`, so the fix reaches the right copy."""
+        self.update_ytdlp_btn.setEnabled(False)
+        self.update_ytdlp_btn.setText("Updating…")
+        self.log_box.append("Updating yt-dlp — this can take a minute…")
+        self._ytdlp_update_thread = _YtDlpUpdateThread()
+        self._ytdlp_update_thread.log.connect(lambda m: self.log_box.append(m))
+        self._ytdlp_update_thread.done.connect(self._on_ytdlp_update_done)
+        self._ytdlp_update_thread.start()
+
+    def _on_ytdlp_update_done(self, ok):
+        self.update_ytdlp_btn.setEnabled(True)
+        self.update_ytdlp_btn.setText("Update yt-dlp")
+        if ok:
+            self.update_ytdlp_btn.setVisible(False)
+            self.log_box.append(
+                "yt-dlp updated. Fully restart LDM, then try again."
+            )
+            self.progress.mark_error("Restart LDM to apply update")
+        else:
+            self.log_box.append(
+                "Automatic update failed. Open a terminal and run:\n"
+                f"  {sys.executable} -m pip install -U yt-dlp"
+            )
 
     # ── Download flow ─────────────────────────────────────────────────────────
     def _build_yt_params(self, settings, safe_title):
@@ -4528,6 +4783,7 @@ class YouTubeDialog(DownloaderDialogBase):
         self._dl_base   = safe_title
         self.open_file_btn.setVisible(False)
         self.open_folder_btn.setVisible(False)
+        self.update_ytdlp_btn.setVisible(False)
         self.download_started.emit(url, display_name, folder)
         self.yt_settings_captured.emit(url, settings)
         self.dl_thread = YouTubeDownloadThread(url, ydl_opts)
@@ -4613,11 +4869,26 @@ class YouTubeDialog(DownloaderDialogBase):
             self.log_box.append("Download cancelled.")
             self.progress.mark_error("Cancelled")
             self.download_btn.setVisible(True)
+        elif self._is_stale_ytdlp_error(msg):
+            self.log_box.append(
+                "yt-dlp is out of date and can no longer read YouTube.\n"
+                "Click \"Update yt-dlp\" below, then try the download again."
+            )
+            self.progress.mark_error("yt-dlp out of date")
+            self.download_btn.setVisible(True)
+            self.update_ytdlp_btn.setVisible(True)
         else:
             self.log_box.append(msg)
             self.progress.mark_error(msg[:80])
             self.download_btn.setVisible(True)
         self.download_finished.emit(self._current_url, msg)
+
+    @staticmethod
+    def _is_stale_ytdlp_error(msg):
+        """A stale yt-dlp on a YouTube change shows up either as 'no video
+        formats' or 'Requested format is not available'."""
+        m = (msg or "").lower()
+        return "no video formats" in m or "requested format is not available" in m
 
     def _open_downloaded_file(self):
         import glob as _glob
@@ -4689,7 +4960,8 @@ class LuluHLSDownloadThread(QThread):
 
     def _resolve(self, session, base, vid):
         embed_url = f'{base}/e/{vid}'
-        r = session.get(embed_url, headers={'Referer': base + '/'}, timeout=15)
+        r = session.get(embed_url, headers={'Referer': base + '/'},
+                        cookies=getattr(self, '_cookies', None), timeout=15)
         r.raise_for_status()
         pm = re.search(
             r"function\(p,a,c,k,e,d\)\{.*?\}\((.+\.split\('\|'\)\))\)",
@@ -4737,6 +5009,12 @@ class LuluHLSDownloadThread(QThread):
             base, vid = m.groups()
             session = self._make_session()
             cdn = self._cdn_headers(base)
+            # Replay the browser's cookies for the page + CDN hosts. Token CDNs
+            # like tnmr.org gate behind a bot-challenge cookie that Firefox holds
+            # once the video has played; without it a cold session 403s even with
+            # the right token and TLS impersonation.
+            self._cookies = _firefox_cookies_for(['tnmr.org', 'luluvdo', 'lulustream'])
+            self.log.emit(f"Loaded {len(self._cookies)} browser cookie(s) for CDN")
 
             # 1) Resolve packed-JS → master.m3u8
             self.log.emit("Resolving stream URL...")
@@ -4744,7 +5022,7 @@ class LuluHLSDownloadThread(QThread):
 
             # 2) Fetch master playlist
             self.log.emit("Fetching master playlist...")
-            r = session.get(master_url, headers=cdn, timeout=20)
+            r = session.get(master_url, headers=cdn, cookies=self._cookies, timeout=20)
             if r.status_code != 200:
                 raise Exception(
                     f"Master playlist returned HTTP {r.status_code}"
@@ -4756,7 +5034,7 @@ class LuluHLSDownloadThread(QThread):
 
             # 4) Fetch variant playlist (or treat master as media playlist)
             if variant_url != master_url:
-                r = session.get(variant_url, headers=cdn, timeout=20)
+                r = session.get(variant_url, headers=cdn, cookies=self._cookies, timeout=20)
                 if r.status_code != 200:
                     raise Exception(
                         f"Variant playlist returned HTTP {r.status_code}"
@@ -4780,7 +5058,7 @@ class LuluHLSDownloadThread(QThread):
                         uri_m = re.search(r'URI="([^"]+)"', ln)
                         iv_m  = re.search(r'IV=0x([0-9a-fA-F]+)', ln)
                         if uri_m:
-                            key_r = session.get(uri_m.group(1), headers=cdn, timeout=10)
+                            key_r = session.get(uri_m.group(1), headers=cdn, cookies=self._cookies, timeout=10)
                             cur_key = key_r.content
                         cur_iv = bytes.fromhex(iv_m.group(1).zfill(32)) if iv_m else None
                 elif ln and not ln.startswith('#'):
@@ -4812,7 +5090,7 @@ class LuluHLSDownloadThread(QThread):
                     last_err = None
                     for attempt in range(5):
                         try:
-                            r = session.get(seg_url, headers=cdn, timeout=30)
+                            r = session.get(seg_url, headers=cdn, cookies=self._cookies, timeout=30)
                             if r.status_code == 200:
                                 last_err = None
                                 break
@@ -4868,11 +5146,15 @@ class LuluHLSDownloadThread(QThread):
         except FileNotFoundError:
             self.finished.emit("Error: ffmpeg not installed")
         except Exception as e:
+            # Always surface SOMETHING — a plain Exception (e.g. "Segment N
+            # failed: HTTP 403") used to fall between two duplicate `except
+            # Exception` blocks and get swallowed with no finished signal,
+            # leaving the dialog hung at 0% forever.
+            self.log.emit(f"Download failed: {e}")
             if any(x in type(e).__module__ for x in ('requests', 'curl')):
                 self.finished.emit(f"Error: network error — {str(e)[:120]}")
-                return
-        except Exception as e:
-            self.finished.emit(f"Error: {str(e)[:160]}")
+            else:
+                self.finished.emit(f"Error: {str(e)[:160]}")
 
 
 
@@ -4882,6 +5164,10 @@ class DownloadThread(QThread):
     downloaded     = pyqtSignal(str)
     eta            = pyqtSignal(str)
     finished       = pyqtSignal(str)
+    # Human-readable activity line for the downloader window: "Requesting file
+    # size…", "Resuming from 1.2 GB…", "Downloading…", etc. Lets the IDM-style
+    # dialog show what the worker is doing, not just a frozen 0%.
+    status         = pyqtSignal(str)
     # Emitted when the worker locks in the final on-disk filename/path
     # (after Content-Disposition parsing, CT sniffing, and the second
     # uniqueness check).  The row started with an enqueue-time guess;
@@ -4980,6 +5266,10 @@ class DownloadThread(QThread):
                 if token:
                     cmd += ["-b", f"accountToken={token}"]
             cmd.append(self.url)
+            if self.resume_from > 0:
+                self.status.emit(f"Resuming from {format_size(self.resume_from)}…")
+            else:
+                self.status.emit("Starting download…")
             self._proc = subprocess.Popen(
                 cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
             )
@@ -5041,6 +5331,7 @@ class DownloadThread(QThread):
                         f"Error: Gofile auth failed — {reason}"
                     )
                     return
+            self.status.emit("Requesting file size…")
             try:
                 head = session.head(self.url, allow_redirects=True, timeout=10, verify=False)
                 # If the server hands us an HTML page for what should be a
@@ -5163,6 +5454,10 @@ class DownloadThread(QThread):
             MAX_ATTEMPTS = 60
             RETRY_DELAY  = 5
             current_resume = self.resume_from
+            if current_resume > 0:
+                self.status.emit(f"Resuming from {format_size(current_resume)}…")
+            else:
+                self.status.emit("Starting download…")
             attempt = 0
             while True:
                 attempt += 1
@@ -5185,6 +5480,15 @@ class DownloadThread(QThread):
                             return
                         if r.status_code not in (200, 206):
                             r.raise_for_status()
+                        # Server ignored our Range header (200 = full body, not
+                        # 206 = partial). Appending would corrupt the file, so
+                        # restart cleanly from zero.
+                        if current_resume > 0 and r.status_code == 200:
+                            self.status.emit("Server doesn't support resume — restarting")
+                            mode = "wb"
+                            downloaded_bytes = 0
+                            current_resume = 0
+                        self.status.emit("Downloading…")
                         total_from_header = int(r.headers.get("content-length", 0) or 0)
                         total = total_from_header + current_resume if total_from_header > 0 else 0
                         start_time = time.time()
@@ -5273,13 +5577,16 @@ class CoreDownloaderDialog(DownloaderDialogBase):
     download_progress = pyqtSignal(str, int, str, str, str)  # url, pct, size, speed, eta
     download_finished = pyqtSignal(str, str)                 # url, status
 
-    def __init__(self, parent=None, url="", filename="", referer="", dark=True):
+    def __init__(self, parent=None, url="", filename="", referer="", dark=True,
+                 resume_from=0, save_dir=None):
         super().__init__(parent, dark=dark, window_title="LDM Core Downloader")
         self._url       = url
         self._filename  = filename
         self._referer   = referer
         self._dl_path   = ""
-        self._save_dir  = choose_folder(filename) if filename else os.path.join(HOME, "Downloads")
+        self._resume_from = resume_from
+        self._resume      = resume_from > 0
+        self._save_dir  = save_dir or (choose_folder(filename) if filename else os.path.join(HOME, "Downloads"))
         self._user_dir_override = False
         self.dl_thread  = None
         self._last_size = ""
@@ -5616,20 +5923,30 @@ class CoreDownloaderDialog(DownloaderDialogBase):
         folder = self.save_dir_edit.text().strip() or self._save_dir
         os.makedirs(folder, exist_ok=True)
 
-        base, ext = os.path.splitext(filename)
-        unique_name, counter = filename, 1
-        while os.path.exists(os.path.join(folder, unique_name)):
-            unique_name = f"{base} ({counter}){ext}"
-            counter += 1
+        # Resume keeps the existing partial's name; a fresh download picks a
+        # unique one so it never clobbers an existing file.
+        if self._resume and self._resume_from > 0:
+            unique_name = filename
+        else:
+            base, ext = os.path.splitext(filename)
+            unique_name, counter = filename, 1
+            while os.path.exists(os.path.join(folder, unique_name)):
+                unique_name = f"{base} ({counter}){ext}"
+                counter += 1
 
         self._dl_path = os.path.join(folder, unique_name)
         self._display_name = unique_name
         self.progress.mark_active()
+        self.progress.set_stage("Connecting…")
         self.primary_btn.setEnabled(False)
 
         self.download_started.emit(self._url, unique_name, folder)
 
-        self.dl_thread = DownloadThread(self._url, unique_name, is_video=False, referer=self._referer)
+        self.dl_thread = DownloadThread(
+            self._url, unique_name, is_video=False, referer=self._referer,
+            resume_from=(self._resume_from if self._resume else 0),
+        )
+        self.dl_thread.status.connect(self.progress.set_stage)
         self.dl_thread.progress.connect(self._on_progress)
         self.dl_thread.speed.connect(self._on_speed)
         self.dl_thread.downloaded.connect(self._on_downloaded)
@@ -5980,8 +6297,22 @@ class DownloadManager(QMainWindow):
         self.finished_urls = {}
         self.all_rows = []
         self.row_progress = {}
+        # row -> last time bytes/progress moved. Progress signals are LDM's
+        # liveness heartbeat; if a "Downloading" row goes silent past the grace
+        # window it's dead (expired token, closed dialog, hung worker) and the
+        # reconciler flags it Failed instead of lying "Downloading" forever.
+        self._row_activity = {}
         self.yt_url_to_row = {}
         self.history = load_history()
+        # URL → engine ("youtube" | "stream" | "http") so Resume reopens the
+        # correct downloader window instead of guessing from the URL shape.
+        self.download_engine = {e["url"]: e["engine"] for e in self.history
+                                if e.get("url") and e.get("engine")}
+        # URL → Referer used for the original request. CDNs (esp. streaming)
+        # throttle or block hot-linked requests, so Resume must reuse it or the
+        # download crawls.
+        self.download_referer = {e["url"]: e["referer"] for e in self.history
+                                 if e.get("url") and e.get("referer")}
         self._session_start = time.time()
         # URL → {mode, quality, audio_fmt} for YT resume without re-fetching formats
         self.yt_settings = {e["url"]: e["yt_settings"] for e in self.history
@@ -6236,6 +6567,10 @@ class DownloadManager(QMainWindow):
                  "progress": progress}
         if self.yt_settings.get(url):
             entry["yt_settings"] = self.yt_settings[url]
+        if self.download_engine.get(url):
+            entry["engine"] = self.download_engine[url]
+        if self.download_referer.get(url):
+            entry["referer"] = self.download_referer[url]
         self.history = [e for e in self.history if e.get("url") != url]
         self.history.append(entry)
         save_history(self.history)
@@ -7059,18 +7394,30 @@ class DownloadManager(QMainWindow):
     def _apply_table_style(self):
         t = self._theme()
 
-        # Card chrome — white surface, 14px radius, thin border, soft shadow.
+        # The row interiors are painted by custom delegates, not QSS, so push the
+        # current theme to them here (and repaint) — otherwise the rows stay white
+        # in dark mode while the rest of the chrome goes dark.
+        for _name in ("_fl_name_delegate", "_fl_progress_delegate",
+                      "_fl_downloaded_delegate", "_fl_speed_delegate",
+                      "_fl_eta_delegate", "_fl_status_delegate", "_fl_date_delegate"):
+            _d = getattr(self, _name, None)
+            if _d is not None:
+                _d.dark = self.dark_mode
+        if self.table is not None:
+            self.table.viewport().update()
+
+        # Card chrome — surface, 14px radius, thin border, soft shadow.
         # Delegates paint each row's interior; the table itself only provides
         # the outer card and the header strip.
         self.table.setStyleSheet(f"""
             QTableWidget {{
-                background-color: #ffffff;
-                border: 1px solid #e2e8f0;
+                background-color: {t['surface']};
+                border: 1px solid {t['border']};
                 border-radius: 14px;
                 gridline-color: transparent;
                 outline: none;
-                selection-background-color: #eff6ff;
-                selection-color: #1d4ed8;
+                selection-background-color: {t['selected']};
+                selection-color: {t['selected_text']};
                 font-size: 13px;
                 color: {t['text']};
             }}
@@ -7079,17 +7426,17 @@ class DownloadManager(QMainWindow):
                 border: none;
             }}
             QTableWidget::item:selected {{
-                background-color: #eff6ff;
-                color: #1d4ed8;
+                background-color: {t['selected']};
+                color: {t['selected_text']};
             }}
             QHeaderView::section {{
-                background-color: #f8fafc;
-                color: #94a3b8;
+                background-color: {t['header']};
+                color: {t['faint']};
                 font-size: 10px;
                 font-weight: 700;
                 padding: 11px 14px;
                 border: none;
-                border-bottom: 1px solid #e2e8f0;
+                border-bottom: 1px solid {t['border']};
                 text-transform: uppercase;
             }}
             QHeaderView::section:first {{
@@ -7101,8 +7448,8 @@ class DownloadManager(QMainWindow):
                 padding-right: 18px;
             }}
             QHeaderView::section:hover {{
-                background-color: #f1f5f9;
-                color: #475569;
+                background-color: {t['category_hover']};
+                color: {t['muted']};
             }}
             QHeaderView {{
                 background-color: {t['header']};
@@ -7764,6 +8111,8 @@ class DownloadManager(QMainWindow):
         ))
 
     def open_youtube_dialog(self, prefill_url="", skip_fetch=False):
+        if prefill_url:
+            self.download_engine[prefill_url] = "youtube"
         dialog = YouTubeDialog(self, prefill_url=prefill_url, dark=self.dark_mode, skip_fetch=skip_fetch)
         dialog.download_started.connect(self._on_yt_download_started)
         dialog.download_progress.connect(self._on_yt_progress)
@@ -7785,17 +8134,26 @@ class DownloadManager(QMainWindow):
                 e["yt_settings"] = dict(settings)
         save_history(self.history)
 
-    def open_stream_dialog(self, url="", filename="", page_referer=""):
+    def open_stream_dialog(self, url="", filename="", page_referer="",
+                           resume=False, save_dir=None, autostart=False):
         # If already downloaded, show the same "Already Downloaded" dialog the
         # core downloader uses — let the user choose to skip or download with a
         # new name.  "rename" → proceed with a unique filename; anything else →
         # abort so the user isn't surprised by a silent duplicate.
-        existing_path = self.check_already_finished(url)
-        if existing_path:
-            if self._show_already_downloaded_dialog(existing_path) != "rename":
-                return
-            filename = self._resolve_unique_name(filename or os.path.basename(url.split("?")[0]) or "video.mp4")
-        dialog = StreamDialog(self, url=url, filename=filename, page_referer=page_referer, dark=self.dark_mode)
+        # Skipped on resume: the file is intentionally incomplete and must keep
+        # its exact name to continue.
+        if url:
+            self.download_engine[url] = "stream"
+            if page_referer:
+                self.download_referer[url] = page_referer
+        if not resume:
+            existing_path = self.check_already_finished(url)
+            if existing_path:
+                if self._show_already_downloaded_dialog(existing_path) != "rename":
+                    return None
+                filename = self._resolve_unique_name(filename or os.path.basename(url.split("?")[0]) or "video.mp4")
+        dialog = StreamDialog(self, url=url, filename=filename, page_referer=page_referer,
+                              dark=self.dark_mode, resume=resume, save_dir=save_dir)
         dialog.download_started.connect(self._on_yt_download_started)
         dialog.download_progress.connect(self._on_yt_progress)
         dialog.download_finished.connect(self._on_yt_finished)
@@ -7806,6 +8164,9 @@ class DownloadManager(QMainWindow):
         self._stream_dialogs = [d for d in self._stream_dialogs if d.isVisible() or d is dialog]
         dialog.finished.connect(lambda: self._stream_dialogs.remove(dialog) if dialog in self._stream_dialogs else None)
         dialog.show()
+        if autostart:
+            dialog._start_download()
+        return dialog
 
     def _resolve_unique_name(self, filename):
         """Return a filename that is unique against both disk and in-progress
@@ -7828,15 +8189,27 @@ class DownloadManager(QMainWindow):
             counter += 1
         return unique_name
 
-    def open_core_dialog(self, url="", filename="", referer=""):
-        existing_path = self.check_already_finished(url)
-        if existing_path:
-            if self._show_already_downloaded_dialog(existing_path) != "rename":
-                return
-            # "Download with New Name" chosen -- proceed with a unique filename below
-        # Pre-resolve a globally unique name (disk + in-progress table rows)
-        unique_filename = self._resolve_unique_name(filename)
-        dialog = CoreDownloaderDialog(self, url=url, filename=unique_filename, referer=referer, dark=self.dark_mode)
+    def open_core_dialog(self, url="", filename="", referer="", resume_from=0,
+                         save_dir=None, autostart=False):
+        if url:
+            self.download_engine[url] = "http"
+            if referer:
+                self.download_referer[url] = referer
+        if resume_from <= 0:
+            existing_path = self.check_already_finished(url)
+            if existing_path:
+                if self._show_already_downloaded_dialog(existing_path) != "rename":
+                    return None
+                # "Download with New Name" chosen -- proceed with a unique filename below
+            # Pre-resolve a globally unique name (disk + in-progress table rows)
+            unique_filename = self._resolve_unique_name(filename)
+        else:
+            # Resume: keep the existing partial's exact name so the worker
+            # appends to the same file.
+            unique_filename = filename
+        dialog = CoreDownloaderDialog(self, url=url, filename=unique_filename,
+                                      referer=referer, dark=self.dark_mode,
+                                      resume_from=resume_from, save_dir=save_dir)
         dialog.download_started.connect(self._on_yt_download_started)
         dialog.download_progress.connect(self._on_yt_progress)
         dialog.download_finished.connect(self._on_yt_finished)
@@ -7846,6 +8219,9 @@ class DownloadManager(QMainWindow):
         self._core_dialogs = [d for d in self._core_dialogs if d.isVisible() or d is dialog]
         dialog.finished.connect(lambda: self._core_dialogs.remove(dialog) if dialog in self._core_dialogs else None)
         dialog.show()
+        if autostart:
+            dialog._start_download()
+        return dialog
 
 
     def _on_yt_download_started(self, url, display_name, folder):
@@ -7960,9 +8336,13 @@ class DownloadManager(QMainWindow):
             name_item.setData(Qt.ItemDataRole.UserRole, path)
 
     def _reconcile_stalled_downloads(self):
-        # A row can be stuck on "Downloading" if the worker thread hung
-        # after writing the file, or if the finished signal was dropped
-        # (yt_url_to_row mapping missing). Reconcile from on-disk state.
+        # A "Downloading" row can disagree with reality two ways: the file
+        # finished but the signal was dropped (-> Finished), or no bytes are
+        # arriving at all because the download died (-> Failed). Reconcile both
+        # from on-disk state + the progress heartbeat (self._row_activity).
+        # No byte has moved in this long => the download is considered dead.
+        STALL_GRACE_SECONDS = 180
+        now = time.time()
         for row_info in self.all_rows:
             row = row_info["row"]
             stat_item = self.table.item(row, 5)
@@ -7973,24 +8353,45 @@ class DownloadManager(QMainWindow):
                 continue
             path = name_item.data(Qt.ItemDataRole.UserRole) or ""
             url  = name_item.data(Qt.ItemDataRole.UserRole + 2) or ""
-            if not path or not os.path.exists(path) or os.path.getsize(path) <= 0:
+            worker_running = any(getattr(t, "url", None) == url and t.isRunning()
+                                 for t in self.threads)
+            complete = bool(path and os.path.exists(path) and os.path.getsize(path) > 0)
+
+            # Case 1: file fully written, but the finished signal never landed.
+            if complete and not worker_running:
+                filename  = name_item.text().strip()
+                disk_size = format_size(os.path.getsize(path))
+                self._update_cell(row, 2, f"{disk_size} / {disk_size}")
+                self._update_cell(row, 3, "—")
+                self._update_cell(row, 4, "—")
+                stat_item.setText("Finished")
+                self._apply_status_style(stat_item, "Finished")
+                self._update_progress(row, 100)
+                if url:
+                    self.finished_urls[self._social_dedup_key(url)] = path
+                self._add_to_history(url, filename, path, "Finished",
+                                     f"{disk_size} / {disk_size}",
+                                     get_category(filename))
+                print(f"[reconcile] Marked stalled download Finished: {filename}", flush=True)
                 continue
-            if any(getattr(t, "url", None) == url and t.isRunning() for t in self.threads):
+
+            # Case 2: no bytes arriving. A live download (dialog or thread) keeps
+            # the heartbeat fresh; silence past the grace window means it's dead.
+            last = self._row_activity.get(row)
+            if last is None:
+                self._row_activity[row] = now          # first sighting: grant grace
                 continue
-            filename  = name_item.text().strip()
-            disk_size = format_size(os.path.getsize(path))
-            self._update_cell(row, 2, f"{disk_size} / {disk_size}")
-            self._update_cell(row, 3, "—")
-            self._update_cell(row, 4, "—")
-            stat_item.setText("Finished")
-            self._apply_status_style(stat_item, "Finished")
-            self._update_progress(row, 100)
-            if url:
-                self.finished_urls[self._social_dedup_key(url)] = path
-            self._add_to_history(url, filename, path, "Finished",
-                                 f"{disk_size} / {disk_size}",
-                                 get_category(filename))
-            print(f"[reconcile] Marked stalled download Finished: {filename}", flush=True)
+            if not worker_running and (now - last) > STALL_GRACE_SECONDS:
+                filename = name_item.text().strip()
+                size     = self.table.item(row, 2).text() if self.table.item(row, 2) else "—"
+                self._update_cell(row, 3, "—")
+                self._update_cell(row, 4, "—")
+                stat_item.setText("Failed")
+                self._apply_status_style(stat_item, "Failed")
+                self._add_to_history(url, filename, path, "Failed", size,
+                                     get_category(filename),
+                                     self.row_progress.get(row, 0))
+                print(f"[reconcile] Marked dead download Failed: {filename}", flush=True)
 
     def _update_taskbar_progress(self):
         self._reconcile_stalled_downloads()
@@ -8414,6 +8815,15 @@ class DownloadManager(QMainWindow):
         if not url:
             return
 
+        # Which downloader created this? Tagged at creation (persisted in
+        # history). Routes Resume back to the matching window instead of
+        # guessing from the URL shape — a stream captured as a page URL (not
+        # .m3u8) would otherwise misroute to the HTTP downloader.
+        engine = self.download_engine.get(url)
+        # Reuse the original Referer — CDNs throttle/deny hot-linked requests
+        # without it, which crawls a resumed download to a few KB/s.
+        referer = self.download_referer.get(url, "")
+
         # Reset row status
         stat_item = self.table.item(row, 5)
         if stat_item:
@@ -8425,7 +8835,7 @@ class DownloadManager(QMainWindow):
 
         # YouTube: restart from scratch via the full YT dialog.
         # Saved settings (if any) let us skip the Fetch/quality step.
-        if is_youtube_url(url):
+        if engine == "youtube" or is_youtube_url(url):
             folder = os.path.dirname(path) if path else os.path.join(HOME, "Downloads", "Videos")
             os.makedirs(folder, exist_ok=True)
             base = os.path.splitext(os.path.basename(path or filename))[0] or "video"
@@ -8463,41 +8873,44 @@ class DownloadManager(QMainWindow):
                 dialog.start_with_saved_settings(url, settings, base)
             return
 
-        # HLS/DASH manifests can't be byte-resumed — the URL points to a
-        # playlist, not the media. Curling it would save the manifest text
-        # as the .mp4 (pseudo file). Re-run through the stream downloader
-        # from scratch instead, after scrubbing any garbage left behind.
+        # HLS/DASH stream (yt-dlp) download. It can't be byte-resumed, but yt-dlp
+        # keeps its already-downloaded fragments in YT_DLP_TEMP_DIR, so re-running
+        # with the SAME output name + continuedl picks up where it left off.
+        # Reopen the Stream Downloader in resume mode (exact name, auto-start) and
+        # let it continue — do NOT scrub the partial or the fragments.
         url_path_lower = url.split("?", 1)[0].lower()
-        if url_path_lower.endswith(".m3u8") or url_path_lower.endswith(".mpd"):
-            if path and os.path.exists(path):
-                try:
-                    os.remove(path)
-                except OSError:
-                    pass
-            self.row_progress[row] = 0
-            self._update_progress(row, 0)
-            self._update_cell(row, 2, "—")
+        if engine == "stream" or url_path_lower.endswith(".m3u8") or url_path_lower.endswith(".mpd"):
+            stat_item = self.table.item(row, 5)
+            if stat_item:
+                stat_item.setText("Resuming")
+                self._apply_status_style(stat_item, "Downloading")
+            self.yt_url_to_row[url] = row
             self.open_stream_dialog(
                 url=url,
                 filename=filename or "stream.mp4",
-                page_referer="",
+                page_referer=referer,
+                save_dir=(os.path.dirname(path) if path else None),
+                resume=True,
+                autostart=True,
             )
             return
 
-        # HTTP download: use byte-offset resume
+        # HTTP download: open the IDM-style downloader window so the user can
+        # watch what it's doing (requesting file size, resuming, succeeded or
+        # failed) instead of a silent, frozen 0% row. The dialog resumes from
+        # the bytes already on disk and drives this same table row.
         resume_from = 0
         if path and os.path.exists(path):
             resume_from = os.path.getsize(path)
-        self._update_progress(row, 0 if resume_from == 0 else int(resume_from / max(resume_from + 1, 1) * 100))
-        thread = DownloadThread(url, filename, False, "", resume_from)
-        self.threads.append(thread)
-        thread.progress.connect(  lambda v, r=row: self._update_progress(r, v))
-        thread.downloaded.connect(lambda s, r=row: self._update_cell(r, 2, s))
-        thread.speed.connect(     lambda s, r=row: self._update_cell(r, 3, s))
-        thread.eta.connect(       lambda e, r=row: self._update_cell(r, 4, e))
-        thread.name_finalized.connect(lambda n, p, r=row: self._on_worker_name_finalized(r, n, p))
-        thread.finished.connect(  lambda m, r=row, u=url, c=category: self._on_finished(m, r, u, c))
-        thread.start()
+        self.yt_url_to_row[url] = row
+        self.open_core_dialog(
+            url=url,
+            filename=filename,
+            referer=referer,
+            resume_from=resume_from,
+            save_dir=(os.path.dirname(path) if path else None),
+            autostart=True,
+        )
 
     def check_queue(self):
         while not url_queue.empty():
@@ -8516,16 +8929,23 @@ class DownloadManager(QMainWindow):
                 direct, real_name = resolve_bunkr_url(url)
                 if direct:
                     self.raise_(); self.activateWindow()
-                    self._check_and_enqueue(
-                        direct, real_name or f"bunkr_{bunkr_file_id(url)}", False, "")
+                    # Resolved to a direct CDN file — open the downloader window
+                    # (like a captured "file") instead of silently adding a row.
+                    self.open_core_dialog(
+                        url=direct,
+                        filename=real_name or f"bunkr_{bunkr_file_id(url)}")
                     continue
             if is_mixdrop_url(url):
                 direct, real_name, ref = resolve_mixdrop_url(url)
                 if direct:
                     self.raise_(); self.activateWindow()
-                    self._check_and_enqueue(
-                        direct, real_name or f"mixdrop_{mixdrop_file_id(url)}.mp4",
-                        False, ref or "")
+                    # Resolved to a direct CDN .mp4 — open the IDM-style downloader
+                    # window (same as a captured "file") instead of silently adding
+                    # a table row, so the capture button gives visible feedback.
+                    self.open_core_dialog(
+                        url=direct,
+                        filename=real_name or f"mixdrop_{mixdrop_file_id(url)}.mp4",
+                        referer=ref or "")
                     continue
             if msg_type == "youtube":
                 self.raise_()
@@ -8561,10 +8981,11 @@ class DownloadManager(QMainWindow):
                 self.raise_(); self.activateWindow()
                 self.open_core_dialog(url=url, filename=default_name, referer=referer)
                 continue
-            # video_stream: direct video URL from capture button → main table
+            # video_stream: direct video URL from capture button → downloader window
             default_name = "video.mp4" if msg_type == "video_stream" else "download"
-            self._check_and_enqueue(url, filename if filename else default_name, False, referer)
-            self.url_input.setText(url)
+            self.open_core_dialog(
+                url=url, filename=filename if filename else default_name,
+                referer=referer)
 
     def start_manual(self):
         url = self.url_input.text().strip()
@@ -8579,9 +9000,9 @@ class DownloadManager(QMainWindow):
         if is_bunkr_url(url):
             direct, real_name = resolve_bunkr_url(url)
             if direct:
-                self._check_and_enqueue(
-                    direct, real_name or f"bunkr_{bunkr_file_id(url)}",
-                    False, "")
+                self.open_core_dialog(
+                    url=direct,
+                    filename=real_name or f"bunkr_{bunkr_file_id(url)}")
                 return
         # MixDrop hides the .mp4 behind packed JS that yt-dlp can't read; resolve
         # it to the direct CDN link and download with a MixDrop Referer (its CDN
@@ -8589,9 +9010,10 @@ class DownloadManager(QMainWindow):
         if is_mixdrop_url(url):
             direct, real_name, referer = resolve_mixdrop_url(url)
             if direct:
-                self._check_and_enqueue(
-                    direct, real_name or f"mixdrop_{mixdrop_file_id(url)}.mp4",
-                    False, referer or "")
+                self.open_core_dialog(
+                    url=direct,
+                    filename=real_name or f"mixdrop_{mixdrop_file_id(url)}.mp4",
+                    referer=referer or "")
                 return
         lurl  = url.lower()
         path  = url.split("?")[0]
@@ -8609,7 +9031,12 @@ class DownloadManager(QMainWindow):
         is_video = ".m3u8" in lurl or "vimeo" in lurl
         if not name:
             name = "download"
-        self._check_and_enqueue(url, name, is_video, "")
+        # Every paste opens a downloader window: streams (m3u8/vimeo) use the
+        # yt-dlp StreamDialog, plain files use the IDM-style Core downloader.
+        if is_video:
+            self.open_stream_dialog(url=url, filename=name)
+        else:
+            self.open_core_dialog(url=url, filename=name)
 
     def _check_and_enqueue(self, url, filename, is_video=False, referer=""):
         existing_path = self.check_already_finished(url)
@@ -8620,6 +9047,11 @@ class DownloadManager(QMainWindow):
         self._enqueue(url, filename, is_video, referer)
 
     def _enqueue(self, url, filename, is_video=False, referer=""):
+        # Direct HTTP/curl download (DownloadThread). Tag the engine unless an
+        # earlier router already classified it (e.g. stream/youtube).
+        self.download_engine.setdefault(url, "http")
+        if referer:
+            self.download_referer.setdefault(url, referer)
         folder = choose_folder(filename)
         base, ext = os.path.splitext(filename)
         unique_name, counter = filename, 1
@@ -8653,6 +9085,7 @@ class DownloadManager(QMainWindow):
         thread.start()
 
     def _update_progress(self, row, value):
+        self._row_activity[row] = time.time()   # liveness heartbeat
         # Never go backwards unless resetting to 0 (new download start)
         current = self.row_progress.get(row, 0)
         if value < current and value != 0:
@@ -8665,6 +9098,8 @@ class DownloadManager(QMainWindow):
             self.table.viewport().update()
 
     def _update_cell(self, row, col, text):
+        if col in (2, 3):                        # downloaded / speed = liveness
+            self._row_activity[row] = time.time()
         item = self.table.item(row, col)
         if item:
             item.setText(text)
@@ -8959,6 +9394,7 @@ class DownloadManager(QMainWindow):
                         self.yt_settings.pop(url, None)
             self.table.removeRow(row)
             self.row_progress.pop(row, None)
+            self._row_activity.pop(row, None)
             self.all_rows = [r for r in self.all_rows if r["row"] != row]
             for r in self.all_rows:
                 if r["row"] > row:
@@ -8968,6 +9404,8 @@ class DownloadManager(QMainWindow):
                 new_r = r - 1 if r > row else r
                 new_progress[new_r] = v
             self.row_progress = new_progress
+            self._row_activity = {(r - 1 if r > row else r): v
+                                  for r, v in self._row_activity.items()}
             self._update_category_counts()
 
     def clear_list(self):
@@ -8980,6 +9418,7 @@ class DownloadManager(QMainWindow):
         self.table.setRowCount(0)
         self.all_rows = []
         self.row_progress = {}
+        self._row_activity = {}
         self.yt_url_to_row = {}
         self.threads = [t for t in self.threads if t.isRunning()]
         self._update_category_counts()
