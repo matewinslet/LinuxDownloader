@@ -29,7 +29,8 @@ from PyQt6.QtWidgets import (
     QStyledItemDelegate, QStyle, QMenuBar, QMainWindow,
     QDialog, QComboBox, QRadioButton, QGroupBox,
     QProgressBar, QTextEdit, QSizePolicy, QCheckBox, QFileDialog, QFrame,
-    QGraphicsOpacityEffect, QGraphicsDropShadowEffect, QStackedWidget
+    QGraphicsOpacityEffect, QGraphicsDropShadowEffect, QStackedWidget,
+    QSystemTrayIcon
 )
 from PyQt6.QtCore import QThread, pyqtSignal, QTimer, Qt, QSize, QRect, QPointF, QRectF
 from PyQt6.QtGui import (
@@ -6404,6 +6405,81 @@ class DownloadManager(QMainWindow):
         self._hero_timer.timeout.connect(self._refresh_hero_card)
         self._hero_timer.start(30_000)
 
+        # Closing the window parks LDM in the tray instead of exiting, so the
+        # browser-extension bridge and any running downloads survive an
+        # accidental X.
+        self._quitting = False
+        self.tray = None
+        self._tray_menu = None
+        self._tray_hint_shown = False
+        self._init_tray()
+
+    # ── System tray ───────────────────────────────────────────────────────────
+    def _init_tray(self):
+        if not QSystemTrayIcon.isSystemTrayAvailable():
+            return
+
+        icon = self.app_icon if not self.app_icon.isNull() else self.windowIcon()
+        if icon.isNull():
+            icon = QIcon.fromTheme("linux-downloader")
+        self.tray = QSystemTrayIcon(icon, self)
+        self.tray.setToolTip("Linux Download Manager")
+
+        menu = QMenu()
+        show_act = menu.addAction("Show LDM")
+        show_act.triggered.connect(self._restore_from_tray)
+        menu.addSeparator()
+        quit_act = menu.addAction("Quit")
+        quit_act.triggered.connect(self._quit_app)
+        # Hold the reference: a QMenu with no parent is garbage-collected and
+        # the tray menu silently stops opening.
+        self._tray_menu = menu
+        self.tray.setContextMenu(menu)
+        self.tray.activated.connect(self._on_tray_activated)
+        self.tray.show()
+
+    def _on_tray_activated(self, reason):
+        # GNOME's AppIndicator extension opens the menu on left-click and never
+        # delivers Trigger, which is why "Show LDM" is a menu entry too.
+        if reason in (QSystemTrayIcon.ActivationReason.Trigger,
+                      QSystemTrayIcon.ActivationReason.DoubleClick):
+            self._restore_from_tray()
+
+    def _restore_from_tray(self):
+        if self.isHidden():
+            self.show()
+        if self.isMinimized():
+            self.showNormal()
+        self.raise_()
+        self.activateWindow()
+
+    def _quit_app(self):
+        self._quitting = True
+        self.close()
+
+    def closeEvent(self, event):
+        # Without a tray there's nothing to reopen from, so X must still quit.
+        if self._quitting or self.tray is None:
+            if self.tray is not None:
+                self.tray.hide()
+            event.accept()
+            QApplication.quit()
+            return
+
+        event.ignore()
+        self.hide()
+        if not self._tray_hint_shown:
+            self._tray_hint_shown = True
+            try:
+                self.tray.showMessage(
+                    "LDM is still running",
+                    "Downloads keep going in the background. "
+                    "Use the tray icon to reopen or quit it.",
+                    self.tray.icon(), 4000,
+                )
+            except Exception:
+                pass
+
     def _theme(self):
         return THEMES["dark"] if self.dark_mode else THEMES["light"]
 
@@ -6950,7 +7026,7 @@ class DownloadManager(QMainWindow):
         file_menu.addSeparator()
         quit_action = QAction("Quit", self)
         quit_action.setShortcut("Ctrl+Q")
-        quit_action.triggered.connect(QApplication.quit)
+        quit_action.triggered.connect(self._quit_app)
         file_menu.addAction(quit_action)
 
         view_menu = self._menubar.addMenu("View")
@@ -9464,6 +9540,9 @@ if __name__ == "__main__":
     # Ties the window to its .desktop file so the correct icon/app-id is used
     # under Wayland (and X11 WM_CLASS) — required for Flatpak icon association.
     app.setDesktopFileName("io.github.matewinslet.LinuxDownloader")
+    # The window hides to the tray rather than closing, so Qt must not treat
+    # "no visible windows" as a reason to exit.
+    app.setQuitOnLastWindowClosed(False)
     _load_dialog_fonts()
     window = DownloadManager()
     window.show()
