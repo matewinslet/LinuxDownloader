@@ -51,7 +51,7 @@ function decodeFbVideoId(url) {
 
 // CF-protected domains (no CDN store, use yt-dlp page URL)
 var cfProtectedDomains = [
-  "luluvdo.com", "lulustream.com",
+  "luluvid.com", "luluvdo.com", "lulustream.com",
   "doodstream.com", "dood.watch", "dood.to",
 ];
 
