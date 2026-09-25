@@ -128,7 +128,12 @@ document.getElementById('captureBtn').addEventListener('click', async () => {
 function normalizeUrl(url) {
   try {
     var u = new URL(url);
-    u.pathname = u.pathname.replace(/^\/e\//, '/').replace(/^\/embed\//, '/');
+    // MixDrop's /e/<id> embed path IS the canonical URL its resolver needs;
+    // stripping it leaves a bare /<id> that nothing can resolve. Keep /e/ for
+    // mixdrop's real mirrors (incl. the new double-i miixdrop.net domain).
+    if (!/(?:^|\.)mii?xdrop\./i.test(u.hostname)) {
+      u.pathname = u.pathname.replace(/^\/e\//, '/').replace(/^\/embed\//, '/');
+    }
     if (u.hostname.includes('redgifs.com')) {
       u.pathname = u.pathname.replace(/^\/ifr\//, '/watch/');
     }
