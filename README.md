@@ -5,7 +5,7 @@ A powerful download manager for Linux — with a Firefox extension, YouTube down
 ![Platform](https://img.shields.io/badge/platform-Linux-blue)
 ![Python](https://img.shields.io/badge/python-3.10%2B-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
-![Version](https://img.shields.io/badge/version-2.0-green)
+![Version](https://img.shields.io/badge/version-2.1-green)
 
 ---
 
