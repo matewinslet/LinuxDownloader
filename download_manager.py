@@ -352,31 +352,60 @@ show_queue = queue.Queue()
 
 def open_and_select(path):
     """
-    Open the file manager and select the specific file.
-    Uses DBus FileManager1 interface (works on GNOME/KDE/XFCE/Nautilus/Dolphin/Thunar).
-    Falls back to xdg-open on the folder if DBus is unavailable.
+    Open the file manager with `path` highlighted.
+    Uses DBus FileManager1 ShowItems (GNOME/KDE/XFCE — Nautilus/Dolphin/Thunar).
+    Falls back to xdg-open on the containing folder when that call fails.
+
+    The DBus round-trip runs on a worker thread: `dbus-send --print-reply`
+    blocks until the file manager answers (seconds, if it has to cold-start),
+    and we need its exit status to know whether the fallback is required.
     """
     if not path:
         return
-    # Try DBus FileManager1 ShowItems (selects the file in the manager)
-    try:
-        file_uri = 'file://' + os.path.abspath(path)
-        subprocess.Popen([
-            'dbus-send', '--session',
-            '--dest=org.freedesktop.FileManager1',
-            '--type=method_call',
-            '/org/freedesktop/FileManager1',
-            'org.freedesktop.FileManager1.ShowItems',
-            f'array:string:{file_uri}',
-            'string:'
-        ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        return
-    except Exception:
-        pass
-    # Fallback: open folder (file not selected but at least folder opens)
+    path   = os.path.abspath(path)
     folder = os.path.dirname(path)
-    if folder and os.path.exists(folder):
-        subprocess.Popen(['xdg-open', folder])
+
+    def _open_folder_only():
+        if folder and os.path.isdir(folder):
+            subprocess.Popen(['xdg-open', folder],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    # ShowItems can only highlight a file that is actually there.
+    if not os.path.exists(path):
+        _open_folder_only()
+        return
+
+    # Must be a real file:// URI — percent-encoded. Building it by hand as
+    # 'file://' + path breaks on spaces, '#', '?' and non-ASCII names, which
+    # is most of what lands in Downloads; the manager then silently ignores
+    # the request and nothing gets selected.
+    try:
+        from pathlib import Path as _Path
+        file_uri = _Path(path).as_uri()
+    except Exception:
+        _open_folder_only()
+        return
+
+    def _show():
+        try:
+            r = subprocess.run([
+                'dbus-send', '--session',
+                '--print-reply', '--reply-timeout=5000',
+                '--dest=org.freedesktop.FileManager1',
+                '--type=method_call',
+                '/org/freedesktop/FileManager1',
+                'org.freedesktop.FileManager1.ShowItems',
+                f'array:string:{file_uri}',
+                'string:'
+            ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=8)
+            if r.returncode == 0:
+                return
+        except Exception:
+            pass
+        # No FileManager1 on the bus (or it errored) — at least open the folder.
+        _open_folder_only()
+
+    threading.Thread(target=_show, daemon=True).start()
 
 def normalize_stream_url(url):
     """
@@ -2709,6 +2738,12 @@ class ProgressSection(QWidget):
         # squishing the row to 15px, hiding the glyphs under the bar.
         _fm = self.pct_lbl.fontMetrics()
         self.pct_lbl.setFixedHeight(_fm.height() + 4)
+        # Reserve the width of the widest value ("100%") up front. A label
+        # that sizes to its text re-lays-out on every percentage change —
+        # which shoves the status word beside it sideways as digits come and
+        # go, and clips the label for one frame when it grows (2 digits → 3
+        # at 100%, where it reads "10(" until the layout catches up).
+        self.pct_lbl.setMinimumWidth(_fm.horizontalAdvance("100%") + 2)
         top.addWidget(self.pct_lbl)
 
         self.label_lbl = QLabel("ready")
@@ -3388,8 +3423,22 @@ class StreamDialog(DownloaderDialogBase):
         self.dl_thread.speed.connect(self._on_speed)
         self.dl_thread.downloaded.connect(self._on_size)
         self.dl_thread.eta.connect(self._on_eta)
+        self.dl_thread.name_finalized.connect(self._on_name_finalized)
         self.dl_thread.finished.connect(self._on_finished)
         self.dl_thread.start()
+
+    def _on_name_finalized(self, filename, path):
+        """Same sync as CoreDownloaderDialog: the worker writes to the
+        category folder under its own final name, so _dl_path has to follow it
+        or Open File / Open Folder act on a path that doesn't exist."""
+        self._dl_path = path
+        if filename != self.filename_edit.text().strip():
+            self.filename_edit.setText(filename)
+        folder = os.path.dirname(path)
+        if folder and folder != self.save_dir_edit.text().strip():
+            self.save_dir_edit.setText(folder)
+            self.save_dir_edit.setCursorPosition(0)
+        self.download_name_updated.emit(self._url, filename, path)
 
     def _start_ytdlp_update(self):
         """Update the yt-dlp that LDM actually imports (the bundled venv for
@@ -3771,14 +3820,13 @@ class StreamDialog(DownloaderDialogBase):
         if path and os.path.exists(path):
             subprocess.Popen(['xdg-open', path])
         elif path:
-            subprocess.Popen(['xdg-open', os.path.dirname(path)])
+            open_and_select(path)
         self.close()
 
     def _open_downloaded_folder(self):
         path = getattr(self, '_dl_path', '')
-        folder = os.path.dirname(path) if path else ''
-        if folder and os.path.exists(folder):
-            subprocess.Popen(['xdg-open', folder])
+        if path:
+            open_and_select(path)
         self.close()
 
     def _on_finished(self, msg):
@@ -4911,24 +4959,36 @@ class YouTubeDialog(DownloaderDialogBase):
         m = (msg or "").lower()
         return "no video formats" in m or "requested format is not available" in m
 
-    def _open_downloaded_file(self):
+    def _downloaded_path(self):
+        """The file yt-dlp actually wrote — the container extension is only
+        known after the merge, so resolve it by globbing the base name."""
         import glob as _glob
         folder = getattr(self, '_dl_folder', '')
         base   = getattr(self, '_dl_base', '')
         if folder and base:
             matches = _glob.glob(os.path.join(folder, f"{base}.*"))
             if matches:
-                subprocess.Popen(['xdg-open', matches[0]])
-                self.close()
-                return
-        if folder:
-            subprocess.Popen(['xdg-open', folder])
+                return matches[0]
+        return ''
+
+    def _open_downloaded_file(self):
+        path = self._downloaded_path()
+        if path:
+            subprocess.Popen(['xdg-open', path])
+        else:
+            folder = getattr(self, '_dl_folder', '')
+            if folder and os.path.isdir(folder):
+                subprocess.Popen(['xdg-open', folder])
         self.close()
 
     def _open_downloaded_folder(self):
-        folder = getattr(self, '_dl_folder', '')
-        if folder and os.path.exists(folder):
-            subprocess.Popen(['xdg-open', folder])
+        path = self._downloaded_path()
+        if path:
+            open_and_select(path)
+        else:
+            folder = getattr(self, '_dl_folder', '')
+            if folder and os.path.isdir(folder):
+                subprocess.Popen(['xdg-open', folder])
         self.close()
 
 
@@ -5614,6 +5674,7 @@ class CoreDownloaderDialog(DownloaderDialogBase):
     download_started  = pyqtSignal(str, str, str)            # url, display_name, folder
     download_progress = pyqtSignal(str, int, str, str, str)  # url, pct, size, speed, eta
     download_finished = pyqtSignal(str, str)                 # url, status
+    download_name_updated = pyqtSignal(str, str, str)        # url, new_filename, new_path
 
     def __init__(self, parent=None, url="", filename="", referer="", dark=True,
                  resume_from=0, save_dir=None):
@@ -5754,6 +5815,16 @@ class CoreDownloaderDialog(DownloaderDialogBase):
         self.open_folder_btn.clicked.connect(self._open_downloaded_folder)
         self.open_folder_btn.setVisible(False)
         self.footer_layout.addWidget(self.open_folder_btn)
+
+        # Cancel is hidden once the download succeeds, so without this the
+        # only way out of a finished dialog is the title-bar X (Open File /
+        # Open Folder both close it, but only as a side effect of acting).
+        self.close_btn = QPushButton("Close")
+        self.close_btn.setStyleSheet(_dialog_btn_qss(t, "secondary"))
+        self.close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.close_btn.clicked.connect(self.close)
+        self.close_btn.setVisible(False)
+        self.footer_layout.addWidget(self.close_btn)
 
     def _field_label(self, text):
         t = self.theme
@@ -5989,8 +6060,30 @@ class CoreDownloaderDialog(DownloaderDialogBase):
         self.dl_thread.speed.connect(self._on_speed)
         self.dl_thread.downloaded.connect(self._on_downloaded)
         self.dl_thread.eta.connect(self._on_eta)
+        self.dl_thread.name_finalized.connect(self._on_name_finalized)
         self.dl_thread.finished.connect(self._on_finished)
         self.dl_thread.start()
+
+    def _on_name_finalized(self, filename, path):
+        """Adopt the worker's authoritative on-disk name and folder.
+
+        The worker only knows them once the response headers are in — the name
+        can change (Content-Disposition, content-type sniffing, its own
+        uniqueness pass) and the folder is always the category folder for the
+        final extension, not whatever this dialog guessed at enqueue time.
+        Without this sync _dl_path points at a file that isn't there, so Open
+        Folder can't select anything and falls back to the wrong folder.
+        """
+        self._dl_path      = path
+        self._display_name = filename
+        if filename != self.filename_edit.text().strip():
+            self.filename_edit.setText(filename)
+        folder = os.path.dirname(path)
+        if folder and folder != self.save_dir_edit.text().strip():
+            self._save_dir = folder
+            self.save_dir_edit.setText(folder)
+            self.save_dir_edit.setCursorPosition(0)
+        self.download_name_updated.emit(self._url, filename, path)
 
     def _on_progress(self, pct):
         self.progress.set_pct(pct)
@@ -6014,11 +6107,12 @@ class CoreDownloaderDialog(DownloaderDialogBase):
         if msg == "Finished":
             self.progress.mark_complete()
             # Swap the in-flight footer (Cancel / Download) for the post-finish
-            # pair (Open Folder / Open File), matching Stream + YouTube.
+            # set (Open File / Open Folder / Close), matching Stream + YouTube.
             self.cancel_btn.setVisible(False)
             self.primary_btn.setVisible(False)
             self.open_folder_btn.setVisible(True)
             self.open_file_btn.setVisible(True)
+            self.close_btn.setVisible(True)
         else:
             self.progress.mark_error(f"Status: {msg}")
             self.primary_btn.setText("Retry")
@@ -6038,24 +6132,24 @@ class CoreDownloaderDialog(DownloaderDialogBase):
         self._start_download()
 
     def _open_folder(self):
-        folder = os.path.dirname(self._dl_path) if self._dl_path else self.save_dir_edit.text().strip()
-        if folder and os.path.exists(folder):
-            subprocess.Popen(['xdg-open', folder])
-        self.close()
+        self._open_downloaded_folder()
 
     def _open_downloaded_file(self):
         path = getattr(self, '_dl_path', '')
         if path and os.path.exists(path):
             subprocess.Popen(['xdg-open', path])
         elif path:
-            subprocess.Popen(['xdg-open', os.path.dirname(path)])
+            open_and_select(path)
         self.close()
 
     def _open_downloaded_folder(self):
         path = getattr(self, '_dl_path', '')
-        folder = os.path.dirname(path) if path else self.save_dir_edit.text().strip()
-        if folder and os.path.exists(folder):
-            subprocess.Popen(['xdg-open', folder])
+        if path:
+            open_and_select(path)
+        else:
+            folder = self.save_dir_edit.text().strip()
+            if folder and os.path.isdir(folder):
+                subprocess.Popen(['xdg-open', folder])
         self.close()
 
 
@@ -8351,6 +8445,7 @@ class DownloadManager(QMainWindow):
         dialog.download_started.connect(self._on_yt_download_started)
         dialog.download_progress.connect(self._on_yt_progress)
         dialog.download_finished.connect(self._on_yt_finished)
+        dialog.download_name_updated.connect(self._on_download_name_updated)
         if not hasattr(self, '_core_dialogs'):
             self._core_dialogs = []
         self._core_dialogs.append(dialog)
@@ -8930,7 +9025,8 @@ class DownloadManager(QMainWindow):
                 'QPushButton { background-color: #f1f5f9; color: #475569; border: 1px solid #e2e8f0; }'
                 'QPushButton:hover { background-color: #e2e8f0; }'
             )
-            ob.clicked.connect(lambda: subprocess.Popen(['xdg-open', folder]))
+            ob.clicked.connect(lambda: open_and_select(path) if path and os.path.exists(path)
+                               else subprocess.Popen(['xdg-open', folder]))
             btn_row.addWidget(ob)
         btn_row.addStretch()
         cb = QPushButton('Close')
