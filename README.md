@@ -15,6 +15,8 @@ A powerful download manager for Linux — with a Firefox extension, YouTube down
 ![Main Window](screenshots/01-main-window.png)
 
 ### YouTube Downloader
+![YouTube Capture Button](screenshots/02-youtube-page.png)
+
 ![YouTube Downloader](screenshots/07-youtube-downloader.png)
 
 ![YouTube Download Complete](screenshots/08-youtube-download-complete.png)
