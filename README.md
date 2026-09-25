@@ -5,7 +5,7 @@ A powerful download manager for Linux — with a Firefox extension, YouTube down
 ![Platform](https://img.shields.io/badge/platform-Linux-blue)
 ![Python](https://img.shields.io/badge/python-3.10%2B-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
-![Version](https://img.shields.io/badge/version-1.0-green)
+![Version](https://img.shields.io/badge/version-2.0-green)
 
 ---
 
@@ -79,7 +79,7 @@ chmod +x install.sh
 
 The installer will automatically:
 - Install system packages (ffmpeg, curl)
-- Install Python packages (PyQt6, requests, yt-dlp, browser-cookie3)
+- Install Python packages (PyQt6, requests, yt-dlp, curl_cffi, pycryptodome)
 - Install Deno (JavaScript runtime required for YouTube)
 - Generate and install app icons
 - Create the desktop entry for your application menu
@@ -125,7 +125,8 @@ Or paste a YouTube URL directly into the LDM URL bar and click **Start Download*
 sudo apt install -y ffmpeg curl
 
 # 2. Python packages
-pip install PyQt6 requests yt-dlp browser-cookie3 --break-system-packages
+# curl_cffi MUST stay <0.15 (yt-dlp disables browser impersonation on 0.15+)
+pip install PyQt6 requests yt-dlp "curl_cffi>=0.10,<0.15" pycryptodome --break-system-packages
 
 # 3. Deno (required for YouTube)
 curl -fsSL https://deno.land/install.sh | sh
@@ -157,7 +158,8 @@ git pull
 | PyQt6 | GUI framework |
 | requests | HTTP downloads |
 | yt-dlp | YouTube and video downloads |
-| browser-cookie3 | Firefox cookie support for authenticated downloads |
+| curl_cffi (>=0.10,<0.15) | Browser TLS fingerprinting for impersonation-gated CDNs (e.g. Lulu) |
+| pycryptodome | AES decryption of encrypted HLS streams |
 | ffmpeg | Video/audio processing |
 | curl | Download fallback for complex sites |
 | Deno | JavaScript runtime for YouTube signature solving |

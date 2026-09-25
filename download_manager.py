@@ -8233,8 +8233,8 @@ class DownloadManager(QMainWindow):
         commands = [
     ("1. System packages  (ffmpeg, curl, PyQt6 SVG)",
      "sudo apt install -y ffmpeg curl python3-pyqt6.qtsvg"),
-    ("2. Python packages  (PyQt6, requests, yt-dlp, browser-cookie3)",
-     "pip install -U PyQt6 requests yt-dlp browser-cookie3 --break-system-packages"),
+    ("2. Python packages  (PyQt6, requests, yt-dlp, curl_cffi, pycryptodome)",
+     "pip install -U PyQt6 requests yt-dlp \"curl_cffi>=0.10,<0.15\" pycryptodome --break-system-packages"),
     ("3. Deno  —  JavaScript runtime required for YouTube",
      "curl -fsSL https://deno.land/install.sh | sh && sudo ln -sf ~/.deno/bin/deno /usr/local/bin/deno"),
 ]
@@ -8308,7 +8308,7 @@ class DownloadManager(QMainWindow):
         name_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(name_label)
 
-        version_label = QLabel("Version 1.0")
+        version_label = QLabel("Version 2.0")
         version_label.setStyleSheet(f"font-size: 12px; color: {t['muted']};")
         version_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(version_label)
