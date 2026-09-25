@@ -8308,7 +8308,7 @@ class DownloadManager(QMainWindow):
         name_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(name_label)
 
-        version_label = QLabel("Version 2.0")
+        version_label = QLabel("Version 2.1")
         version_label.setStyleSheet(f"font-size: 12px; color: {t['muted']};")
         version_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(version_label)

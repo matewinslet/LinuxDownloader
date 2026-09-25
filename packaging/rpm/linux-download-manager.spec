@@ -1,6 +1,6 @@
 Name:           linux-download-manager
-Version:        2.0.0
-Release:        2%{?dist}
+Version:        2.1.0
+Release:        1%{?dist}
 Summary:        Linux Download Manager (LDM)
 License:        MIT
 URL:            https://github.com/matewinslet/LinuxDownloader
@@ -76,6 +76,13 @@ gtk-update-icon-cache -f /usr/share/icons/hicolor &>/dev/null || :
 update-desktop-database /usr/share/applications &>/dev/null || :
 
 %changelog
+* Fri Sep 25 2026 Tanjim <tpodbcs@gmail.com> - 2.1.0-1
+- Keep running in the system tray; instant Quit; relaunch reopens the window.
+- Open Folder highlights the downloaded file; Close button on finished
+  downloads.
+- luluvid.com support and Lulu CDN fix; MixDrop embed links kept intact.
+- Update yt-dlp from inside the app.
+
 * Wed Jun 17 2026 Tanjim <tpodbcs@gmail.com> - 2.0.0-2
 - Fix install failure ("nothing provides libQt6...PRIVATE_API / libclntsh /
   libmimerapi / libtiff.so.5"): set AutoReqProv:no so the bundled venv's Qt/
