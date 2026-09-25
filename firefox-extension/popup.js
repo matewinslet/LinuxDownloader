@@ -23,7 +23,7 @@ document.getElementById('captureBtn').addEventListener('click', async () => {
   }
 
   // CF-only domains (luluvdo etc.) — page URL → yt-dlp
-  const cfDomains = ['luluvdo.com', 'lulustream.com', 'doodstream.com', 'dood.watch', 'dood.to', 'redgifs.com'];
+  const cfDomains = ['luluvid.com', 'luluvdo.com', 'lulustream.com', 'doodstream.com', 'dood.watch', 'dood.to', 'redgifs.com'];
   const isCF = cfDomains.some(d => tab.url.includes(d));
   if (isCF) {
     const pageUrl = normalizeUrl(tab.url);

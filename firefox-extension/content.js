@@ -152,7 +152,7 @@
   }
 
   // CF domains (luluvdo etc.) — always page URL → yt-dlp
-  var CF_DOMAINS = ['luluvdo.com', 'lulustream.com', 'doodstream.com', 'dood.watch', 'dood.to'];
+  var CF_DOMAINS = ['luluvid.com', 'luluvdo.com', 'lulustream.com', 'doodstream.com', 'dood.watch', 'dood.to'];
   function isCFProtected(url) {
     try { var h = new URL(url).hostname; return CF_DOMAINS.some(function(d) { return h.includes(d); }); }
     catch(e) { return false; }

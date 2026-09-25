@@ -537,9 +537,12 @@ def luluvdo_page_from_url(url):
     that token is short-lived and session-bound; rerouting to the page fixes it."""
     if not url:
         return None
-    m = re.match(r'(https?://(?:luluvdo|lulustream)\.com)/(?:e/)?([A-Za-z0-9]+)', url)
+    m = re.match(r'(https?://(?:luluvid|luluvdo|lulustream)\.com)/(?:e/)?([A-Za-z0-9]+)', url)
     if m:
-        return f"https://luluvdo.com/e/{m.group(2)}"
+        # Canonicalise to luluvid.com — the live player domain (migrated from
+        # luluvdo.com). Both still serve embeds, but the CDN token must be minted
+        # and fetched under the SAME origin the browser uses, i.e. luluvid.com.
+        return f"https://luluvid.com/e/{m.group(2)}"
     try:
         host = (urlparse(url).hostname or '').lower()
         path = urlparse(url).path or ''
@@ -3618,16 +3621,16 @@ class StreamDialog(DownloaderDialogBase):
         # Lulustream/Luluvdo CDNs (e.g. *.tnmr.org) reject requests without
         # an Origin and Sec-Fetch-* set — match what Firefox sends.
         _is_lulu = bool(re.search(
-            r'(?:luluvdo|lulustream)\.com|\btnmr\.org',
+            r'(?:luluvid|luluvdo|lulustream)\.com|\btnmr\.org',
             self._url + ' ' + (self._page_referer or ''),
             re.I,
         ))
         if _is_lulu:
             http_hdrs.update({
-                'User-Agent': ('Mozilla/5.0 (X11; Linux x86_64; rv:151.0) '
-                               'Gecko/20100101 Firefox/151.0'),
-                'Referer':         'https://luluvdo.com/',
-                'Origin':          'https://luluvdo.com',
+                'User-Agent': ('Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:152.0) '
+                               'Gecko/20100101 Firefox/152.0'),
+                'Referer':         'https://luluvid.com/',
+                'Origin':          'https://luluvid.com',
                 'Accept':          '*/*',
                 'Accept-Language': 'en-US,en;q=0.9',
                 'Sec-Fetch-Dest':  'empty',
@@ -5011,8 +5014,13 @@ class LuluHLSDownloadThread(QThread):
     log       = pyqtSignal(str)
     finished  = pyqtSignal(str)
 
-    UA = ('Mozilla/5.0 (X11; Linux x86_64; rv:151.0) '
-          'Gecko/20100101 Firefox/151.0')
+    # The CDN's nginx secure_link token is BOUND TO THE USER-AGENT: it validates
+    # only when the same UA is present at mint (embed) and fetch (CDN) time, and a
+    # bot-looking UA gets a poisoned token from the mint backend. curl_cffi
+    # otherwise injects its own (macOS) Firefox UA, which 403s the CDN — so we pin
+    # ONE realistic Linux Firefox UA on the session AND every request below.
+    UA = ('Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:152.0) '
+          'Gecko/20100101 Firefox/152.0')
 
     def __init__(self, page_url, output_path):
         super().__init__()
@@ -5021,15 +5029,21 @@ class LuluHLSDownloadThread(QThread):
         self.running = True
 
     def _make_session(self):
+        # curl_cffi gives a Firefox TLS fingerprint to clear Cloudflare on the
+        # embed host, but it also sends its own (macOS) Firefox UA by default.
+        # The CDN token is UA-bound, so force self.UA on the session and on every
+        # per-request headers dict (curl_cffi honours an explicit UA override).
         if _CURL_CFFI:
-            return requests.Session(impersonate="firefox")
-        s = requests.Session()
-        s.headers.clear()
+            s = requests.Session(impersonate="firefox")
+        else:
+            s = requests.Session()
+            s.headers.clear()
         s.headers.update({'User-Agent': self.UA})
         return s
 
     def _cdn_headers(self, base):
         return {
+            'User-Agent':      self.UA,
             'Referer':         base + '/',
             'Origin':          base,
             'Accept':          '*/*',
@@ -5041,8 +5055,20 @@ class LuluHLSDownloadThread(QThread):
 
     def _resolve(self, session, base, vid):
         embed_url = f'{base}/e/{vid}'
-        r = session.get(embed_url, headers={'Referer': base + '/'},
-                        cookies=getattr(self, '_cookies', None), timeout=15)
+        # Mint the token with a real-browser navigation request and NO injected
+        # site cookies: a stale file_id/aff (from a different video) poisons the
+        # signed token, and curl_cffi's TLS fingerprint alone clears Cloudflare.
+        r = session.get(embed_url, headers={
+            'User-Agent':                self.UA,
+            'Accept':                    'text/html,application/xhtml+xml,'
+                                         'application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language':           'en-US,en;q=0.9',
+            'Referer':                   base + '/',
+            'Upgrade-Insecure-Requests': '1',
+            'Sec-Fetch-Dest':            'document',
+            'Sec-Fetch-Mode':            'navigate',
+            'Sec-Fetch-Site':            'none',
+        }, timeout=15)
         r.raise_for_status()
         pm = re.search(
             r"function\(p,a,c,k,e,d\)\{.*?\}\((.+\.split\('\|'\)\))\)",
@@ -5082,20 +5108,19 @@ class LuluHLSDownloadThread(QThread):
     def run(self):
         try:
             m = re.match(
-                r'(https?://(?:luluvdo|lulustream)\.com)/(?:e/)?([A-Za-z0-9]+)',
+                r'(https?://(?:luluvid|luluvdo|lulustream)\.com)/(?:e/)?([A-Za-z0-9]+)',
                 self.page_url,
             )
             if not m:
-                raise Exception("Not a Luluvdo / Lulustream URL")
+                raise Exception("Not a Luluvid / Luluvdo / Lulustream URL")
             base, vid = m.groups()
             session = self._make_session()
             cdn = self._cdn_headers(base)
-            # Replay the browser's cookies for the page + CDN hosts. Token CDNs
-            # like tnmr.org gate behind a bot-challenge cookie that Firefox holds
-            # once the video has played; without it a cold session 403s even with
-            # the right token and TLS impersonation.
-            self._cookies = _firefox_cookies_for(['tnmr.org', 'luluvdo', 'lulustream'])
-            self.log.emit(f"Loaded {len(self._cookies)} browser cookie(s) for CDN")
+            # No browser-cookie replay: the CDN token is UA-bound, not cookie-
+            # gated, and injecting a stale per-video file_id/aff cookie poisons
+            # the freshly-minted token. A clean curl_cffi session clears the
+            # embed host's Cloudflare on TLS fingerprint alone.
+            self._cookies = None
 
             # 1) Resolve packed-JS → master.m3u8
             self.log.emit("Resolving stream URL...")
