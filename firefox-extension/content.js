@@ -305,7 +305,11 @@
     return m ? m[1].toUpperCase() : 'VIDEO';
   }
 
-  function streamKind(video, cb) {
+  // `rescan` re-walks the DOM for the post link; otherwise the per-video
+  // result is reused. extractPostUrl can visit every link on the page up to
+  // 40 times over, which is too costly to repeat on every play event of every
+  // video in a Facebook feed — so only a hover (user-paced) refreshes it.
+  function streamKind(video, cb, rescan) {
     var pageUrl = normalizeStreamUrl(window.location.href);
     if (isCFProtected(pageUrl) || isFacebookVideoPage(pageUrl)) return cb('PAGE');
 
@@ -320,7 +324,8 @@
 
     if (isSocialDomain(pageUrl)) {
       if (video._ldmCdnEntry) return cb(kindFromUrl(video._ldmCdnEntry.cdnUrl));
-      var postUrl = extractPostUrl(video);
+      if (rescan || !('_ldmPostUrl' in video)) video._ldmPostUrl = extractPostUrl(video);
+      var postUrl = video._ldmPostUrl;
       if (postUrl && postUrl !== pageUrl) return cb('PAGE');
       var videoId = getFbVideoId(pageUrl) || getTwitterStatusId(pageUrl);
       return ask({ action: 'getSocialVideo', videoId: videoId }, function(resp) {
@@ -558,13 +563,13 @@
     if (kindLbl) {
       // Streams are often only sniffed once playback starts, so the tag is
       // re-checked on play and whenever the pointer comes to the button.
-      const refreshKind = () => {
+      const refreshKind = (rescan) => {
         if (video._ldmBtn !== wrapper) return;
-        streamKind(video, k => { kindLbl.textContent = k; positionOverlay(video, wrapper); });
+        streamKind(video, k => { kindLbl.textContent = k; positionOverlay(video, wrapper); }, rescan === true);
       };
       kindLbl.textContent = '…';
       video._ldmRefreshKind = refreshKind;
-      wrapper.addEventListener('pointerenter', refreshKind);
+      wrapper.addEventListener('pointerenter', () => refreshKind(true));
       if (!video._ldmKindTracked) {
         video._ldmKindTracked = true;
         ['loadedmetadata', 'playing'].forEach(function(t) {
