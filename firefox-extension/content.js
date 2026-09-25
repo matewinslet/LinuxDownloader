@@ -293,6 +293,48 @@
     });
   }
 
+  // What the Download button will hand LDM for this video: the same routing
+  // as captureVideo, reduced to a label for the overlay's tag. PAGE means no
+  // stream was found and LDM will resolve the page link itself (yt-dlp).
+  function kindFromUrl(url) {
+    var path = '';
+    try { path = new URL(url, window.location.href).pathname.toLowerCase(); } catch (e) { path = String(url).toLowerCase(); }
+    if (path.indexOf('.m3u8') !== -1) return 'HLS';
+    if (path.indexOf('.mpd')  !== -1) return 'DASH';
+    var m = path.match(/\.(mp4|webm|mkv|mov|m4v|flv|ts)$/);
+    return m ? m[1].toUpperCase() : 'VIDEO';
+  }
+
+  function streamKind(video, cb) {
+    var pageUrl = normalizeStreamUrl(window.location.href);
+    if (isCFProtected(pageUrl) || isFacebookVideoPage(pageUrl)) return cb('PAGE');
+
+    function ask(msg, pick) {
+      try {
+        chrome.runtime.sendMessage(msg, function(resp) {
+          if (chrome.runtime.lastError) return cb('PAGE');
+          cb(pick(resp));
+        });
+      } catch (e) { cb('PAGE'); }   // extension reloaded under the page
+    }
+
+    if (isSocialDomain(pageUrl)) {
+      if (video._ldmCdnEntry) return cb(kindFromUrl(video._ldmCdnEntry.cdnUrl));
+      var postUrl = extractPostUrl(video);
+      if (postUrl && postUrl !== pageUrl) return cb('PAGE');
+      var videoId = getFbVideoId(pageUrl) || getTwitterStatusId(pageUrl);
+      return ask({ action: 'getSocialVideo', videoId: videoId }, function(resp) {
+        return resp && resp.entry ? kindFromUrl(resp.entry.cdnUrl) : 'PAGE';
+      });
+    }
+
+    var own = detectStream(video);
+    if (own.url) return cb(own.isHLS ? 'HLS' : kindFromUrl(own.url));
+    ask({ action: 'getM3u8' }, function(resp) {
+      return resp && resp.url ? kindFromUrl(resp.url) : 'PAGE';
+    });
+  }
+
   // Generate meaningful social media filenames
   function resolveSocialFilename(entry, pageUrl) {
     try {
@@ -329,15 +371,22 @@
       document.querySelectorAll('video').forEach(function(v) {
         if (!v.paused && !v.ended) playing = v;
       });
-      if (playing) {
-        playing._ldmCdnEntry = request.entry;
-      } else if (window._ldmLastHoveredVideo) {
-        window._ldmLastHoveredVideo._ldmCdnEntry = request.entry;
+      var target = playing || window._ldmLastHoveredVideo;
+      if (target) {
+        target._ldmCdnEntry = request.entry;
+        if (target._ldmRefreshKind) target._ldmRefreshKind();
       }
       sendResponse({ ok: true });
     }
     return true;
   });
+
+  // Overlay icons, drawn rather than emoji so they look the same everywhere.
+  var LDM_SVG = '<svg width="13" height="13" viewBox="0 0 16 16" style="flex:none" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" ';
+  var LDM_ICON_DL   = LDM_SVG + 'stroke-width="1.8" color="#38bdf8"><path d="M8 2v8m0 0L4.5 6.5M8 10l3.5-3.5M3 13.5h10"/></svg>';
+  var LDM_ICON_SPIN = LDM_SVG + 'stroke-width="1.8"><g><path d="M8 2a6 6 0 1 1-6 6"/><animateTransform attributeName="transform" type="rotate" from="0 8 8" to="360 8 8" dur="1s" repeatCount="indefinite"/></g></svg>';
+  var LDM_ICON_OK   = LDM_SVG + 'stroke-width="2"><path d="M3 8.5l3 3 7-7"/></svg>';
+  var LDM_ICON_FAIL = LDM_SVG + 'stroke-width="2"><path d="M4 4l8 8M12 4l-8 8"/></svg>';
 
   // ── Floating overlay ──────────────────────────────────────────────────────
   function createOverlay(video) {
@@ -357,10 +406,17 @@
     if (r0.height > r0.width && video.autoplay && !video.hasAttribute('controls') && r0.width < 160) return;
 
     video.setAttribute('data-ldm-overlay', '1');
-    const isYT    = isYouTubePage();
-    const accent  = isYT ? '#dc2626' : '#38bdf8';
-    const label   = isYT ? '&#9654; YouTube' : '&#11015;&#65038; Capture';
-    const hoverBg = isYT ? 'rgba(220,38,38,0.18)' : 'rgba(56,189,248,0.18)';
+    const isYT = isYouTubePage();
+    // YouTube keeps its original look. Everywhere else the left tag names the
+    // stream LDM will be sent (see streamKind), so it's clear before clicking
+    // whether a real stream was found or LDM will fall back to the page link.
+    const baseBg    = '#0f172a';
+    const accent    = isYT ? '#dc2626' : '#e0f2fe';
+    const hoverBg   = isYT ? 'rgba(220,38,38,0.25)' : '#12334a';
+    const label     = isYT ? '&#9654; YouTube'   : LDM_ICON_DL + 'Download';
+    const sendingTx = isYT ? '&#8987; Sending...' : LDM_ICON_SPIN + 'Sending';
+    const sentTx    = isYT ? '&#10003; Sent!'     : LDM_ICON_OK + 'Sent to LDM';
+    const failedTx  = isYT ? '&#10007; Failed'    : LDM_ICON_FAIL + 'Failed';
 
     // ── Wrapper ───────────────────────────────────────────────────────────────
     const wrapper = document.createElement('div');
@@ -371,33 +427,61 @@
       alignItems:    'stretch',
       pointerEvents: 'all',
       userSelect:    'none',
-      borderRadius:  '5px',
+      touchAction:   'none',
+      borderRadius:  isYT ? '5px' : '6px',
       overflow:      'hidden',
-      border:        `1px solid rgba(255,255,255,0.1)`,
-      boxShadow:     '0 2px 10px rgba(0,0,0,0.6)',
+      background:    baseBg,
+      border:        isYT ? '1px solid rgba(255,255,255,0.1)' : '1px solid rgba(56,189,248,0.35)',
+      boxShadow:     isYT ? '0 2px 10px rgba(0,0,0,0.6)' : '0 2px 12px rgba(0,0,0,0.6)',
     });
 
-    // ── LDM badge ─────────────────────────────────────────────────────────────
+    // ── Left tag: "LDM" on YouTube, stream type + LDM elsewhere ───────────────
+    // It is also the drag handle, hence the grab cursor.
     const badge = document.createElement('div');
-    badge.innerHTML = 'LDM';
-    Object.assign(badge.style, {
-      background:  '#0f172a',
-      color:       '#475569',
-      fontFamily:  'sans-serif',
-      fontSize:    '9px',
-      fontWeight:  '700',
-      padding:     '0 7px',
-      letterSpacing: '0.1em',
-      display:     'flex',
-      alignItems:  'center',
-      borderRight: '1px solid rgba(255,255,255,0.06)',
-    });
+    let kindLbl = null;
+    if (isYT) {
+      badge.innerHTML = 'LDM';
+      Object.assign(badge.style, {
+        background:  baseBg,
+        color:       '#475569',
+        fontFamily:  'sans-serif',
+        fontSize:    '9px',
+        fontWeight:  '700',
+        padding:     '0 7px',
+        letterSpacing: '0.1em',
+        display:     'flex',
+        alignItems:  'center',
+        borderRight: '1px solid rgba(255,255,255,0.06)',
+        cursor:      'grab',
+      });
+    } else {
+      kindLbl = document.createElement('div');
+      const brand = document.createElement('div');
+      brand.textContent = 'LDM';
+      Object.assign(kindLbl.style, {
+        font: '700 10px/1.1 ui-monospace, monospace', color: '#7dd3fc', letterSpacing: '0.04em',
+      });
+      Object.assign(brand.style, {
+        font: '500 8.5px/1.2 ui-monospace, monospace', color: '#5f89a3',
+      });
+      badge.appendChild(kindLbl);
+      badge.appendChild(brand);
+      Object.assign(badge.style, {
+        background:     '#0b2536',
+        display:        'flex',
+        flexDirection:  'column',
+        justifyContent: 'center',
+        padding:        '0 9px',
+        borderRight:    '1px solid rgba(56,189,248,0.25)',
+        cursor:         'grab',
+      });
+    }
 
     // ── Main button ───────────────────────────────────────────────────────────
     const btn = document.createElement('div');
     btn.innerHTML = label;
     Object.assign(btn.style, {
-      background:  '#0f172a',
+      background:  baseBg,
       color:       accent,
       fontFamily:  'sans-serif',
       fontSize:    '12px',
@@ -407,24 +491,27 @@
       lineHeight:  '1.4',
       display:     'flex',
       alignItems:  'center',
-      gap:         '5px',
+      gap:         isYT ? '5px' : '6px',
       borderRight: '1px solid rgba(255,255,255,0.06)',
     });
-    btn.addEventListener('mouseenter', () => { btn.style.background = hoverBg.replace('rgba','rgba').replace('0.18','0.25'); });
-    btn.addEventListener('mouseleave', () => { btn.style.background = '#0f172a'; });
+    btn.addEventListener('mouseenter', () => { btn.style.background = hoverBg; });
+    btn.addEventListener('mouseleave', () => { btn.style.background = baseBg; });
     btn.addEventListener('click', e => {
       e.stopPropagation(); e.preventDefault();
-      btn.innerHTML = '&#8987; Sending...';
+      btn.innerHTML = sendingTx;
       btn.style.opacity = '0.7';
       captureVideo(video)
         .then(() => {
-          btn.innerHTML = '&#10003; Sent!';
+          btn.innerHTML = sentTx;
           btn.style.color = '#22c55e';
           btn.style.opacity = '1';
+          // Retire it like ×: removeOverlay alone clears data-ldm-overlay, and
+          // the next DOM mutation would attach a fresh button to this video.
+          video.setAttribute('data-ldm-dismissed', '1');
           setTimeout(() => removeOverlay(video), 1500);
         })
         .catch(() => {
-          btn.innerHTML = '&#10007; Failed';
+          btn.innerHTML = failedTx;
           btn.style.color = '#ef4444';
           btn.style.opacity = '1';
           setTimeout(() => {
@@ -439,7 +526,7 @@
     const closeBtn = document.createElement('div');
     closeBtn.innerHTML = '&#215;';
     Object.assign(closeBtn.style, {
-      background:  '#0f172a',
+      background:  baseBg,
       color:       '#475569',
       fontFamily:  'sans-serif',
       fontSize:    '13px',
@@ -454,7 +541,7 @@
       closeBtn.style.color = '#ef4444';
     });
     closeBtn.addEventListener('mouseleave', () => {
-      closeBtn.style.background = '#0f172a';
+      closeBtn.style.background = baseBg;
       closeBtn.style.color = '#475569';
     });
     closeBtn.addEventListener('click', e => {
@@ -466,6 +553,27 @@
     wrapper.appendChild(badge);
     wrapper.appendChild(btn);
     wrapper.appendChild(closeBtn);
+    makeDraggable(video, wrapper, badge);
+
+    if (kindLbl) {
+      // Streams are often only sniffed once playback starts, so the tag is
+      // re-checked on play and whenever the pointer comes to the button.
+      const refreshKind = () => {
+        if (video._ldmBtn !== wrapper) return;
+        streamKind(video, k => { kindLbl.textContent = k; positionOverlay(video, wrapper); });
+      };
+      kindLbl.textContent = '…';
+      video._ldmRefreshKind = refreshKind;
+      wrapper.addEventListener('pointerenter', refreshKind);
+      if (!video._ldmKindTracked) {
+        video._ldmKindTracked = true;
+        ['loadedmetadata', 'playing'].forEach(function(t) {
+          video.addEventListener(t, function() {
+            if (video._ldmRefreshKind) video._ldmRefreshKind();
+          }, { passive: true });
+        });
+      }
+    }
 
     // Isolate from page CSS (e.g. bunkr rules that override flex-row layout).
     var host = document.createElement('div');
@@ -475,7 +583,95 @@
     positionOverlay(video, wrapper);
     video._ldmBtn  = wrapper;
     video._ldmHost = host;
+    if (video._ldmRefreshKind) video._ldmRefreshKind();
     _ldmActiveOverlays.push({ host: host, video: video });
+  }
+
+  // IDM-style: the overlay can be dragged off whatever part of the player it
+  // covers (seek bar, captions, the site's own buttons). Any part of it is a
+  // handle; a press only turns into a drag past a few pixels, so ordinary
+  // clicks on Capture / × behave exactly as before.
+  function makeDraggable(video, wrapper, handle) {
+    var DRAG_SLOP = 4;
+    var start = null;
+    var dragging = false;
+    var suppressClick = false;
+
+    wrapper.addEventListener('pointerdown', function(e) {
+      if (e.button !== 0) return;
+      // Players toggle play/pause on press; the overlay isn't part of them.
+      e.stopPropagation();
+      start = {
+        id: e.pointerId, x: e.clientX, y: e.clientY,
+        left: parseFloat(wrapper.style.left) || 0,
+        top:  parseFloat(wrapper.style.top)  || 0,
+      };
+      dragging = false;
+      // Follow the press on window, not the wrapper: the overlay is ~30px
+      // tall, so a quick flick leaves it before the slop is crossed and the
+      // wrapper would never see the moves that start the drag — or the
+      // release, leaving a press stuck open.
+      window.addEventListener('pointermove', onMove, true);
+      window.addEventListener('pointerup', endDrag, true);
+      window.addEventListener('pointercancel', endDrag, true);
+    });
+    wrapper.addEventListener('mousedown', function(e) { e.stopPropagation(); });
+
+    function onMove(e) {
+      if (!start || e.pointerId !== start.id) return;
+      var dx = e.clientX - start.x, dy = e.clientY - start.y;
+      if (!dragging) {
+        if (Math.abs(dx) < DRAG_SLOP && Math.abs(dy) < DRAG_SLOP) return;
+        dragging = true;
+        // Capture only once it's really a drag: capturing on press retargets
+        // the click to the wrapper, which would swallow plain button clicks.
+        try { wrapper.setPointerCapture(e.pointerId); } catch (_) {}
+        handle.style.cursor = 'grabbing';
+      }
+      e.preventDefault();
+      // Keep it on screen so it can't be dropped somewhere unreachable.
+      var sx = window.scrollX || window.pageXOffset || 0;
+      var sy = window.scrollY || window.pageYOffset || 0;
+      var vw = document.documentElement.clientWidth  || window.innerWidth;
+      var vh = document.documentElement.clientHeight || window.innerHeight;
+      var left = Math.min(Math.max(start.left + dx, sx), sx + vw - wrapper.offsetWidth);
+      var top  = Math.min(Math.max(start.top  + dy, sy), sy + vh - wrapper.offsetHeight);
+      wrapper.style.left = left + 'px';
+      wrapper.style.top  = top  + 'px';
+    }
+
+    function endDrag(e) {
+      if (!start || e.pointerId !== start.id) return;
+      window.removeEventListener('pointermove', onMove, true);
+      window.removeEventListener('pointerup', endDrag, true);
+      window.removeEventListener('pointercancel', endDrag, true);
+      if (dragging) {
+        try { wrapper.releasePointerCapture(e.pointerId); } catch (_) {}
+        handle.style.cursor = 'grab';
+        // Remember the spot relative to the video, so the reposition that
+        // runs when it scrolls back into view keeps the user's placement.
+        var r  = video.getBoundingClientRect();
+        var sx = window.scrollX || window.pageXOffset || 0;
+        var sy = window.scrollY || window.pageYOffset || 0;
+        video._ldmDragOffset = {
+          dx: (parseFloat(wrapper.style.left) || 0) - (r.left + sx),
+          dy: (parseFloat(wrapper.style.top)  || 0) - (r.top  + sy),
+        };
+        suppressClick = e.type === 'pointerup';
+        // Not every drag ends in a click (released off the overlay), so don't
+        // let a stale flag eat the next real one.
+        setTimeout(function() { suppressClick = false; }, 0);
+      }
+      start = null;
+      dragging = false;
+    }
+
+    // The click that ends a drag must not also fire Capture or ×.
+    wrapper.addEventListener('click', function(e) {
+      if (!suppressClick) return;
+      suppressClick = false;
+      e.stopPropagation(); e.preventDefault();
+    }, true);
   }
 
   function positionOverlay(video, wrapper) {
@@ -485,6 +681,11 @@
     const btnH   = wrapper.offsetHeight || 28;
     const scrollX = window.scrollX || window.pageXOffset || 0;
     const scrollY = window.scrollY || window.pageYOffset || 0;
+    if (video._ldmDragOffset) {
+      wrapper.style.left = `${r.left + scrollX + video._ldmDragOffset.dx}px`;
+      wrapper.style.top  = `${r.top  + scrollY + video._ldmDragOffset.dy}px`;
+      return;
+    }
     if (r.top > btnH + 4) {
       wrapper.style.top  = `${r.top + scrollY - btnH - 4}px`;
     } else {
@@ -512,6 +713,7 @@
       _ldmActiveOverlays = _ldmActiveOverlays.filter(function(item) { return item.video !== video; });
       delete video._ldmHost;
       delete video._ldmBtn;
+      delete video._ldmRefreshKind;
     }
     if (!video.hasAttribute('data-ldm-dismissed')) {
       video.removeAttribute('data-ldm-overlay');
@@ -523,6 +725,7 @@
     chrome.runtime.sendMessage({ action: 'getSocialVideo' }, function(resp) {
       if (!chrome.runtime.lastError && resp && resp.entry) {
         video._ldmCdnEntry = resp.entry;
+        if (video._ldmRefreshKind) video._ldmRefreshKind();
       }
     });
   }
