@@ -343,6 +343,10 @@ def save_settings(settings):
 
 
 url_queue = queue.Queue()
+# A second launch (clicking the launcher while LDM sits hidden in the tray)
+# hands off to the running instance through the bridge; check_queue drains
+# this on the GUI thread, where showing a window is legal.
+show_queue = queue.Queue()
 
 
 
@@ -796,6 +800,14 @@ def impersonate_opts(url=""):
 class BridgeHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         try:
+            # A second instance asking the running one to come back from the
+            # tray. Answered with a distinctive body so the caller can tell LDM
+            # apart from whatever else might hold the port.
+            if self.path == '/show':
+                show_queue.put(True)
+                self.send_response(200); self.end_headers()
+                self.wfile.write(b"LDM-SHOWN")
+                return
             # Serve PAC file for Firefox proxy auto-config
             if self.path == '/proxy.pac' or self.path.startswith('/proxy.pac?'):
                 try:
@@ -858,8 +870,16 @@ class BridgeHandler(BaseHTTPRequestHandler):
     def log_message(self, *args): pass
 
 def start_bridge_server(port=9999):
-    server = HTTPServer(("127.0.0.1", port), BridgeHandler)
+    # A busy port must not abort startup — without this the whole app dies in
+    # __init__ and the window never appears.
+    try:
+        server = HTTPServer(("127.0.0.1", port), BridgeHandler)
+    except OSError as e:
+        print(f"[bridge] port {port} unavailable ({e}); "
+              "browser capture disabled for this instance", file=sys.stderr)
+        return None
     threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server
 
 def format_size(bytes_count):
     if not bytes_count or bytes_count <= 0:
@@ -5185,6 +5205,12 @@ class DownloadThread(QThread):
         self.resume_from = resume_from
         self.running = True
         self._proc = None
+        # The live streaming response, so stop() can tear the socket down.
+        # Cancelling via the ``running`` flag alone isn't enough: the flag is
+        # only read between chunks, and curl_cffi parks the transfer on a
+        # ThreadPoolExecutor whose atexit hook joins it on the way out — a
+        # quit with a stalled download then blocks the whole interpreter.
+        self._resp = None
 
     def run(self):
         if self.is_video:
@@ -5474,6 +5500,7 @@ class DownloadThread(QThread):
                     # `with session.get(...) as r` crashes immediately.
                     # Plain assignment + try/finally works for both libraries.
                     r = session.get(self.url, stream=True, allow_redirects=True, timeout=30, verify=False)
+                    self._resp = r
                     try:
                         if current_resume > 0 and r.status_code == 416:
                             # Range not satisfiable — file already complete
@@ -5523,6 +5550,7 @@ class DownloadThread(QThread):
                                         else:
                                             self.speed.emit(f"{spd / 1024:.1f} KB/s")
                     finally:
+                        self._resp = None
                         try:
                             r.close()
                         except Exception:
@@ -5563,6 +5591,15 @@ class DownloadThread(QThread):
         if self._proc:
             try:
                 self._proc.kill()
+            except Exception:
+                pass
+        # Closing the response unblocks a worker parked in iter_content; the
+        # flag alone is only noticed once another chunk arrives, which may be
+        # never on a stalled connection.
+        resp, self._resp = self._resp, None
+        if resp is not None:
+            try:
+                resp.close()
             except Exception:
                 pass
 
@@ -6439,6 +6476,7 @@ class DownloadManager(QMainWindow):
         self.tray.show()
 
     def _on_tray_activated(self, reason):
+        _end_tray_activation()
         # GNOME's AppIndicator extension opens the menu on left-click and never
         # delivers Trigger, which is why "Show LDM" is a menu entry too.
         if reason in (QSystemTrayIcon.ActivationReason.Trigger,
@@ -6446,6 +6484,7 @@ class DownloadManager(QMainWindow):
             self._restore_from_tray()
 
     def _restore_from_tray(self):
+        _end_tray_activation()
         if self.isHidden():
             self.show()
         if self.isMinimized():
@@ -6454,8 +6493,31 @@ class DownloadManager(QMainWindow):
         self.activateWindow()
 
     def _quit_app(self):
+        _end_tray_activation()
         self._quitting = True
+        self._shutdown_workers()
         self.close()
+
+    def _shutdown_workers(self, grace_ms=1500):
+        """Tear down download threads before the interpreter starts exiting.
+
+        History and settings are already written at every mutation, so there is
+        nothing left to flush here — this exists purely so Quit is instant.
+        """
+        for t in list(getattr(self, "threads", [])):
+            try:
+                if t.isRunning():
+                    t.stop() if hasattr(t, "stop") else setattr(t, "running", False)
+                    t.blockSignals(True)
+            except Exception:
+                pass
+        deadline = time.time() + grace_ms / 1000.0
+        for t in list(getattr(self, "threads", [])):
+            try:
+                remaining = int(max(0, deadline - time.time()) * 1000)
+                t.wait(remaining)
+            except Exception:
+                pass
 
     def closeEvent(self, event):
         # Without a tray there's nothing to reopen from, so X must still quit.
@@ -8989,6 +9051,10 @@ class DownloadManager(QMainWindow):
         )
 
     def check_queue(self):
+        if not show_queue.empty():
+            while not show_queue.empty():
+                show_queue.get()
+            self._restore_from_tray()
         while not url_queue.empty():
             item = url_queue.get()
             url      = item[0]
@@ -9531,10 +9597,140 @@ def _load_dialog_fonts():
             QFontDatabase.addApplicationFont(os.path.join(fonts_dir, fname))
 
 
+def _end_startup_feedback():
+    """Tell the desktop our launch is over.
+
+    The shell opens a launch sequence keyed on DESKTOP_STARTUP_ID when the
+    launcher is clicked, and closes it when a window belonging to that launch
+    appears. Qt never sets _NET_STARTUP_ID on its windows (confirmed with
+    xprop), so the shell can't tell our window is the one it was waiting for
+    and keeps the app in STARTING — which it renders as a busy cursor over its
+    own panel — until the sequence times out seconds later. Neither path ever
+    closes it on its own: the handoff exits without mapping a window at all,
+    and a fresh launch maps one the shell won't match. So say so explicitly.
+
+    Called before QApplication so Gdk gets a clean process; GTK is loaded here
+    regardless, since QT_QPA_PLATFORMTHEME=gtk3 pulls it in anyway.
+    """
+    if not os.environ.get("DESKTOP_STARTUP_ID"):
+        return
+    try:
+        import gi
+        gi.require_version("Gdk", "3.0")
+        from gi.repository import Gdk
+        Gdk.init([])
+        Gdk.notify_startup_complete()
+        Gdk.flush()
+    except Exception:
+        # No PyGObject (some packaged builds) — the spinner just times out.
+        pass
+
+
+def _end_tray_activation():
+    """Close the launch sequence the tray host opened for this click.
+
+    GNOME's AppIndicator extension calls ProvideXdgActivationToken on our tray
+    icon before delivering any click or menu action. On X11 that token is a
+    startup-notification ID, and the extension only ends the sequence when the
+    call *fails* — Qt implements it, so it succeeds and the sequence leaks.
+    Mutter shows a busy cursor for it until its 15 s timeout, which made Quit
+    and Show LDM look like LDM was still grinding away. Qt parks the token in
+    XDG_ACTIVATION_TOKEN and never uses it on X11, so broadcast the standard
+    startup-notification "remove" for it ourselves.
+
+    Plain libX11 via ctypes rather than Gdk: the Flatpak runs on a KDE runtime
+    with no GTK, and every X11 Qt session has libX11.
+    """
+    try:
+        import ctypes, ctypes.util
+        libc = ctypes.CDLL(None)
+        libc.getenv.restype = ctypes.c_char_p
+        token = libc.getenv(b"XDG_ACTIVATION_TOKEN")
+        # On Wayland the token is a real xdg-activation token Qt consumes when
+        # raising a window, so leave it alone there.
+        if not token or QApplication.platformName() != "xcb":
+            return
+        libc.unsetenv(b"XDG_ACTIVATION_TOKEN")
+
+        tok = token.decode("utf-8", "replace")
+        tok = tok.replace("\\", "\\\\").replace('"', '\\"')
+        # The ID contains spaces (it embeds the app name), so it must be quoted.
+        msg = f'remove: ID="{tok}"'.encode() + b"\0"
+
+        x11 = ctypes.CDLL(ctypes.util.find_library("X11") or "libX11.so.6")
+        x11.XOpenDisplay.restype = ctypes.c_void_p
+        x11.XOpenDisplay.argtypes = [ctypes.c_char_p]
+        x11.XDefaultRootWindow.restype = ctypes.c_ulong
+        x11.XDefaultRootWindow.argtypes = [ctypes.c_void_p]
+        x11.XInternAtom.restype = ctypes.c_ulong
+        x11.XInternAtom.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_int]
+        x11.XCreateSimpleWindow.restype = ctypes.c_ulong
+        x11.XCreateSimpleWindow.argtypes = [ctypes.c_void_p, ctypes.c_ulong] + \
+            [ctypes.c_int] * 2 + [ctypes.c_uint] * 3 + [ctypes.c_ulong] * 2
+        x11.XSendEvent.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.c_int,
+                                   ctypes.c_long, ctypes.c_void_p]
+        x11.XDestroyWindow.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
+        x11.XFlush.argtypes = [ctypes.c_void_p]
+        x11.XCloseDisplay.argtypes = [ctypes.c_void_p]
+
+        class _ClientMessage(ctypes.Structure):
+            # XClientMessageEvent. `data` is a union containing longs, so it is
+            # 8-byte aligned — declaring it as char[20] shifts every byte by 4
+            # and the window manager silently discards the garbled message.
+            _fields_ = [("type", ctypes.c_int), ("serial", ctypes.c_ulong),
+                        ("send_event", ctypes.c_int), ("display", ctypes.c_void_p),
+                        ("window", ctypes.c_ulong), ("message_type", ctypes.c_ulong),
+                        ("format", ctypes.c_int), ("data", ctypes.c_long * 5),
+                        ("_pad", ctypes.c_long * 24)]   # XEvent is 24 longs
+
+        dpy = x11.XOpenDisplay(None)
+        if not dpy:
+            return
+        try:
+            root = x11.XDefaultRootWindow(dpy)
+            begin = x11.XInternAtom(dpy, b"_NET_STARTUP_INFO_BEGIN", 0)
+            cont = x11.XInternAtom(dpy, b"_NET_STARTUP_INFO", 0)
+            # Receivers reassemble the 20-byte chunks keyed on the sender's
+            # window, so the message needs one of its own.
+            win = x11.XCreateSimpleWindow(dpy, root, -100, -100, 1, 1, 0, 0, 0)
+            for i in range(0, len(msg), 20):
+                ev = _ClientMessage(type=33, send_event=1, display=dpy, window=win,  # ClientMessage
+                                    message_type=begin if i == 0 else cont, format=8)
+                chunk = msg[i:i + 20]
+                ctypes.memmove(ev.data, chunk, len(chunk))
+                x11.XSendEvent(dpy, root, 0, 1 << 22, ctypes.byref(ev))  # PropertyChangeMask
+            x11.XDestroyWindow(dpy, win)
+            x11.XFlush(dpy)
+        finally:
+            x11.XCloseDisplay(dpy)
+    except Exception:
+        pass
+
+
+def _hand_off_to_running_instance(port=9999):
+    """Ask an already-running LDM to unhide itself. True if one answered.
+
+    Closing the window parks LDM in the tray, so clicking the launcher again
+    starts a second process. Without this it would just die on the bridge port
+    and the user would see nothing happen.
+    """
+    try:
+        import urllib.request
+        with urllib.request.urlopen(
+                f"http://127.0.0.1:{port}/show", timeout=2) as r:
+            hit = r.read().strip() == b"LDM-SHOWN"
+        return hit
+    except Exception:
+        return False
+
+
 if __name__ == "__main__":
     if not os.environ.get("QT_QPA_PLATFORMTHEME"):
         os.environ["QT_QPA_PLATFORMTHEME"] = "gtk3"
     _ensure_ytdlp_config()
+    _end_startup_feedback()
+    if _hand_off_to_running_instance():
+        sys.exit(0)
     app = QApplication(sys.argv)
     app.setApplicationName("Linux Download Manager")
     # Ties the window to its .desktop file so the correct icon/app-id is used
@@ -9546,4 +9742,14 @@ if __name__ == "__main__":
     _load_dialog_fonts()
     window = DownloadManager()
     window.show()
-    sys.exit(app.exec())
+    rc = app.exec()
+    # curl_cffi runs transfers on a ThreadPoolExecutor, and concurrent.futures
+    # registers an atexit hook that joins those workers regardless of daemon
+    # status. A worker still inside curl.perform() therefore stalls interpreter
+    # shutdown until the socket gives up — seconds of a busy cursor after Quit.
+    # Everything worth persisting is written eagerly, so leave immediately.
+    try:
+        sys.stdout.flush(); sys.stderr.flush()
+    except Exception:
+        pass
+    os._exit(rc)
