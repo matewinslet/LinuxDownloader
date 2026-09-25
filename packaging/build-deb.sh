@@ -6,7 +6,7 @@ set -euo pipefail
 
 SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PKG=linux-download-manager
-VER="${VER:-2.0.0}"
+VER="${VER:-2.1.0}"
 ARCH="$(dpkg --print-architecture)"
 # Interpreter package the bundled venv is tied to (e.g. python3.12).
 PYVER="$(python3 -c 'import sys;print("%d.%d"%sys.version_info[:2])')"
