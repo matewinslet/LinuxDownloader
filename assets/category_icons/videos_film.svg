@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><defs>
+<linearGradient id="b" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#3a3a3a"/><stop offset="1" stop-color="#0e0e0e"/></linearGradient>
+<linearGradient id="g" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#9fd0ff"/><stop offset="1" stop-color="#2f6fc0"/></linearGradient></defs>
+<rect x="2" y="12" width="60" height="40" rx="3" fill="url(#b)" stroke="#9aa3ad" stroke-width="1.6"/>
+<g fill="#f2f2f2"><rect x="6" y="15" width="5" height="4" rx="1"/><rect x="16" y="15" width="5" height="4" rx="1"/><rect x="26" y="15" width="5" height="4" rx="1"/><rect x="36" y="15" width="5" height="4" rx="1"/><rect x="46" y="15" width="5" height="4" rx="1"/><rect x="56" y="15" width="4" height="4" rx="1"/>
+<rect x="6" y="45" width="5" height="4" rx="1"/><rect x="16" y="45" width="5" height="4" rx="1"/><rect x="26" y="45" width="5" height="4" rx="1"/><rect x="36" y="45" width="5" height="4" rx="1"/><rect x="46" y="45" width="5" height="4" rx="1"/><rect x="56" y="45" width="4" height="4" rx="1"/></g>
+<rect x="5" y="22" width="16" height="20" rx="1.5" fill="url(#g)"/><rect x="24" y="22" width="16" height="20" rx="1.5" fill="url(#g)"/><rect x="43" y="22" width="16" height="20" rx="1.5" fill="url(#g)"/>
+<g fill="#fff" opacity=".35"><rect x="5" y="22" width="16" height="7" rx="1.5"/><rect x="24" y="22" width="16" height="7" rx="1.5"/><rect x="43" y="22" width="16" height="7" rx="1.5"/></g></svg>
