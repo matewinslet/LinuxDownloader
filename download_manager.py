@@ -26,7 +26,7 @@ from PyQt6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLineEdit,
     QPushButton, QTableWidget, QTableWidgetItem, QHeaderView, QMenu,
     QMessageBox, QListWidget, QListWidgetItem, QLabel, QAbstractItemView,
-    QStyledItemDelegate, QStyle, QMenuBar, QMainWindow,
+    QStyledItemDelegate, QStyle, QStyleOptionViewItem, QMenuBar, QMainWindow,
     QDialog, QComboBox, QRadioButton, QGroupBox,
     QProgressBar, QTextEdit, QSizePolicy, QCheckBox, QFileDialog, QFrame,
     QGraphicsOpacityEffect, QGraphicsDropShadowEffect, QStackedWidget,
@@ -168,7 +168,7 @@ CATEGORIES = [
 # Squircle icon file (in assets/category_icons/) for each sidebar category.
 CATEGORY_ICON_FILE = {
     "All Downloads": "all.svg",
-    "Videos":        "videos.svg",
+    "Videos":        "videos_film.svg",     # classic film strip (10/23); old squircle = videos.svg
     "Music":         "music.svg",
     "Documents":     "documents.svg",
     "Compressed":    "compressed.svg",
@@ -230,6 +230,11 @@ def get_category_pixmap(category, size=28):
     return pix
 
 
+def get_file_icon_pixmap(category, size=18):
+    """Download-list icon: the same per-category icon the sidebar uses (videos = film strip)."""
+    return get_category_pixmap(category, size)
+
+
 # Extra data roles used by the file-list delegates.
 FL_ROLE_CATEGORY = Qt.ItemDataRole.UserRole + 4   # set on column 0
 FL_ROLE_TOTAL    = Qt.ItemDataRole.UserRole + 5   # set on column 0 (sub-meta)
@@ -239,8 +244,12 @@ FL_ROLE_TOTAL    = Qt.ItemDataRole.UserRole + 5   # set on column 0 (sub-meta)
 # value _apply_table_style() pushes into the vertical header — otherwise rows
 # inserted at runtime (setRowHeight in _insert_row_items) end up taller than
 # the rows already laid out at the header's default section size.
-FL_ROW_HEIGHT     = 40
+FL_ROW_HEIGHT     = 24      # IDM-style compact rows (was 40 for the card layout)
 FL_ROW_LEFT_PAD   = 14
+
+# IDM-style list: header order (logical column indices) and default widths.
+IDM_COLUMN_ORDER  = [0, 2, 5, 7, 3, 6, 4, 1]
+IDM_COLUMN_WIDTHS = {0: 300, 2: 85, 5: 90, 7: 190, 3: 95, 6: 135, 4: 75}
 FL_ROW_RIGHT_PAD  = 18
 
 def choose_folder(filename):
@@ -2003,6 +2012,173 @@ class FlDateDelegate(_FlBaseDelegate):
         y = option.rect.top() + (option.rect.height() + fm.ascent() - fm.descent()) // 2
         painter.drawText(x, y, elided)
         painter.restore()
+
+
+# ── IDM-style download list (Internet Download Manager look) ────────────────
+#
+# Flat single-line rows, small file icon, plain Segoe UI text, classic blue
+# selection (grey when the window isn't focused), no dividers. Logical columns
+# are unchanged (0 name, 1 progress [hidden], 2 size, 3 rate, 4 time left,
+# 5 status, 6 date, 7 description); the header shows them in IDM's order.
+
+IDM_FONT_FAMILY = "Segoe UI"
+
+
+class _IdmBaseDelegate(_FlBaseDelegate):
+    def _font_px(self, px=12):
+        f = QFont(IDM_FONT_FAMILY)
+        f.setFamilies([IDM_FONT_FAMILY, self._sans] + FlNameDelegate._fallbacks())
+        f.setPixelSize(px)
+        return f
+
+    def _paint_bg(self, painter, option):
+        selected = bool(option.state & QStyle.StateFlag.State_Selected)
+        active = bool(option.state & QStyle.StateFlag.State_Active)
+        if selected:
+            if active:
+                bg = self._c("#0078d7", "#2b5b9c")
+            else:
+                bg = self._c("#d9d9d9", "#3a4252")
+        else:
+            bg = self._c("#ffffff", "#1e293b")
+        painter.fillRect(option.rect, bg)
+        return selected and active
+
+    def _text_color(self, highlighted, muted=False):
+        if highlighted:
+            return QColor("#ffffff")
+        if muted:
+            return self._c("#6b6b6b", "#94a3b8")
+        return self._c("#000000", "#e2e8f0")
+
+    def _cell_text(self, index):
+        return (index.data(Qt.ItemDataRole.DisplayRole) or "").strip()
+
+    def _draw_text(self, painter, option, text, highlighted, color=None, x_pad=6):
+        painter.setFont(self._font_px())
+        painter.setPen(color if (color is not None and not highlighted) else self._text_color(highlighted))
+        fm = painter.fontMetrics()
+        r = option.rect.adjusted(x_pad, 0, -4, 0)
+        painter.drawText(r, int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
+                         fm.elidedText(text, Qt.TextElideMode.ElideRight, r.width()))
+
+    def paint(self, painter, option, index):
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+        hl = self._paint_bg(painter, option)
+        text, color = self.display(index)
+        self._draw_text(painter, option, text, hl, color)
+        painter.restore()
+
+    def display(self, index):
+        return self._cell_text(index), None
+
+    def sizeHint(self, option, index):
+        return QSize(option.rect.width(), FL_ROW_HEIGHT)
+
+
+class IdmNameDelegate(_IdmBaseDelegate):
+    """Column 0 — file icon (film strip for videos) + file name."""
+    ICON = 18
+
+    def paint(self, painter, option, index):
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+        painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+        hl = self._paint_bg(painter, option)
+        pix = get_file_icon_pixmap(index.data(FL_ROLE_CATEGORY) or "Others", self.ICON)
+        x = option.rect.left() + 5
+        if pix is not None:
+            painter.drawPixmap(x, option.rect.top() + (option.rect.height() - self.ICON) // 2, pix)
+        name_opt = QStyleOptionViewItem(option)
+        name_opt.rect = option.rect.adjusted(self.ICON + 7, 0, 0, 0)
+        self._draw_text(painter, name_opt, self._cell_text(index), hl)
+        painter.restore()
+
+
+class IdmSizeDelegate(_IdmBaseDelegate):
+    """Column 2 — the file's total size, like IDM (not "done / total")."""
+    def display(self, index):
+        text = self._cell_text(index)
+        if " / " in text:
+            done, total = (t.strip() for t in text.split(" / ", 1))
+            text = total if total and total not in ("—", "?", "0 B") else done
+        return ("" if text == "—" else text), None
+
+
+class IdmStatusDelegate(_IdmBaseDelegate):
+    """Column 5 — Complete / 45% / Paused / Error … in IDM wording."""
+    def display(self, index):
+        raw = self._cell_text(index) or "Finished"
+        if raw == "Finished":
+            return "Complete", None
+        if raw == "Downloading":
+            return f"{self._pct_from(index)}%", None
+        if raw.lower().startswith("error") or raw in ("File Missing", "Failed"):
+            return ("Error" if raw.lower().startswith("error") else raw), self._c("#c00000", "#f87171")
+        return raw, None
+
+
+class IdmDescriptionDelegate(_IdmBaseDelegate):
+    """Column 7 — what went wrong for failed rows, otherwise file type + source site."""
+    _TYPE = {"Videos": "video", "Music": "audio", "Documents": "document",
+             "Compressed": "archive", "Programs": "program"}
+
+    def display(self, index):
+        name_ix = index.siblingAtColumn(0)
+        status = (index.siblingAtColumn(5).data(Qt.ItemDataRole.DisplayRole) or "").strip()
+        if status.lower().startswith("error"):
+            detail = re.sub(r"^(error:?\s*)+", "", status, flags=re.I).strip()
+            return (detail or "Download failed"), self._c("#c00000", "#f87171")
+        if status == "File Missing":
+            return "File was moved or deleted", self._c("#c00000", "#f87171")
+        filename = (name_ix.data(Qt.ItemDataRole.DisplayRole) or "").strip()
+        ext = filename.rsplit(".", 1)[-1].upper() if "." in filename else ""
+        kind = self._TYPE.get(name_ix.data(FL_ROLE_CATEGORY) or "", "file")
+        url = name_ix.data(Qt.ItemDataRole.UserRole + 2) or ""
+        host = ""
+        try:
+            host = urlparse(url).hostname or ""
+        except Exception:
+            pass
+        labels = host.split(".")
+        # site name only: file-eu-ldn-1.gofile.io -> gofile.io, x.bbc.co.uk -> bbc.co.uk
+        keep = 3 if len(labels) >= 3 and len(labels[-1]) == 2 and labels[-2] in ("co", "com", "net", "org", "ac", "gov") else 2
+        host = ".".join(labels[-keep:])
+        parts = [f"{ext} {kind}".strip() if ext else kind.capitalize()]
+        if host:
+            parts.append(host)
+        return " · ".join(parts), None
+
+
+class IdmRateDelegate(_IdmBaseDelegate):
+    """Column 3 — transfer rate while downloading, blank otherwise (as in IDM)."""
+    def display(self, index):
+        text = self._cell_text(index)
+        if self._status_from(index) != "Downloading" or text in ("", "—"):
+            return "", None
+        return text.lstrip("↓ ").strip(), None
+
+
+class IdmTimeLeftDelegate(_IdmBaseDelegate):
+    """Column 4 — time left while downloading, blank otherwise."""
+    def display(self, index):
+        text = self._cell_text(index)
+        if self._status_from(index) != "Downloading" or text in ("", "—"):
+            return "", None
+        return text, None
+
+
+class IdmDateDelegate(_IdmBaseDelegate):
+    """Column 6 — "Oct 17 14:05 2026" (IDM's Date Added format, no seconds stored)."""
+    def display(self, index):
+        text = self._cell_text(index)
+        try:
+            import datetime as _dt
+            d = _dt.datetime.strptime(text[:16], "%Y-%m-%d %H:%M")
+            return d.strftime("%b %d %H:%M %Y"), None
+        except Exception:
+            return text, None
 
 
 # Back-compat aliases — older code references the original class names.
@@ -6323,6 +6499,125 @@ class CoreDownloaderDialog(DownloaderDialogBase):
 
 
 # ── Variant C sidebar hero card ──────────────────────────────────────────────
+class StorageDriveTile(QWidget):
+    """Sidebar storage widget in the Windows 7 "Computer" drive-tile style:
+    drive icon, name, glossy usage bar (blue; red under 10% free), "X GB free of Y GB"."""
+
+    LOW_FREE = 0.10
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.dark = False
+        self.used = self.total = self.free = 0.0
+        self.setFixedHeight(12 + 18 + 8 + 30 + 2 + 16 + 10)   # pad, title, gap, glyph/bar row, gap, text, pad
+
+    def set_usage(self, used_gb, total_gb, free_gb):
+        self.used, self.total, self.free = used_gb, total_gb, free_gb
+        pct = (used_gb / total_gb * 100) if total_gb else 0
+        self.setToolTip(f"Drive holding your Downloads folder\n"
+                        f"{used_gb:.1f} GB used ({pct:.0f}%) · {free_gb:.1f} GB free · {total_gb:.0f} GB total")
+        self.update()
+
+    def set_dark(self, dark):
+        self.dark = dark
+        self.update()
+
+    @staticmethod
+    def _font(px, weight=QFont.Weight.Normal):
+        f = QFont(IDM_FONT_FAMILY)
+        f.setPixelSize(px)
+        f.setWeight(weight)
+        return f
+
+    def _paint_drive_icon(self, p, x, y, s):
+        body = QRectF(x, y + s * 0.2, s, s * 0.6)
+        g = QLinearGradient(0, body.top(), 0, body.bottom())
+        g.setColorAt(0, QColor("#f3f4f6"))
+        g.setColorAt(1, QColor("#9ca3af"))
+        path = QPainterPath()
+        path.addRoundedRect(body, 3, 3)
+        p.fillPath(path, QBrush(g))
+        p.setPen(QPen(QColor("#6b7280"), 1))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawPath(path)
+        p.fillRect(QRectF(x + 3, y + s * 0.55, s - 6, 1.2), QColor("#6b7280"))
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor("#22c55e"))
+        p.drawEllipse(QPointF(x + s - 6, y + s * 0.66), 1.8, 1.8)
+
+    PAD = 12          # inner padding of the card on every side
+    ICON = 30         # drive glyph, centred on the bar
+    BAR_H = 14
+
+    def paintEvent(self, _event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        p.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+        text = QColor("#e2e8f0" if self.dark else "#0f172a")
+        muted = QColor("#94a3b8" if self.dark else "#64748b")
+        track = QColor("#334155" if self.dark else "#e5e7eb")
+        edge = QColor("#64748b" if self.dark else "#8a8a8a")
+
+        # Own card, so it reads as a separate compartment from the category list
+        card = QRectF(0.5, 0.5, self.width() - 1, self.height() - 1)
+        card_path = QPainterPath()
+        card_path.addRoundedRect(card, 12, 12)
+        if self.dark:
+            p.fillPath(card_path, QColor(255, 255, 255, 10))
+            p.setPen(QPen(QColor(255, 255, 255, 22), 1))
+        else:
+            g = QLinearGradient(0, 0, 0, self.height())
+            g.setColorAt(0, QColor("#ffffff"))
+            g.setColorAt(1, QColor("#f1f5f9"))
+            p.fillPath(card_path, QBrush(g))
+            p.setPen(QPen(QColor("#e2e8f0"), 1))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawPath(card_path)
+
+        pad = self.PAD
+        inner_w = self.width() - 2 * pad
+
+        # Row 1 — title
+        title_h = 18
+        p.setFont(self._font(12, QFont.Weight.DemiBold))
+        p.setPen(text)
+        p.drawText(QRectF(pad, pad, inner_w, title_h),
+                   int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter), "Drive Storage")
+
+        # Row 2 — drive glyph and bar share one centre line
+        row_top = pad + title_h + 8
+        row_h = max(self.ICON, self.BAR_H)
+        cy = row_top + row_h / 2.0
+        self._paint_drive_icon(p, pad, cy - self.ICON / 2.0, self.ICON)
+        left = pad + self.ICON + 10
+        width = max(0.0, self.width() - pad - left)
+        bar = QRectF(left, cy - self.BAR_H / 2.0, width, self.BAR_H)
+        path = QPainterPath()
+        path.addRoundedRect(bar, 1.5, 1.5)
+        p.fillPath(path, track)
+        frac = (self.used / self.total) if self.total else 0.0
+        if frac > 0:
+            fill = QRectF(bar.left() + 1, bar.top() + 1, (bar.width() - 2) * min(1.0, frac), bar.height() - 2)
+            low = self.total and (self.free / self.total) < self.LOW_FREE
+            base = QColor("#da2626") if low else QColor("#26a0da")
+            g = QLinearGradient(0, fill.top(), 0, fill.bottom())
+            g.setColorAt(0, base.lighter(150))
+            g.setColorAt(0.5, base)
+            g.setColorAt(1, base.darker(115))
+            p.fillRect(fill, QBrush(g))
+        p.setPen(QPen(edge, 1))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawPath(path)
+
+        # Row 3 — free of total, under the bar
+        p.setFont(self._font(11))
+        p.setPen(muted)
+        label = f"{self.free:.1f} GB free of {self.total:.0f} GB" if self.total else "—"
+        p.drawText(QRectF(left, row_top + row_h + 2, width, 16),
+                   int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter), label)
+        p.end()
+
+
 class _HeroBarColumn(QWidget):
     """One clickable day-column in the hero card's 7-bar week chart."""
     def __init__(self, hero, idx):
@@ -7114,8 +7409,7 @@ class DownloadManager(QMainWindow):
             self._hero_card.set_data(days, selected_idx=prev_idx)
 
     def _build_storage_card(self):
-        """Create the bottom-of-sidebar storage usage card (Variant A spec)."""
-        from PyQt6.QtWidgets import QProgressBar
+        """Bottom-of-sidebar storage widget: Explorer-style drive tile (10/23)."""
 
         card = QWidget()
         card.setObjectName("storageCard")
@@ -7126,61 +7420,11 @@ class DownloadManager(QMainWindow):
         inner = QWidget()
         inner.setObjectName("storageInner")
         v = QVBoxLayout(inner)
-        v.setContentsMargins(13, 12, 13, 12)
-        v.setSpacing(7)
-
-        # Header row: HDD glyph + caption
-        cap_row = QHBoxLayout()
-        cap_row.setContentsMargins(0, 0, 0, 0)
-        cap_row.setSpacing(7)
-        glyph_color = "#cbd5e1" if self.dark_mode else "#475569"
-        self._storage_glyph = QLabel()
-        self._storage_glyph.setObjectName("storageGlyph")
-        self._storage_glyph.setPixmap(
-            _render_svg_str_pixmap(_TILE_SVG_HDD, glyph_color, size=14)
-        )
-        self._storage_glyph.setFixedSize(14, 14)
-        cap_row.addWidget(self._storage_glyph)
-        cap = QLabel("DOWNLOAD STORAGE")
-        cap.setObjectName("storageCap")
-        cap_row.addWidget(cap)
-        cap_row.addStretch()
-        v.addLayout(cap_row)
-
-        # Value row: "142.8 GB" + "of 500 GB"
-        val_row = QHBoxLayout()
-        val_row.setContentsMargins(0, 0, 0, 0)
-        val_row.setSpacing(0)
-        self._storage_value = QLabel("— GB")
-        self._storage_value.setObjectName("storageValue")
-        val_row.addWidget(self._storage_value)
-        val_row.addStretch()
-        self._storage_total = QLabel("")
-        self._storage_total.setObjectName("storageTotal")
-        val_row.addWidget(self._storage_total)
-        v.addLayout(val_row)
-
-        # Progress bar
-        self._storage_bar = QProgressBar()
-        self._storage_bar.setObjectName("storageBar")
-        self._storage_bar.setRange(0, 100)
-        self._storage_bar.setValue(0)
-        self._storage_bar.setTextVisible(False)
-        self._storage_bar.setFixedHeight(6)
-        v.addWidget(self._storage_bar)
-
-        # Footer: "% used"  + "GB free"
-        foot_row = QHBoxLayout()
-        foot_row.setContentsMargins(0, 0, 0, 0)
-        foot_row.setSpacing(0)
-        self._storage_pct = QLabel("")
-        self._storage_pct.setObjectName("storagePct")
-        foot_row.addWidget(self._storage_pct)
-        foot_row.addStretch()
-        self._storage_free = QLabel("")
-        self._storage_free.setObjectName("storageFree")
-        foot_row.addWidget(self._storage_free)
-        v.addLayout(foot_row)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(0)
+        self._storage_tile = StorageDriveTile()
+        self._storage_tile.set_dark(self.dark_mode)
+        v.addWidget(self._storage_tile)
 
         outer.addWidget(inner)
         self._refresh_storage_card()
@@ -7188,7 +7432,7 @@ class DownloadManager(QMainWindow):
 
     def _refresh_storage_card(self):
         """Recompute disk-usage figures for the storage card."""
-        if not hasattr(self, "_storage_value"):
+        if not hasattr(self, "_storage_tile"):
             return
         target = os.path.join(HOME, "Downloads")
         if not os.path.exists(target):
@@ -7201,22 +7445,14 @@ class DownloadManager(QMainWindow):
         used_gb = (usage.total - usage.free) / gb
         total_gb = usage.total / gb
         free_gb = usage.free / gb
-        pct = (used_gb / total_gb * 100) if total_gb else 0
-        self._storage_value.setText(
-            f"<span style='font-size:15px;font-weight:700;'>{used_gb:.1f}</span> "
-            f"<span style='font-size:11px;font-weight:500;color:#64748b;'>GB</span>"
-        )
-        self._storage_total.setText(f"of {total_gb:.0f} GB")
-        self._storage_pct.setText(f"{pct:.0f}% used")
-        self._storage_free.setText(f"{free_gb:.1f} GB free")
-        self._storage_bar.setValue(int(round(pct)))
+        self._storage_tile.set_usage(used_gb, total_gb, free_gb)
 
     def _make_toolbar_svg_btn(self, icon_filename, tooltip, label_text,
                               _unused_color=None, _unused_bg=None):
         """Create a toolbar button that loads a full SVG icon file."""
         from PyQt6.QtSvg import QSvgRenderer
 
-        LABEL_CLR   = "#3b82f6"
+        LABEL_CLR   = self._toolbar_label_color()   # black like IDM (light text in dark mode)
         HOVER_LIGHT = "rgba(100, 116, 139, 0.10)"
         HOVER_DARK  = "rgba(59, 130, 246, 0.13)"
         hover_bg = HOVER_DARK if self.dark_mode else HOVER_LIGHT
@@ -7265,13 +7501,12 @@ class DownloadManager(QMainWindow):
         text_lbl = QLabel(label_text)
         text_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         text_lbl.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-        text_lbl.setStyleSheet(
-            f"background: transparent; border: none; color: {LABEL_CLR};"
-            "font-size: 9px; font-weight: 800; letter-spacing: 0.5px;")
+        text_lbl.setStyleSheet(self._toolbar_label_qss(LABEL_CLR))
+        text_lbl.setFont(self._toolbar_label_font())
 
         vbox = QVBoxLayout(btn)
-        vbox.setContentsMargins(0, 5, 0, 4)
-        vbox.setSpacing(1)
+        vbox.setContentsMargins(0, 4, 0, 3)
+        vbox.setSpacing(6)          # breathing room between icon and caption
         vbox.setAlignment(Qt.AlignmentFlag.AlignCenter)
         vbox.addWidget(icon_lbl)
         vbox.addWidget(text_lbl)
@@ -7309,6 +7544,32 @@ class DownloadManager(QMainWindow):
         btn._text_lbl = text_lbl
         btn._icon_path = icon_path
         return wrapper
+
+    def _toolbar_label_color(self):
+        return "#e2e8f0" if self.dark_mode else "#000000"
+
+    @staticmethod
+    def _toolbar_label_qss(color):
+        # colour only: the font is set as a QFont identical to the download rows' text
+        # (QSS font properties would override it)
+        return f"background: transparent; border: none; color: {color};"
+
+    @staticmethod
+    def _toolbar_label_font():
+        f = QFont(IDM_FONT_FAMILY)
+        f.setFamilies([IDM_FONT_FAMILY] + FlNameDelegate._fallbacks())
+        f.setPixelSize(12)
+        return f
+
+    def _restyle_toolbar_labels(self):
+        clr = self._toolbar_label_color()
+        for name in ("_start_wrap", "_resume_wrap", "_cancel_wrap", "_clear_item_wrap", "_clear_wrap",
+                     "_open_folder_wrap", "_yt_wrap", "_about_wrap", "_donate_wrap"):
+            w = getattr(self, name, None)
+            lbl = getattr(getattr(w, "_inner_btn", None), "_text_lbl", None)
+            if lbl is not None:
+                lbl.setStyleSheet(self._toolbar_label_qss(clr))
+                lbl.setFont(self._toolbar_label_font())
 
     def _open_selected_folder(self):
         row = self.table.currentRow()
@@ -7546,12 +7807,12 @@ class DownloadManager(QMainWindow):
         # Search + URL row
         top_row = QHBoxLayout()
         self._search_input = QLineEdit()
-        self._search_input.setPlaceholderText("🔍  Search downloads...")
+        self._search_input.setPlaceholderText("🔍  Search downloads")
         self._search_input.setFixedWidth(220)
         self._search_input.textChanged.connect(self.filter_by_search)
 
         self.url_input = QLineEdit()
-        self.url_input.setPlaceholderText("Paste URL here — YouTube links open the YouTube Downloader automatically...")
+        self.url_input.setPlaceholderText("Paste URL here")
         self.url_input.returnPressed.connect(self.start_manual)
         top_row.addWidget(self._search_input)
         top_row.addSpacing(8)
@@ -7607,38 +7868,41 @@ class DownloadManager(QMainWindow):
         content_layout.addWidget(self._toolbar)
 
         self.table = QTableWidget()
-        self.table.setColumnCount(6)
-        self.table.setColumnCount(7)
-        self.table.setHorizontalHeaderLabels(["FILE NAME", "PROGRESS", "DOWNLOADED", "SPEED", "ETA", "STATUS", "DATE"])
+        # IDM-style list. Logical columns keep their old meaning (lots of code
+        # reads them by index); col 7 is the painted-only Description, col 1
+        # (progress) is hidden — Status shows the percent — and the header
+        # shows them in IDM's order: name, size, status, description, rate,
+        # date added, time left.
+        self.table.setColumnCount(8)
+        self.table.setHorizontalHeaderLabels(["File Name", "Progress", "Size", "Transfer rate",
+                                              "Time left", "Status", "Date Added", "Description"])
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         for col in range(self.table.columnCount()):
             self.table.horizontalHeader().setSectionResizeMode(col, QHeaderView.ResizeMode.Interactive)
-        self.table.setColumnWidth(0, 360)
-        self.table.setColumnWidth(1, 220)
-        self.table.setColumnWidth(2, 150)
-        self.table.setColumnWidth(3, 0)
-        self.table.setColumnWidth(4, 0)
-        self.table.setColumnWidth(5, 140)
-        self.table.setColumnWidth(6, 160)
-        # Speed / ETA live in the bottom status chip instead of dedicated
-        # columns — see _refresh_status_chip().
-        self.table.setColumnHidden(3, True)
-        self.table.setColumnHidden(4, True)
-        self.table.horizontalHeader().setStretchLastSection(False)
-        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        for col, width in IDM_COLUMN_WIDTHS.items():
+            self.table.setColumnWidth(col, width)
+        self.table.setColumnHidden(1, True)
+        _hdr = self.table.horizontalHeader()
+        for visual, logical in enumerate(IDM_COLUMN_ORDER):
+            _hdr.moveSection(_hdr.visualIndex(logical), visual)
+        _hdr.setDefaultAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        _hdr.setStretchLastSection(False)
+        _hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         self.table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        # ── Restore saved column widths ──────────────────────────────
-        saved_widths = self._settings.get("column_widths", {})
+        # ── Restore saved column widths (own key: the card layout's saved
+        # widths had Speed/ETA at 0 px) ──────────────────────────────
+        saved_widths = self._settings.get("idm_column_widths", {})
         for col_str, width in saved_widths.items():
-            self.table.setColumnWidth(int(col_str), width)
-        self.table.horizontalHeader().setMinimumSectionSize(50)
+            if int(col_str) != 0:
+                self.table.setColumnWidth(int(col_str), width)
+        self.table.horizontalHeader().setMinimumSectionSize(40)
         self.table.setShowGrid(False)
         self.table.setWordWrap(False)
         self.table.setTextElideMode(Qt.TextElideMode.ElideRight)
         self.table.verticalHeader().setVisible(False)
         self.table.verticalHeader().setDefaultSectionSize(FL_ROW_HEIGHT)
-        self.table.setIconSize(QSize(28, 28))
+        self.table.setIconSize(QSize(18, 18))
         self.table.setAlternatingRowColors(False)
         self.table.setSortingEnabled(False)
         self.table.horizontalHeader().sectionClicked.connect(self._sort_by_column)
@@ -7648,13 +7912,14 @@ class DownloadManager(QMainWindow):
         # LDM_file_list_v1/ for the visual spec they implement.
         sans = getattr(self, "_plex_sans_family", "IBM Plex Sans")
         mono = getattr(self, "_mono_font_family", "IBM Plex Mono")
-        self._fl_name_delegate     = FlNameDelegate(self.table, sans, mono)
-        self._fl_progress_delegate = FlProgressDelegate(self.table, sans, mono)
-        self._fl_downloaded_delegate = FlDownloadedDelegate(self.table, sans, mono)
-        self._fl_speed_delegate    = FlSpeedDelegate(self.table, sans, mono)
-        self._fl_eta_delegate      = FlEtaDelegate(self.table, sans, mono)
-        self._fl_status_delegate   = FlStatusDelegate(self.table, sans, mono)
-        self._fl_date_delegate     = FlDateDelegate(self.table, sans, mono)
+        self._fl_name_delegate     = IdmNameDelegate(self.table, sans, mono)
+        self._fl_progress_delegate = FlProgressDelegate(self.table, sans, mono)   # hidden column
+        self._fl_downloaded_delegate = IdmSizeDelegate(self.table, sans, mono)
+        self._fl_speed_delegate    = IdmRateDelegate(self.table, sans, mono)
+        self._fl_eta_delegate      = IdmTimeLeftDelegate(self.table, sans, mono)
+        self._fl_status_delegate   = IdmStatusDelegate(self.table, sans, mono)
+        self._fl_date_delegate     = IdmDateDelegate(self.table, sans, mono)
+        self._fl_desc_delegate     = IdmDescriptionDelegate(self.table, sans, mono)
         self.table.setItemDelegateForColumn(0, self._fl_name_delegate)
         self.table.setItemDelegateForColumn(1, self._fl_progress_delegate)
         self.table.setItemDelegateForColumn(2, self._fl_downloaded_delegate)
@@ -7662,6 +7927,7 @@ class DownloadManager(QMainWindow):
         self.table.setItemDelegateForColumn(4, self._fl_eta_delegate)
         self.table.setItemDelegateForColumn(5, self._fl_status_delegate)
         self.table.setItemDelegateForColumn(6, self._fl_date_delegate)
+        self.table.setItemDelegateForColumn(7, self._fl_desc_delegate)
         # Kept for compatibility with code that reads `progress_delegate`.
         self.progress_delegate = self._fl_progress_delegate
 
@@ -7800,7 +8066,8 @@ class DownloadManager(QMainWindow):
         # in dark mode while the rest of the chrome goes dark.
         for _name in ("_fl_name_delegate", "_fl_progress_delegate",
                       "_fl_downloaded_delegate", "_fl_speed_delegate",
-                      "_fl_eta_delegate", "_fl_status_delegate", "_fl_date_delegate"):
+                      "_fl_eta_delegate", "_fl_status_delegate", "_fl_date_delegate",
+                      "_fl_desc_delegate"):
             _d = getattr(self, _name, None)
             if _d is not None:
                 _d.dark = self.dark_mode
@@ -7831,26 +8098,26 @@ class DownloadManager(QMainWindow):
                 color: {t['selected_text']};
             }}
             QHeaderView::section {{
-                background-color: {t['header']};
-                color: {t['faint']};
-                font-size: 10px;
-                font-weight: 700;
-                padding: 11px 14px;
+                background-color: {'#1e293b' if self.dark_mode else '#ffffff'};
+                color: {t['text'] if self.dark_mode else '#1a1a1a'};
+                font-family: '{IDM_FONT_FAMILY}';
+                font-size: 12px;
+                font-weight: 400;
+                padding: 0px 6px;
                 border: none;
-                border-bottom: 1px solid {t['border']};
-                text-transform: uppercase;
+                border-right: 1px solid {'#334155' if self.dark_mode else '#e5e5e5'};
+                border-bottom: 1px solid {'#334155' if self.dark_mode else '#d5d5d5'};
             }}
             QHeaderView::section:first {{
                 border-top-left-radius: 14px;
-                padding-left: 14px;
+                padding-left: 28px;
             }}
             QHeaderView::section:last {{
                 border-top-right-radius: 14px;
-                padding-right: 18px;
+                border-right: none;
             }}
             QHeaderView::section:hover {{
-                background-color: {t['category_hover']};
-                color: {t['muted']};
+                background-color: {'#26334a' if self.dark_mode else '#d9ebf9'};
             }}
             QHeaderView {{
                 background-color: {t['header']};
@@ -7891,20 +8158,18 @@ class DownloadManager(QMainWindow):
             }}
         """)
 
-        self.table.setAlternatingRowColors(True)
+        self.table.setAlternatingRowColors(False)
         self.table.setShowGrid(False)
         self.table.verticalHeader().setVisible(False)
         self.table.verticalHeader().setDefaultSectionSize(FL_ROW_HEIGHT)
         self.table.setTextElideMode(Qt.TextElideMode.ElideRight)
 
         # Qt CSS doesn't support letter-spacing reliably on headers — apply via QFont
-        header_font = QFont(getattr(self, "_plex_sans_family", self.font().family()))
-        header_font.setPixelSize(10)
-        header_font.setWeight(QFont.Weight.Bold)
-        header_font.setCapitalization(QFont.Capitalization.AllUppercase)
-        header_font.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 0.9)
+        header_font = QFont(IDM_FONT_FAMILY)
+        header_font.setPixelSize(12)
+        header_font.setWeight(QFont.Weight.Normal)
         self.table.horizontalHeader().setFont(header_font)
-        self.table.horizontalHeader().setFixedHeight(36)
+        self.table.horizontalHeader().setFixedHeight(26)
 
     def _apply_theme(self):
         t = self._theme()
@@ -7921,6 +8186,8 @@ class DownloadManager(QMainWindow):
 
         # ── Menubar ────────────────────────────────────────────────────────────
         self._update_menubar_style()
+
+        self._restyle_toolbar_labels()
 
         # ── Sidebar ────────────────────────────────────────────────────────────
         self._sidebar.setStyleSheet(f"""
@@ -8140,9 +8407,10 @@ class DownloadManager(QMainWindow):
             self._show_toast(f"Shutdown failed: {e}")
 
     def _reset_column_widths(self):
-        defaults = {0: 270, 1: 199, 2: 100, 3: 85, 4: 70, 5: 90, 6: 110}
-        for col, width in defaults.items():
+        for col, width in IDM_COLUMN_WIDTHS.items():
             self.table.setColumnWidth(col, width)
+        self._settings["idm_column_widths"] = {}
+        save_settings(self._settings)
 
 
     def _update_category_counts(self):
@@ -8168,13 +8436,15 @@ class DownloadManager(QMainWindow):
         self._refresh_hero_card()
 
     def _on_column_resized(self, col, old_width, new_width):
-        widths = self._settings.setdefault("column_widths", {})
+        if col in (0, 1) or new_width <= 0:      # name stretches; progress is hidden
+            return
+        widths = self._settings.setdefault("idm_column_widths", {})
         widths[str(col)] = new_width
         save_settings(self._settings)
 
     def _sort_by_column(self, col):
-        if col == 1:
-            return  # Don't sort progress bar column
+        if col in (1, 7):
+            return  # progress is hidden; description is painted, not stored
         self.table.sortItems(col, Qt.SortOrder.AscendingOrder)
 
     def _on_cat_clicked(self, index):
@@ -8242,69 +8512,11 @@ class DownloadManager(QMainWindow):
     def _style_storage_card(self):
         if not hasattr(self, "_storage_card"):
             return
-        if hasattr(self, "_storage_glyph"):
-            glyph_color = "#cbd5e1" if self.dark_mode else "#475569"
-            self._storage_glyph.setPixmap(
-                _render_svg_str_pixmap(_TILE_SVG_HDD, glyph_color, size=14)
-            )
-        t = THEMES["dark" if self.dark_mode else "light"]
-        if self.dark_mode:
-            bg_top, bg_bot = "rgba(255,255,255,0.04)", "rgba(255,255,255,0.02)"
-            border = "rgba(255,255,255,0.08)"
-            cap_color = "#cbd5e1"
-            value_color = t['text']
-            unit_color = "#94a3b8"
-            total_color = "#64748b"
-            pct_color = "#94a3b8"
-            track_color = "rgba(255,255,255,0.08)"
-        else:
-            bg_top, bg_bot = "#f8fafc", "#f1f5f9"
-            border = "#e2e8f0"
-            cap_color = "#475569"
-            value_color = "#0f172a"
-            unit_color = "#64748b"
-            total_color = "#94a3b8"
-            pct_color = "#64748b"
-            track_color = "#e2e8f0"
-        self._storage_card.setStyleSheet(f"""
-            QWidget#storageCard {{ background: transparent; }}
-            QWidget#storageInner {{
-                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                    stop:0 {bg_top}, stop:1 {bg_bot});
-                border: 1px solid {border};
-                border-radius: 12px;
-            }}
-            QLabel#storageCap {{
-                color: {cap_color};
-                font-size: 10px;
-                font-weight: 700;
-                letter-spacing: 0.8px;
-                background: transparent;
-            }}
-            QLabel#storageValue {{
-                color: {value_color};
-                background: transparent;
-            }}
-            QLabel#storageTotal {{
-                color: {total_color};
-                font-size: 10px;
-                background: transparent;
-            }}
-            QLabel#storagePct, QLabel#storageFree {{
-                color: {pct_color};
-                font-size: 10px;
-                background: transparent;
-            }}
-            QProgressBar#storageBar {{
-                background-color: {track_color};
-                border: none;
-                border-radius: 3px;
-            }}
-            QProgressBar#storageBar::chunk {{
-                background-color: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-                    stop:0 #3b82f6, stop:1 #2563eb);
-                border-radius: 3px;
-            }}
+        if hasattr(self, "_storage_tile"):
+            self._storage_tile.set_dark(self.dark_mode)
+        self._storage_card.setStyleSheet("""
+            QWidget#storageCard { background: transparent; }
+            QWidget#storageInner { background: transparent; border: none; }
         """)
 
     def _update_empty_state(self):
