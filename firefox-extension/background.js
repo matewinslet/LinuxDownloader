@@ -58,6 +58,8 @@ var cfProtectedDomains = [
 function isCFProtected(url) {
   try {
     var host = new URL(url).hostname;
+    // Lulu keeps moving domains: any lulu* host except lulucdn (thumbnails).
+    if (/(?:^|\.)lulu(?!cdn)[a-z]*\.[a-z]+$/.test(host)) return true;
     return cfProtectedDomains.some(function(d) { return host.includes(d); });
   } catch(e) { return false; }
 }

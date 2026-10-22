@@ -4,31 +4,69 @@
   <meta charset="utf-8">
   <link rel="stylesheet" href="popup.css">
 </head>
-<body>
-  <div class="section-label">Stream Capture</div>
-  <button id="captureBtn">&#11015; Capture Stream</button>
+<body data-state="on">
+  <!-- Icons: chrome padlock (shut/open) and film clapperboard. -->
+  <svg width="0" height="0" style="position:absolute" aria-hidden="true">
+    <defs>
+      <linearGradient id="gSteel" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#8a96a3"/><stop offset=".45" stop-color="#eef2f6"/><stop offset="1" stop-color="#7c8794"/></linearGradient>
+      <linearGradient id="gChrome" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#f1f5f9"/><stop offset=".5" stop-color="#b8c2cc"/><stop offset="1" stop-color="#7d8894"/></linearGradient>
+      <linearGradient id="gRed" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#ff6b6b"/><stop offset="1" stop-color="#d81e1e"/></linearGradient>
+      <linearGradient id="gBoard" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#3a3f47"/><stop offset="1" stop-color="#16191e"/></linearGradient>
+      <pattern id="pStripe" width="8" height="8" patternUnits="userSpaceOnUse" patternTransform="rotate(-35)"><rect width="8" height="8" fill="#1b1e23"/><rect width="4" height="8" fill="#f4f4f4"/></pattern>
+      <symbol id="lockShut" viewBox="0 0 32 32">
+        <path d="M10.5 14V10.2a5.5 5.5 0 0 1 11 0V14" fill="none" stroke="#5f6b78" stroke-width="3.6" stroke-linecap="round"/>
+        <path d="M10.5 14V10.2a5.5 5.5 0 0 1 11 0V14" fill="none" stroke="url(#gSteel)" stroke-width="2.4" stroke-linecap="round"/>
+        <rect x="6" y="13" width="20" height="15.5" rx="3" fill="url(#gChrome)" stroke="#5f6b78" stroke-width=".9"/>
+        <path d="M8 16.5h16M8 25h16" stroke="#ffffff" stroke-opacity=".55" stroke-width=".8"/>
+        <circle cx="16" cy="20.3" r="2.1" fill="#2b323a"/><rect x="15.2" y="21" width="1.6" height="3.6" rx=".6" fill="#2b323a"/>
+      </symbol>
+      <symbol id="lockOpen" viewBox="0 0 32 32">
+        <path d="M21.5 14V8.7a5.5 5.5 0 0 0-11-.4V9.6" fill="none" stroke="#5f6b78" stroke-width="3.6" stroke-linecap="round"/>
+        <path d="M21.5 14V8.7a5.5 5.5 0 0 0-11-.4V9.6" fill="none" stroke="url(#gSteel)" stroke-width="2.4" stroke-linecap="round"/>
+        <rect x="6" y="13" width="20" height="15.5" rx="3" fill="url(#gChrome)" stroke="#5f6b78" stroke-width=".9"/>
+        <path d="M8 16.5h16M8 25h16" stroke="#ffffff" stroke-opacity=".55" stroke-width=".8"/>
+        <circle cx="16" cy="20.3" r="2.1" fill="#2b323a"/><rect x="15.2" y="21" width="1.6" height="3.6" rx=".6" fill="#2b323a"/>
+      </symbol>
+      <symbol id="clapper" viewBox="0 0 32 32">
+        <rect x="4" y="13" width="24" height="15" rx="2.2" fill="url(#gBoard)" stroke="#0d0f12" stroke-width=".8"/>
+        <rect x="4" y="13" width="24" height="4" fill="url(#pStripe)"/>
+        <g transform="rotate(-16 4.5 12)"><rect x="4" y="7.5" width="24" height="4.2" rx=".8" fill="url(#pStripe)" stroke="#0d0f12" stroke-width=".7"/></g>
+        <circle cx="5.4" cy="12.2" r="1.3" fill="#c9ced6" stroke="#5c636d" stroke-width=".5"/>
+        <path d="M7.5 21h11M7.5 24h7" stroke="#cbd5e1" stroke-opacity=".6" stroke-width="1.1" stroke-linecap="round"/>
+        <circle cx="23.5" cy="22.5" r="2.4" fill="url(#gRed)"/><path d="M22.8 21.3v2.4l2-1.2z" fill="#fff"/>
+      </symbol>
+    </defs>
+  </svg>
 
-  <hr class="divider">
-  <div class="section-label">YouTube</div>
-  <button id="youtubeBtn">&#9654; Capture YouTube</button>
+  <div class="top"><b>LDM</b><span id="version"></span></div>
 
-  <hr class="divider">
-  <div class="section-label">Tools</div>
-  <button id="unlockBtn" class="secondary">
-    <span class="btn-title">&#128275; Unlock Right-click</span>
-    <span class="btn-sub">Enables restricted right-click downloads</span>
-  </button>
-
-  <hr class="divider">
-  <div class="toggle-row">
-    <div class="toggle-label">
-      Auto Intercept
-      <div class="sub" id="toggleSub">Sending to Linux DM</div>
+  <div class="center">
+    <button id="activeBtn" class="power" type="button" title="Turn forwarding on or off">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 3v8"/><path d="M6.3 6.8a8 8 0 1 0 11.4 0"/></svg>
+    </button>
+    <div class="label">
+      <strong id="activeTitle">Active</strong>
+      <small id="activeSub">Checking LDM…</small>
     </div>
-    <label class="switch">
-      <input type="checkbox" id="interceptToggle">
-      <span class="slider"></span>
-    </label>
+  </div>
+
+  <div class="tools">
+    <button id="unlockBtn" class="tool" type="button">
+      <span class="well"><svg><use id="lockIcon" href="#lockShut"/></svg></span>
+      <span class="txt">
+        <span class="btn-title">Unlock right-click</span>
+        <span class="btn-sub">Sites that block it</span>
+      </span>
+      <span class="end" id="unlockEnd">LOCKED</span>
+    </button>
+    <button id="videoBtnsBtn" class="tool is-on" type="button">
+      <span class="well"><svg><use href="#clapper"/></svg></span>
+      <span class="txt">
+        <span class="btn-title">Video buttons</span>
+        <span class="btn-sub" id="videoBtnsSub">Shown on videos</span>
+      </span>
+      <span class="end" id="videoBtnsEnd">ON</span>
+    </button>
   </div>
   <script src="popup.js"></script>
 </body>
