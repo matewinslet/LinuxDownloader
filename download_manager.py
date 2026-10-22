@@ -3,7 +3,7 @@
 # Copyright (c) 2026 Tanjim — tpodbcs@gmail.com
 # Licensed under the MIT License. See LICENSE.txt for details.
 
-import sys, time, os, threading, queue, subprocess, re, shutil, json, glob
+import sys, time, os, threading, queue, subprocess, re, shutil, json, glob, hashlib
 
 # curl_cffi gives Firefox TLS fingerprinting — required for Lulu CDN
 try:
@@ -487,13 +487,18 @@ def _unpack_packed_js(packed_args_str):
     return p
 
 
+# Lulu keeps moving its player domain (luluvdo → luluvid → luluvido…), so match
+# any lulu*.<tld> host except lulucdn (thumbnails), with optional subdomain.
+LULU_HOST_RE = r'(?:[\w-]+\.)?lulu(?!cdn)[a-z]*\.[a-z]+'
+
+
 def resolve_luluvdo_url(url):
     """Luluvdo / Lulustream pages hide the m3u8 inside packed JS — yt-dlp
     has no extractor for them. Fetch the embed page, decode the packer,
     and return (direct_m3u8_url, page_origin) so the caller can hand the
     HLS stream to yt-dlp's generic extractor with the right Referer."""
     m = re.match(
-        r'(https?://(?:luluvdo|lulustream)\.com)/(?:e/)?([A-Za-z0-9]+)',
+        r'(https?://' + LULU_HOST_RE + r')/(?:e/)?([A-Za-z0-9]+)',
         url,
     )
     if not m:
@@ -537,12 +542,11 @@ def luluvdo_page_from_url(url):
     that token is short-lived and session-bound; rerouting to the page fixes it."""
     if not url:
         return None
-    m = re.match(r'(https?://(?:luluvid|luluvdo|lulustream)\.com)/(?:e/)?([A-Za-z0-9]+)', url)
+    m = re.match(r'(https?://' + LULU_HOST_RE + r')/(?:e/)?([A-Za-z0-9]+)', url)
     if m:
-        # Canonicalise to luluvid.com — the live player domain (migrated from
-        # luluvdo.com). Both still serve embeds, but the CDN token must be minted
-        # and fetched under the SAME origin the browser uses, i.e. luluvid.com.
-        return f"https://luluvid.com/e/{m.group(2)}"
+        # Keep the domain the browser used: the CDN token must be minted and
+        # fetched under the same origin (all lulu mirrors serve /e/<id>).
+        return f"{m.group(1)}/e/{m.group(2)}"
     try:
         host = (urlparse(url).hostname or '').lower()
         path = urlparse(url).path or ''
@@ -552,7 +556,7 @@ def luluvdo_page_from_url(url):
         pm = (re.search(r'/([A-Za-z0-9]+)_[A-Za-z0-9]+/[^/]+\.m3u8$', path)
               or re.search(r'/([A-Za-z0-9]+)/[^/]+\.m3u8$', path))
         if pm:
-            return f"https://luluvdo.com/e/{pm.group(1)}"
+            return f"https://luluvid.com/e/{pm.group(1)}"
     return None
 
 
@@ -835,6 +839,11 @@ class BridgeHandler(BaseHTTPRequestHandler):
             # A second instance asking the running one to come back from the
             # tray. Answered with a distinctive body so the caller can tell LDM
             # apart from whatever else might hold the port.
+            # Liveness check for the extension popup's Active indicator.
+            if self.path == '/ping':
+                self.send_response(200); self.end_headers()
+                self.wfile.write(b"LDM-OK")
+                return
             if self.path == '/show':
                 show_queue.put(True)
                 self.send_response(200); self.end_headers()
@@ -954,15 +963,18 @@ def needs_curl(url):
 # auth it serves an HTML landing page that the downloader would save as
 # `.mp4`. Three steps are required (mirrors yt-dlp's gofile extractor):
 #   1. POST /accounts → mint a guest token
-#   2. Fetch /dist/js/global.js → extract `appdata.wt` (website token)
-#   3. GET /contents/{contentId}?wt=… with Authorization: Bearer {token}
-#      — this is the step that AUTHORIZES the token for that content.
-# Skipping step 3 was the recent bug: the CDN served the landing page.
+#   2. Sign the request: Gofile's /js/wt.obf.js defines generateWT(token), a
+#      sha256 over (token, User-Agent, navigator.language, 4-hour time window,
+#      rotating secret). It replaced the static `appdata.wt` in 2026-09.
+#   3. GET /contents/{contentId} with Authorization: Bearer {token} and
+#      X-Website-Token: <signature> — this AUTHORIZES the token for that content.
+# Skipping step 3 was an earlier bug: the CDN served the landing page.
 _GOFILE_TOKEN = None
-_GOFILE_WT = None
 _GOFILE_AUTHED_CONTENT = set()
 _GOFILE_LAST_ERR = ""
 _GOFILE_LOCK = threading.Lock()
+_GOFILE_WT_JS = None          # (fetched_at, source) of /js/wt.obf.js
+_GOFILE_LANG = "en-US"        # navigator.language fed to the signer; sent as X-BL too
 
 # ── Bunkr ────────────────────────────────────────────────────────────────────
 # Bunkr download pages (dl.bunkr.<tld>/file/<id>) no longer expose the file in
@@ -1196,13 +1208,87 @@ def _firefox_gofile_token():
                 except Exception: pass
     return None
 
+_GOFILE_WT_RUNNER = """import vm from "node:vm";
+const quiet = { log() {}, warn() {}, error() {}, info() {} };
+const ctx = { navigator: { userAgent: UA, language: LANG }, TextEncoder,
+              crypto: globalThis.crypto, atob, btoa, console: quiet };
+ctx.window = ctx; ctx.self = ctx;
+vm.createContext(ctx);
+vm.runInContext(CODE, ctx, { timeout: 5000 });
+console.log(String(await ctx.generateWT(TOKEN)));
+"""
+
+
+def _gofile_sign(token, ua):
+    """Return Gofile's X-Website-Token for `token`, or raise with the reason.
+
+    Runs Gofile's own /js/wt.obf.js in Deno (Node as fallback) inside a bare
+    vm context, like the browser does. Gofile instantly bans the IP for an hour
+    on an invalid signature, so every doubt here raises instead of sending:
+    the script is re-fetched every 30 min (its secret rotates; retired ones
+    are what get banned), the local clock must agree with Gofile's (a
+    future-window signature is invalid), and the output must look like a
+    sha256 hex digest."""
+    global _GOFILE_WT_JS
+    from email.utils import parsedate_to_datetime
+    if not _GOFILE_WT_JS or time.time() - _GOFILE_WT_JS[0] > 30 * 60:
+        r = requests.get("https://gofile.io/js/wt.obf.js",
+                         headers={"User-Agent": ua}, timeout=15)
+        if r.status_code != 200 or "generateWT" not in r.text:
+            raise RuntimeError(f"signer script: HTTP {r.status_code}")
+        try:
+            skew = time.time() - parsedate_to_datetime(r.headers["Date"]).timestamp()
+        except Exception:
+            skew = 0
+        if abs(skew) > 300:
+            raise RuntimeError(f"system clock is off by {int(skew)}s; "
+                               "not signing (Gofile bans bad signatures)")
+        _GOFILE_WT_JS = (time.time(), r.text)
+
+    src = (f"const CODE = {json.dumps(_GOFILE_WT_JS[1])};\n"
+           f"const TOKEN = {json.dumps(token)}, UA = {json.dumps(ua)}, "
+           f"LANG = {json.dumps(_GOFILE_LANG)};\n" + _GOFILE_WT_RUNNER)
+    deno = shutil.which("deno") or os.path.join(HOME, ".deno/bin/deno")
+    node = shutil.which("node")
+    if os.path.exists(deno):
+        cmd = [deno, "run", "--quiet", "--no-prompt", "--no-config", "-"]
+    elif node:
+        cmd = [node, "--input-type=module", "-"]
+    else:
+        raise RuntimeError("signer needs deno or node, neither found")
+    p = subprocess.run(cmd, input=src, capture_output=True, text=True, timeout=30)
+    wt = p.stdout.strip()
+    if p.returncode != 0 or not re.fullmatch(r"[0-9a-f]{64}", wt):
+        raise RuntimeError(f"signer failed: {(p.stderr or wt).strip()[:80]}")
+    return wt
+
+
+def _gofile_mint_guest(ua):
+    """POST /accounts for a new guest token; None (and _GOFILE_LAST_ERR) on failure."""
+    global _GOFILE_LAST_ERR
+    try:
+        r = requests.post("https://api.gofile.io/accounts",
+                          headers={"User-Agent": ua}, timeout=15)
+        data = r.json()
+        if data.get("status") != "ok":
+            _GOFILE_LAST_ERR = f"accounts API: status={data.get('status')!r}"
+            return None
+        token = (data.get("data") or {}).get("token")
+        if not token:
+            _GOFILE_LAST_ERR = "accounts API: no token in response"
+        return token
+    except Exception as e:
+        _GOFILE_LAST_ERR = f"accounts API: {type(e).__name__}: {str(e)[:80]}"
+        return None
+
+
 def get_gofile_token(content_id=None):
     """Return a Gofile guest token, pre-authorizing it for `content_id` so
     the CDN serves the actual file rather than the landing page.
 
     On failure, sets `_GOFILE_LAST_ERR` so the caller can surface the
-    specific step that broke (accounts API / global.js / contents API)."""
-    global _GOFILE_TOKEN, _GOFILE_WT, _GOFILE_LAST_ERR
+    specific step that broke (accounts API / signing / contents API)."""
+    global _GOFILE_TOKEN, _GOFILE_LAST_ERR
     ua = HEADERS["User-Agent"]
     with _GOFILE_LOCK:
         # Reset so a stale error from a prior content doesn't leak into the
@@ -1218,79 +1304,63 @@ def get_gofile_token(content_id=None):
                 _GOFILE_TOKEN = ff
                 token_from_browser = True
         if not _GOFILE_TOKEN:
-            try:
-                r = requests.post(
-                    "https://api.gofile.io/accounts",
-                    headers={"User-Agent": ua},
-                    timeout=15,
-                )
-                data = r.json()
-                if data.get("status") == "ok":
-                    _GOFILE_TOKEN = data["data"].get("token")
-                    if not _GOFILE_TOKEN:
-                        _GOFILE_LAST_ERR = "accounts API: no token in response"
-                else:
-                    _GOFILE_LAST_ERR = f"accounts API: status={data.get('status')!r}"
-            except Exception as e:
-                _GOFILE_LAST_ERR = f"accounts API: {type(e).__name__}: {str(e)[:80]}"
+            _GOFILE_TOKEN = _gofile_mint_guest(ua)
         if not _GOFILE_TOKEN:
             return None
         if content_id and content_id not in _GOFILE_AUTHED_CONTENT:
-            if not _GOFILE_WT:
-                # Gofile moved `appdata.wt` from global.js to config.js
-                # (sometime before 2026). Probe both so a future move is
-                # easier to spot from the error log.
-                for js_path in ("/dist/js/config.js", "/dist/js/global.js"):
-                    try:
-                        gjs = requests.get(
-                            f"https://gofile.io{js_path}",
-                            headers={"User-Agent": ua},
-                            timeout=15,
-                        ).text
-                        m = re.search(r'appdata\.wt\s*=\s*["\']([^"\']+)', gjs)
-                        if m:
-                            _GOFILE_WT = m.group(1)
-                            break
-                    except Exception as e:
-                        _GOFILE_LAST_ERR = f"{js_path}: {type(e).__name__}: {str(e)[:80]}"
-                if not _GOFILE_WT and not _GOFILE_LAST_ERR:
-                    _GOFILE_LAST_ERR = "wt not found in config.js/global.js"
-            try:
-                r = requests.get(
-                    f"https://api.gofile.io/contents/{content_id}",
-                    params={"wt": _GOFILE_WT} if _GOFILE_WT else None,
-                    headers={
-                        "User-Agent": ua,
-                        "Authorization": f"Bearer {_GOFILE_TOKEN}",
-                    },
-                    timeout=15,
-                )
-                jd = r.json()
-                if jd.get("status") == "ok":
+            for attempt in (1, 2):
+                try:
+                    wt = _gofile_sign(_GOFILE_TOKEN, ua)
+                except Exception as e:
+                    _GOFILE_LAST_ERR = f"signing: {str(e)[:120]}"
+                    return _GOFILE_TOKEN
+                try:
+                    r = requests.get(
+                        f"https://api.gofile.io/contents/{content_id}",
+                        headers={
+                            "User-Agent": ua,
+                            "Authorization": f"Bearer {_GOFILE_TOKEN}",
+                            "X-Website-Token": wt,
+                            "X-BL": _GOFILE_LANG,
+                        },
+                        timeout=15,
+                    )
+                    jd = r.json()
+                except Exception as e:
+                    _GOFILE_LAST_ERR = f"contents API: {type(e).__name__}: {str(e)[:80]}"
+                    break
+                status = jd.get("status")
+                if status in ("error-token", "error-wrongToken") and attempt == 1:
+                    # The account token itself was rejected — e.g. the Firefox
+                    # `appdataAccount` entry, which Gofile's 2026-09 redesign
+                    # left behind when it moved accounts to `gofile.accounts`.
+                    # Do what the site does: drop it and use a fresh guest.
+                    _GOFILE_TOKEN = _gofile_mint_guest(ua)
+                    token_from_browser = False
+                    if not _GOFILE_TOKEN:
+                        return None
+                    continue
+                if status == "ok":
                     pwd = (jd.get("data") or {}).get("passwordStatus")
                     if pwd and pwd != "passwordOk":
                         _GOFILE_LAST_ERR = f"content needs password ({pwd})"
                     else:
                         _GOFILE_AUTHED_CONTENT.add(content_id)
-                elif jd.get("status") == "error-notPremium" and token_from_browser:
+                elif status == "error-notPremium" and token_from_browser:
                     # /contents/ returns notPremium for files marked
                     # premium-only — but the Firefox-resident token's
                     # cookie often still downloads them via the CDN
                     # (auth was established when the user loaded the d/
                     # page). Trust the cookie and let HEAD/GET decide.
                     _GOFILE_AUTHED_CONTENT.add(content_id)
-                elif jd.get("status") == "error-notPremium":
+                elif status == "error-notPremium":
                     _GOFILE_LAST_ERR = (
                         "Premium-only file (guests can stream-preview "
                         "but not download)"
                     )
                 else:
-                    _GOFILE_LAST_ERR = (
-                        f"contents API: status={jd.get('status')!r}"
-                        f" wt={'set' if _GOFILE_WT else 'missing'}"
-                    )
-            except Exception as e:
-                _GOFILE_LAST_ERR = f"contents API: {type(e).__name__}: {str(e)[:80]}"
+                    _GOFILE_LAST_ERR = f"contents API: status={status!r}"
+                break
         return _GOFILE_TOKEN
 
 
@@ -3017,6 +3087,36 @@ def _dialog_input_qss(theme):
 
 
 # ── Stream dialog ─────────────────────────────────────────────────────────────
+# Output paths of stream downloads currently running. Captured streams often
+# share a generic name (Watch_VID_<date>.mp4), and a name that's only *in
+# progress* isn't on disk yet, so the exists() check alone let two downloads
+# pick the same name and overwrite each other.
+_ACTIVE_STREAM_PATHS = set()
+
+
+# Phone-camera default names carrying nothing but a date — VID_20261017,
+# IMG-20261017, PXL_20261017, optionally "Watch ": not unique per video.
+_GENERIC_MEDIA_NAME = re.compile(
+    r'^(?:watch[ _-]+)?(?:vid|img|video|mov|pxl|dsc|mvimg)[ _-]*\d{8}$', re.I)
+
+
+def _page_slug(url):
+    """Last path segment of a page URL when it looks like an ID
+    (streamfile.net/9j2grtbtyu6m -> 9j2grtbtyu6m)."""
+    seg = urlparse(url or '').path.rstrip('/').rsplit('/', 1)[-1]
+    seg = os.path.splitext(seg)[0]
+    return seg if re.fullmatch(r'[A-Za-z0-9_-]{6,40}', seg) else ''
+
+
+def _stream_temp_dir(url):
+    """Per-URL yt-dlp temp dir: fragments of different streams can never mix,
+    even under the same output name, while a resume of the same URL still
+    finds its own fragments."""
+    d = os.path.join(YT_DLP_TEMP_DIR, hashlib.sha1(url.encode()).hexdigest()[:16])
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
 class StreamDialog(DownloaderDialogBase):
     download_started  = pyqtSignal(str, str, str)
     download_progress = pyqtSignal(str, int, str, str, str)
@@ -3573,6 +3673,13 @@ class StreamDialog(DownloaderDialogBase):
                        'facebook', 'twitter', 'index', 'media'}
             if safe and safe.lower().split('.')[0] not in blocked:
                 base, ext = os.path.splitext(safe)
+                # Hosts like streamfile.net title every upload with the phone's
+                # default name ("Watch VID 20261017"), so different videos came
+                # out with the same filename. Tag such names with the page ID.
+                if _GENERIC_MEDIA_NAME.match(base):
+                    slug = _page_slug(ref) or _page_slug(url)
+                    if slug:
+                        base = f'{base} ({slug})'
                 return f'{base}{ext or ".mp4"}'
             return f'video_{ts}.mp4'
         except Exception:
@@ -3602,12 +3709,24 @@ class StreamDialog(DownloaderDialogBase):
         # contains a *different* video (CDNs like pvvstream reuse generic names
         # such as vid_480p.mp4 for every video).  Increment (1), (2), … until
         # we find a free slot so we never silently overwrite existing content.
+        # Also skip names another running stream download is writing to.
         # On resume keep the exact name — incrementing it would point yt-dlp at a
-        # fresh outtmpl and discard the fragments already in YT_DLP_TEMP_DIR.
-        if not self._resume:
+        # fresh outtmpl and discard the fragments it already downloaded. The
+        # exception is a resume whose name is now taken: a failed download
+        # never produced a finished file, so one at that path is a *different*
+        # video, and yt-dlp would call it "already downloaded" and report a
+        # false Finished. Restart under a free name instead.
+        def _taken(name):
+            p = os.path.join(folder, name)
+            return os.path.exists(p) or p in _ACTIVE_STREAM_PATHS
+        if not self._resume or _taken(display_name):
+            if self._resume:
+                self.log_box.append(
+                    f"{display_name} now belongs to another download \u2014 "
+                    "restarting under a new name.")
             _base, _ext = os.path.splitext(display_name)
             _counter = 1
-            while os.path.exists(os.path.join(folder, display_name)):
+            while _taken(display_name):
                 display_name = f"{_base} ({_counter}){_ext}"
                 _counter += 1
         base = os.path.splitext(display_name)[0]   # keep base in sync for outtmpl below
@@ -3618,10 +3737,15 @@ class StreamDialog(DownloaderDialogBase):
             http_hdrs['Referer'] = 'https://www.tiktok.com/'
         if self._page_referer:
             http_hdrs['Referer'] = self._page_referer
+        # media.redgifs.com 403s video fetches referred from other sites (e.g.
+        # a reddit.com feed the embed was captured from) — always refer from
+        # RedGifs itself.
+        if re.match(r'https?://(?:[\w-]+\.)?redgifs\.com/', self._url, re.I):
+            http_hdrs['Referer'] = 'https://www.redgifs.com/'
         # Lulustream/Luluvdo CDNs (e.g. *.tnmr.org) reject requests without
         # an Origin and Sec-Fetch-* set — match what Firefox sends.
         _is_lulu = bool(re.search(
-            r'(?:luluvid|luluvdo|lulustream)\.com|\btnmr\.org',
+            LULU_HOST_RE + r'|\btnmr\.org',
             self._url + ' ' + (self._page_referer or ''),
             re.I,
         ))
@@ -3638,6 +3762,7 @@ class StreamDialog(DownloaderDialogBase):
                 'Sec-Fetch-Site':  'cross-site',
             })
         self._dl_path = os.path.join(folder, display_name)
+        _ACTIVE_STREAM_PATHS.add(self._dl_path)
         self.open_file_btn.setVisible(False)
         self.open_folder_btn.setVisible(False)
         self.download_btn.setVisible(False)
@@ -3668,7 +3793,7 @@ class StreamDialog(DownloaderDialogBase):
         ydl_opts = {
             'format':              'bestvideo+bestaudio/best',
             'outtmpl':             os.path.join(folder, f"{base}.%(ext)s"),
-            'paths':               {'temp': YT_DLP_TEMP_DIR},
+            'paths':               {'temp': _stream_temp_dir(self._url)},
             # Continue partially-downloaded fragments from the temp dir on resume.
             'continuedl':          True,
             'merge_output_format': 'mp4',
@@ -3833,6 +3958,7 @@ class StreamDialog(DownloaderDialogBase):
         self.close()
 
     def _on_finished(self, msg):
+        _ACTIVE_STREAM_PATHS.discard(self._dl_path)
         self.stop_btn.setEnabled(False)
         # Cancellation arrives here as either "Cancelled" (curl path) or
         # "Error: Cancelled" (yt-dlp hook path). Treat both the same.
@@ -3877,9 +4003,14 @@ class StreamDialog(DownloaderDialogBase):
         # Auto-retry with page URL on 403 — needed when direct m3u8 requires
         # page-level cookie context (intercepted stream URL has expired).
         _is_403    = "403" in msg or "Forbidden" in msg.lower()
+        # A bare site root (e.g. https://www.reddit.com/ when capturing from a
+        # feed) names no video — retrying with it only swaps the real error for
+        # a misleading one about the home page.
+        _ref_path = urlparse(self._page_referer or "").path
         _can_retry = (
             not self._retried and _is_403
             and self._page_referer and self._page_referer != self._url
+            and _ref_path not in ("", "/")
         )
         if _can_retry:
             self._retried = True
@@ -4856,6 +4987,7 @@ class YouTubeDialog(DownloaderDialogBase):
         self.open_file_btn.setVisible(False)
         self.open_folder_btn.setVisible(False)
         self.update_ytdlp_btn.setVisible(False)
+        self.close_btn.setText("Cancel")
         self.download_started.emit(url, display_name, folder)
         self.yt_settings_captured.emit(url, settings)
         self.dl_thread = YouTubeDownloadThread(url, ydl_opts)
@@ -4937,6 +5069,8 @@ class YouTubeDialog(DownloaderDialogBase):
             self.download_btn.setVisible(False)
             self.open_file_btn.setVisible(True)
             self.open_folder_btn.setVisible(True)
+            # Nothing is left to cancel; the button only dismisses the dialog.
+            self.close_btn.setText("Close")
         elif msg == "Cancelled":
             self.log_box.append("Download cancelled.")
             self.progress.mark_error("Cancelled")
@@ -5108,7 +5242,7 @@ class LuluHLSDownloadThread(QThread):
     def run(self):
         try:
             m = re.match(
-                r'(https?://(?:luluvid|luluvdo|lulustream)\.com)/(?:e/)?([A-Za-z0-9]+)',
+                r'(https?://' + LULU_HOST_RE + r')/(?:e/)?([A-Za-z0-9]+)',
                 self.page_url,
             )
             if not m:
@@ -5262,6 +5396,10 @@ class LuluHLSDownloadThread(QThread):
             else:
                 self.finished.emit(f"Error: {str(e)[:160]}")
 
+
+
+class _TransientHTTPError(Exception):
+    """A 429/5xx reply worth waiting out (CDN busy or rate-limiting a burst)."""
 
 
 class DownloadThread(QThread):
@@ -5591,6 +5729,11 @@ class DownloadThread(QThread):
                             # Range not satisfiable — file already complete
                             self.finished.emit("Finished")
                             return
+                        # Busy CDN nodes answer a burst of parallel
+                        # downloads with 503s; wait and retry a few times
+                        # before giving up with the real HTTP error.
+                        if r.status_code in (429, 502, 503, 504) and attempt < 12:
+                            raise _TransientHTTPError(r.status_code)
                         if r.status_code not in (200, 206):
                             r.raise_for_status()
                         # Server ignored our Range header (200 = full body, not
@@ -5643,7 +5786,8 @@ class DownloadThread(QThread):
                     break  # full stream consumed without error
                 except (requests.exceptions.SSLError,
                         requests.exceptions.ConnectionError,
-                        requests.exceptions.ChunkedEncodingError) as e:
+                        requests.exceptions.ChunkedEncodingError,
+                        _TransientHTTPError) as e:
                     if not self.running:
                         self.finished.emit("Cancelled")
                         return
@@ -9138,7 +9282,10 @@ class DownloadManager(QMainWindow):
         # Reopen the Stream Downloader in resume mode (exact name, auto-start) and
         # let it continue — do NOT scrub the partial or the fragments.
         url_path_lower = url.split("?", 1)[0].lower()
-        if engine == "stream" or url_path_lower.endswith(".m3u8") or url_path_lower.endswith(".mpd"):
+        # Direct progressive files go to HTTP even if they were first captured
+        # as a stream (older rows) — see the stream_hls routing in the bridge.
+        _direct_file = url_path_lower.rsplit(".", 1)[-1] in ("mp4", "webm", "mkv", "mov", "m4v")
+        if (engine == "stream" and not _direct_file) or url_path_lower.endswith(".m3u8") or url_path_lower.endswith(".mpd"):
             stat_item = self.table.item(row, 5)
             if stat_item:
                 stat_item.setText("Resuming")
@@ -9231,6 +9378,16 @@ class DownloadManager(QMainWindow):
                     r'(?:twitter\.com|x\.com)/[^/]+/status/\d+', norm_referer or ''
                 ):
                     norm_url = norm_referer
+                # A plain progressive file (e.g. Bunkr's scdn.st .mp4 sniffed
+                # from the player page) gains nothing from yt-dlp: its generic
+                # extractor fetches it as a "webpage" with no retry, so one CDN
+                # 503 fails the download. Use the HTTP engine, which retries.
+                _ext = norm_url.split("?", 1)[0].rsplit(".", 1)[-1].lower()
+                if _ext in ("mp4", "webm", "mkv", "mov", "m4v"):
+                    _name = filename or norm_url.split("?", 1)[0].rsplit("/", 1)[-1]
+                    self.open_core_dialog(url=norm_url, filename=_name or "video.mp4",
+                                          referer=norm_referer)
+                    continue
                 self.open_stream_dialog(
                     url=norm_url,
                     filename=filename if filename else "stream.mp4",

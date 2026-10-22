@@ -4,6 +4,10 @@
 (function () {
   'use strict';
 
+  // Identifies this copy of the script; buttons tagged with another id were
+  // left behind by an older copy (extension update/reload) and get purged.
+  const LDM_INSTANCE = Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+
   const YOUTUBE_HOSTS = ['youtube.com', 'youtu.be', 'youtube-nocookie.com'];
 
   function isYouTubePage() {
@@ -39,10 +43,10 @@
   }
 
   // ── Relay through background.js (avoids iframe CORS) ─────────────────────
-  function relayToBridge(url, type, filename) {
+  function relayToBridge(url, type, filename, referer) {
     return new Promise((resolve, reject) => {
       chrome.runtime.sendMessage(
-        { action: 'bridge', url, type, filename },
+        { action: 'bridge', url, type, filename, referer },
         (resp) => {
           if (chrome.runtime.lastError) reject(chrome.runtime.lastError);
           else if (resp && resp.ok) resolve();
@@ -158,6 +162,89 @@
     catch(e) { return false; }
   }
 
+  // Reddit — the feed URL (reddit.com/) says nothing about which post is
+  // playing, and Reddit 403s yt-dlp anyway. Each post is a <shreddit-post>
+  // whose content-href is the hosted media page (redgifs.com/watch/…, etc.)
+  // and whose permalink is the post. Players live in shadow DOM, so walk up
+  // through shadow hosts as well as parents.
+  function isRedditPage() {
+    return /(?:^|\.)reddit\.com$/.test(window.location.hostname);
+  }
+  function redditPostFor(el) {
+    var depth = 0;
+    while (el && depth < 60) {
+      if (el.tagName && el.tagName.toLowerCase() === 'shreddit-post') return el;
+      el = el.parentElement || (el.getRootNode && el.getRootNode().host) || null;
+      depth++;
+    }
+    return null;
+  }
+  function redditPostTitle(el) {
+    var post = redditPostFor(el);
+    return post ? post.getAttribute('post-title') : null;
+  }
+  function redditTargetFor(el) {
+    el = redditPostFor(el);
+    if (!el) return null;
+    var content = el.getAttribute('content-href') || '';
+    try {
+      var cu = new URL(content, window.location.origin);
+      if (!/(?:^|\.)(?:reddit\.com|redd\.it)$/.test(cu.hostname)) {
+        if (cu.hostname.includes('redgifs.com')) cu.pathname = cu.pathname.replace(/^\/ifr\//, '/watch/');
+        return cu.toString();
+      }
+    } catch (e) {}
+    var permalink = el.getAttribute('permalink');
+    if (permalink) {
+      try { return new URL(permalink, window.location.origin).toString(); } catch (e) {}
+    }
+    return null;
+  }
+  // RedGifs embeds (the iframe Reddit's feed uses: redgifs.com/ifr/<id>) play
+  // a blob-backed HLS stream, so the video's own src is useless and the tab's
+  // m3u8 store may hold a neighbouring post. The id in the frame URL is exact.
+  function redgifsWatchUrl() {
+    if (!/(?:^|\.)redgifs\.com$/.test(window.location.hostname)) return null;
+    var m = window.location.pathname.match(/^\/(?:ifr|watch)\/([A-Za-z0-9]+)/);
+    return m ? 'https://www.redgifs.com/watch/' + m[1].toLowerCase() : null;
+  }
+
+  // All <video> elements, including ones inside open shadow roots.
+  function allVideosDeep(root) {
+    var out = [];
+    (function walk(node) {
+      node.querySelectorAll('video').forEach(function(v) { out.push(v); });
+      node.querySelectorAll('*').forEach(function(e) { if (e.shadowRoot) walk(e.shadowRoot); });
+    })(root || document);
+    return out;
+  }
+  // {url, title} for the post whose video is playing (popup Capture button).
+  function playingRedditTarget() {
+    var vids = allVideosDeep();
+    var pick = vids.filter(function(v) { return !v.paused && !v.ended; })[0] ||
+               window._ldmLastHoveredVideo || null;
+    // Nothing playing: a post page (/comments/) is unambiguous on its own.
+    if (!(pick && redditPostFor(pick)) && /\/comments\//.test(window.location.pathname)) {
+      pick = document.querySelector('shreddit-post');
+    }
+    // Feed embeds (RedGifs etc.) play inside cross-origin iframes this frame
+    // can't inspect, so take the post that fills most of the viewport.
+    if (!(pick && redditPostFor(pick))) pick = mostVisibleRedditPost();
+    var url = pick && redditTargetFor(pick);
+    return url ? { url: url, title: redditPostTitle(pick) } : null;
+  }
+  function mostVisibleRedditPost() {
+    var best = null, bestArea = 0, vh = window.innerHeight, vw = window.innerWidth;
+    document.querySelectorAll('shreddit-post').forEach(function(p) {
+      var r = p.getBoundingClientRect();
+      var h = Math.min(r.bottom, vh) - Math.max(r.top, 0);
+      var w = Math.min(r.right, vw) - Math.max(r.left, 0);
+      var area = h > 0 && w > 0 ? h * w : 0;
+      if (area > bestArea) { bestArea = area; best = p; }
+    });
+    return best;
+  }
+
   // Extract Twitter status ID from page URL
   function getTwitterStatusId(url) {
     var m = url.match(/\/status\/(\d+)/);
@@ -219,6 +306,13 @@
       return Promise.reject(new Error('Story — not downloadable'));
     }
 
+    const rgUrl = redgifsWatchUrl();
+    if (rgUrl) {
+      // Referer must be RedGifs, not the embedding tab — media.redgifs.com
+      // 403s video requests referred from reddit.com (hotlink protection).
+      return relayToBridge(rgUrl, 'stream_hls', resolveFilename(rgUrl, document.title), rgUrl);
+    }
+
     // CF-only domains (luluvdo etc.) — page URL → yt-dlp
     if (isCFProtected(pageUrl)) {
       const filename = resolveFilename(pageUrl, document.title);
@@ -271,6 +365,14 @@
       });
     }
 
+    if (isRedditPage()) {
+      const target = redditTargetFor(videoEl);
+      if (target) {
+        const filename = resolveFilename(target, redditPostTitle(videoEl) || document.title);
+        return relayToBridge(target, 'stream_hls', filename);
+      }
+    }
+
     // Non-social: check this specific video's own src first (handles pages
     // with multiple <video> elements — tab-level m3u8 store is shared and
     // would otherwise return the same URL for every Capture button).
@@ -311,7 +413,7 @@
   // video in a Facebook feed — so only a hover (user-paced) refreshes it.
   function streamKind(video, cb, rescan) {
     var pageUrl = normalizeStreamUrl(window.location.href);
-    if (isCFProtected(pageUrl) || isFacebookVideoPage(pageUrl)) return cb('PAGE');
+    if (redgifsWatchUrl() || isCFProtected(pageUrl) || isFacebookVideoPage(pageUrl)) return cb('PAGE');
 
     function ask(msg, pick) {
       try {
@@ -369,7 +471,8 @@
       window.addEventListener('contextmenu', e => e.stopPropagation(), true);
       sendResponse({ status: 'unlocked' });
     } else if (request.action === 'grab') {
-      sendResponse(detectStream());
+      var rt = isRedditPage() && window === window.top ? playingRedditTarget() : null;
+      sendResponse(rt ? { url: rt.url, isHLS: true, title: rt.title } : detectStream());
     } else if (request.action === 'storeCdnEntry' && request.entry) {
       // Background intercepted a social CDN URL -- assign to playing video
       var playing = null;
@@ -582,8 +685,10 @@
 
     // Isolate from page CSS (e.g. bunkr rules that override flex-row layout).
     var host = document.createElement('div');
+    host.setAttribute('data-ldm-host', LDM_INSTANCE);
     host.attachShadow({ mode: 'open' }).appendChild(wrapper);
     document.body.appendChild(host);
+    video._ldmIsYT = isYT;
 
     positionOverlay(video, wrapper);
     video._ldmBtn  = wrapper;
@@ -628,6 +733,7 @@
       if (!dragging) {
         if (Math.abs(dx) < DRAG_SLOP && Math.abs(dy) < DRAG_SLOP) return;
         dragging = true;
+        video._ldmDragging = true;
         // Capture only once it's really a drag: capturing on press retargets
         // the click to the wrapper, which would swallow plain button clicks.
         try { wrapper.setPointerCapture(e.pointerId); } catch (_) {}
@@ -669,6 +775,7 @@
       }
       start = null;
       dragging = false;
+      video._ldmDragging = false;
     }
 
     // The click that ends a drag must not also fire Capture or ×.
@@ -696,7 +803,11 @@
     } else {
       wrapper.style.top  = `${r.top + scrollY + 6}px`;
     }
-    wrapper.style.left = `${r.right + scrollX - 160}px`;
+    // Right-align to the video using the button's real width: the Download
+    // button (with its stream tag) is wider than the old fixed 160px guess and
+    // overhung the video's right edge.
+    const btnW = wrapper.offsetWidth || 160;
+    wrapper.style.left = `${Math.max(r.left, r.right - btnW - 6) + scrollX}px`;
   }
 
   // Active overlay registry — used to purge hosts orphaned by SPA re-renders
@@ -754,6 +865,7 @@
   const videoVisibilityObserver = new IntersectionObserver(function(entries) {
     entries.forEach(function(entry) {
       const v = entry.target;
+      v._ldmInView = entry.isIntersecting;
       if (entry.isIntersecting) {
         if (!v.hasAttribute('data-ldm-dismissed')) {
           setTimeout(function() {
@@ -845,6 +957,66 @@
       }
     });
   }, 1000);
+
+  // ── Ghost-button cleanup ──────────────────────────────────────────────────
+  // When the extension updates or reloads, Firefox kills the old content
+  // script but leaves the buttons it drew: dead overlays whose × does nothing,
+  // and whose data-ldm-overlay marker stops this copy from drawing a live one.
+  // Clear both before attaching.
+  function purgeStaleOverlays() {
+    document.querySelectorAll('[data-ldm-host]').forEach(function(h) {
+      if (h.getAttribute('data-ldm-host') !== LDM_INSTANCE) h.remove();
+    });
+    // Versions up to 3.1.10 didn't tag their hosts: a bare <div> under <body>
+    // whose open shadow root holds our max-z-index wrapper with the LDM tag.
+    Array.prototype.forEach.call(document.body ? document.body.children : [], function(h) {
+      if (h.tagName !== 'DIV' || h.hasAttribute('data-ldm-host')) return;
+      var root = h.shadowRoot || h.openOrClosedShadowRoot;
+      var w = root && root.firstElementChild;
+      if (w && w.style && w.style.zIndex === '2147483647' && /\bLDM\b/.test(w.textContent || '')) h.remove();
+    });
+    document.querySelectorAll('video[data-ldm-overlay]').forEach(function(v) {
+      if (!v._ldmHost) v.removeAttribute('data-ldm-overlay');
+    });
+  }
+  purgeStaleOverlays();
+
+  // A video that's still in the DOM but not on screen in any real sense:
+  // display:none / visibility:hidden ancestors, collapsed, or (YouTube) the
+  // player kept alive after leaving the watch page.
+  function videoShown(v) {
+    var r = v.getBoundingClientRect();
+    if (r.width < 100 || r.height < 60) return false;
+    if (v.checkVisibility && !v.checkVisibility({ visibilityProperty: true, checkVisibilityCSS: true })) return false;
+    if (v._ldmIsYT && !isYouTubePage()) return false;
+    // Facebook reels: the visibility observer hides buttons of reels that
+    // scrolled away (they'd stack on the active one) — respect that.
+    if (v._ldmInView === false && isFacebookVideoPage(window.location.href)) return false;
+    return true;
+  }
+
+  // Keep every button matched to its video: re-place it after layout shifts
+  // and SPA navigation, hide it while its video is hidden, and drop it once
+  // the video is gone. If this script's extension context has died (Chrome
+  // keeps orphaned scripts running), remove our buttons and stop.
+  var _ldmSweep = setInterval(function() {
+    var alive = false;
+    try { alive = !!(chrome.runtime && chrome.runtime.id); } catch (e) {}
+    if (!alive) {
+      clearInterval(_ldmSweep);
+      _ldmActiveOverlays.forEach(function(item) { try { item.host.remove(); } catch (e) {} });
+      _ldmActiveOverlays = [];
+      return;
+    }
+    _cleanOrphanedOverlays();
+    _ldmActiveOverlays.forEach(function(item) {
+      var v = item.video, w = v._ldmBtn;
+      if (!w || v._ldmDragging) return;
+      if (!videoShown(v)) { item.host.style.display = 'none'; return; }
+      item.host.style.display = '';
+      positionOverlay(v, w);
+    });
+  }, 500);
 
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', attachToVideos);
