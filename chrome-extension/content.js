@@ -1,4 +1,4 @@
-// content.js - Linux Download Manager
+// content.js - Ferospark LDM
 // Smart floating button: YouTube → YouTubeDialog, stream → StreamDialog
 
 (function () {

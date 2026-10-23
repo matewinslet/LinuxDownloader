@@ -602,7 +602,7 @@ function sendToPython(url, filename, type, referer) {
         referer: referer, cookies: cookies
       })
     }).catch(function() {
-      console.error("Linux Download Manager is not running.");
+      console.error("Ferospark LDM is not running.");
     });
   });
 }

@@ -1,4 +1,4 @@
-// popup.js - Linux Download Manager (Chrome MV3)
+// popup.js - Ferospark LDM (Chrome MV3)
 
 // Capture Stream — smart routing: YouTube → YouTubeDialog, else stream
 document.getElementById('captureBtn').addEventListener('click', async () => {

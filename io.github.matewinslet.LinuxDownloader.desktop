@@ -1,6 +1,6 @@
 [Desktop Entry]
 Type=Application
-Name=Linux Download Manager
+Name=Ferospark LDM
 Comment=Download files and videos with browser integration
 Exec=ldm
 Icon=io.github.matewinslet.LinuxDownloader

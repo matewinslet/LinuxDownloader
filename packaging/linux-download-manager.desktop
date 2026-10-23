@@ -1,6 +1,6 @@
 [Desktop Entry]
 Type=Application
-Name=Linux Download Manager
+Name=Ferospark LDM
 GenericName=Download Manager
 Comment=Download files and videos with browser integration
 Exec=linux-downloader %U

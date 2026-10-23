@@ -5,7 +5,7 @@
 ICON_NAME="linux-downloader"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-echo "Installing Linux Downloader icons..."
+echo "Installing Ferospark LDM icons..."
 
 for size in 16 32 48 64 128 256; do
     DEST="/usr/share/icons/hicolor/${size}x${size}/apps"

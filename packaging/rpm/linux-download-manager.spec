@@ -1,7 +1,7 @@
 Name:           linux-download-manager
 Version:        2.1.0
 Release:        1%{?dist}
-Summary:        Linux Download Manager (LDM)
+Summary:        Ferospark LDM
 License:        MIT
 URL:            https://github.com/matewinslet/LinuxDownloader
 BuildArch:      x86_64

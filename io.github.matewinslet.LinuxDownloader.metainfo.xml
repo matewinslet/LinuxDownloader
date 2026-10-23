@@ -2,7 +2,7 @@
 <component type="desktop-application">
   <id>io.github.matewinslet.LinuxDownloader</id>
 
-  <name>Linux Download Manager</name>
+  <name>Ferospark LDM</name>
   <summary>Download files and videos from the web</summary>
 
   <metadata_license>CC0-1.0</metadata_license>
@@ -14,7 +14,7 @@
 
   <description>
     <p>
-      Linux Download Manager is a desktop download manager that keeps every
+      Ferospark LDM is a desktop download manager that keeps every
       download in one place and sorts finished files into categories
       automatically.
     </p>

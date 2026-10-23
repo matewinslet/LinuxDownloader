@@ -1,4 +1,4 @@
-// popup.js - Linux Download Manager
+// popup.js - Ferospark LDM
 
 const api = (typeof browser !== 'undefined') ? browser : chrome;
 
