@@ -171,7 +171,7 @@ CATEGORY_ICON_FILE = {
     "Videos":        "videos_film.svg",     # classic film strip (10/23); old squircle = videos.svg
     "Music":         "music.svg",
     "Documents":     "documents.svg",
-    "Compressed":    "compressed.svg",
+    "Compressed":    "compressed_books.svg",  # WinRAR-style books + belt (10/23); old = compressed.svg
     "Programs":      "programs.svg",
     "Others":        "others.svg",
 }
