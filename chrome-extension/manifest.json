@@ -1,6 +1,6 @@
 {
   "manifest_version": 3,
-  "name": "Linux Download Manager",
+  "name": "Ferospark LDM",
   "version": "2.8.12",
   "description": "Silent Download Interceptor + Video Sender",
   "permissions": [

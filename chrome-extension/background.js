@@ -1,4 +1,4 @@
-// background.js - Linux Download Manager (Chrome MV3)
+// background.js - Ferospark LDM (Chrome MV3)
 // Key differences from Firefox version:
 //   - All browser.* replaced with chrome.*
 //   - webRequest is non-blocking (MV3 restriction); downloads intercepted via
@@ -236,7 +236,7 @@ function sendToPython(url, filename, type, referer) {
         referer: referer, cookies: cookies
       })
     }).catch(function () {
-      console.error('Linux Download Manager is not running.');
+      console.error('Ferospark LDM is not running.');
     });
   });
 }

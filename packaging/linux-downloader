@@ -1,5 +1,5 @@
 #!/bin/bash
-# Launcher for Linux Download Manager (self-contained bundle install).
+# Launcher for Ferospark LDM (self-contained bundle install).
 # Runs the app with its bundled Python venv from /opt/linux-downloader.
 APPDIR="/opt/linux-downloader"
 

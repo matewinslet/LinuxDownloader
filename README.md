@@ -1,4 +1,4 @@
-# Linux Download Manager (LDM)
+# Ferospark LDM
 
 A powerful download manager for Linux — with a Firefox extension, YouTube downloader, automatic file categorization, and video capture from streaming sites.
 
@@ -90,7 +90,7 @@ The installer will automatically:
 
 Install the extension from the Firefox Add-ons store:
 
-[Linux Download Manager on Firefox Add-ons](https://addons.mozilla.org/en-US/firefox/addon/49cdbb655b5d47a7bce3/)
+[Ferospark LDM on Firefox Add-ons](https://addons.mozilla.org/en-US/firefox/addon/49cdbb655b5d47a7bce3/)
 
 Or install manually by downloading the `.xpi` file from the [Releases](https://github.com/matewinslet/linux-downloader/releases) page and dragging it into Firefox.
 
@@ -99,7 +99,7 @@ Or install manually by downloading the `.xpi` file from the [Releases](https://g
 ## Usage
 
 ### Basic Downloads
-1. Launch **Linux Download Manager** from your application menu
+1. Launch **Ferospark LDM** from your application menu
 2. Install the Firefox extension
 3. Click any download link in Firefox — it will automatically be sent to LDM
 

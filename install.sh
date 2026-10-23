@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ─────────────────────────────────────────────
-#  Linux Download Manager — Installer
+#  Ferospark LDM — Installer
 #  Copyright (c) 2026 Tanjim (tpodbcs@gmail.com)
 # ─────────────────────────────────────────────
 
@@ -13,7 +13,7 @@ ICON_NAME="linux-downloader"
 
 echo ""
 echo "╔════════════════════════════════════════════╗"
-echo "║     Linux Download Manager — Installer     ║"
+echo "║     Ferospark LDM — Installer     ║"
 echo "╚════════════════════════════════════════════╝"
 echo ""
 
@@ -273,7 +273,7 @@ mkdir -p "$HOME/.local/share/applications"
 cat > "$DESKTOP_FILE" << DESKTOP
 [Desktop Entry]
 Type=Application
-Name=Linux Download Manager
+Name=Ferospark LDM
 Comment=Custom Python Download Manager
 Exec=env PATH=$HOME/.deno/bin:$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin python3 $INSTALL_DIR/download_manager.py
 Icon=linux-downloader
@@ -294,7 +294,7 @@ echo "╔═══════════════════════�
 echo "║         Installation Complete!             ║"
 echo "╚════════════════════════════════════════════╝"
 echo ""
-echo "  Launch from your app menu: Linux Download Manager"
+echo "  Launch from your app menu: Ferospark LDM"
 echo "  Or run: python3 $INSTALL_DIR/download_manager.py"
 echo ""
 if [ -z "$FF_PROFILE" ]; then

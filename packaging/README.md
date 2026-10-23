@@ -1,6 +1,6 @@
 # Packaging
 
-Native packages for Linux Download Manager. Each package is **self-contained**:
+Native packages for Ferospark LDM. Each package is **self-contained**:
 it bundles the app's Python dependencies (PyQt6, yt-dlp, `curl_cffi<0.15`,
 pycryptodome, …) in a venv under `/opt/linux-downloader`, so it doesn't depend
 on distro Python package versions. The launcher `/usr/bin/linux-downloader`

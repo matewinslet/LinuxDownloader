@@ -45,7 +45,7 @@ Recommends: curl
 Installed-Size: $INSTALLED_KB
 Maintainer: Tanjim <tpodbcs@gmail.com>
 Homepage: https://github.com/matewinslet/LinuxDownloader
-Description: Linux Download Manager (LDM)
+Description: Ferospark LDM
  Download files and videos with browser integration, yt-dlp powered
  streaming, and a Qt6 interface. Self-contained: bundles its Python
  dependencies in /opt/linux-downloader.

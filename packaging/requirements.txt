@@ -1,4 +1,4 @@
-# Runtime Python dependencies for Linux Download Manager (bundled into a venv
+# Runtime Python dependencies for Ferospark LDM (bundled into a venv
 # by the .deb / .rpm / AUR packaging). Built per-platform so the compiled
 # wheels (PyQt6, curl_cffi, pycryptodome) match that distro's Python.
 #
