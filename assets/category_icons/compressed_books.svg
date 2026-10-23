@@ -9,16 +9,16 @@
     <linearGradient id="gold" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#f2f2f2"/><stop offset=".5" stop-color="#a9a9a9"/><stop offset="1" stop-color="#6e6e6e"/></linearGradient>
   </defs>
   <!-- bottom book -->
-  <path d="M8 46 h44 l4 -4 v10 l-4 4 h-44 z" fill="url(#b3)" stroke="#0f3300" stroke-width="1"/>
-  <path d="M52 46 l4 -4 v10 l-4 4 z" fill="url(#pg)" stroke="#8a7d5a" stroke-width=".6"/>
+  <path d="M8 46 h44 l4 -4 v10 l-4 4 h-44 z" fill="url(#b3)" stroke="#0f3300" stroke-width="1.8" stroke-linejoin="round"/>
+  <path d="M52 46 l4 -4 v10 l-4 4 z" fill="url(#pg)" stroke="#4a3f22" stroke-width="1.5" stroke-linejoin="round"/>
   <!-- middle book -->
-  <path d="M10 32 h44 l4 -4 v10 l-4 4 h-44 z" fill="url(#b2)" stroke="#14245e" stroke-width="1"/>
-  <path d="M54 32 l4 -4 v10 l-4 4 z" fill="url(#pg)" stroke="#8a7d5a" stroke-width=".6"/>
+  <path d="M10 32 h44 l4 -4 v10 l-4 4 h-44 z" fill="url(#b2)" stroke="#14245e" stroke-width="1.8" stroke-linejoin="round"/>
+  <path d="M54 32 l4 -4 v10 l-4 4 z" fill="url(#pg)" stroke="#4a3f22" stroke-width="1.5" stroke-linejoin="round"/>
   <!-- top book -->
-  <path d="M7 18 h44 l4 -4 v10 l-4 4 h-44 z" fill="url(#b1)" stroke="#5e003a" stroke-width="1"/>
-  <path d="M51 18 l4 -4 v10 l-4 4 z" fill="url(#pg)" stroke="#8a7d5a" stroke-width=".6"/>
+  <path d="M7 18 h44 l4 -4 v10 l-4 4 h-44 z" fill="url(#b1)" stroke="#5e003a" stroke-width="1.8" stroke-linejoin="round"/>
+  <path d="M51 18 l4 -4 v10 l-4 4 z" fill="url(#pg)" stroke="#4a3f22" stroke-width="1.5" stroke-linejoin="round"/>
   <!-- top faces -->
-  <path d="M7 18 l4 -4 h44 l-4 4 z" fill="url(#pg)" stroke="#8a7d5a" stroke-width=".6"/>
+  <path d="M7 18 l4 -4 h44 l-4 4 z" fill="url(#pg)" stroke="#4a3f22" stroke-width="1.5" stroke-linejoin="round"/>
   <!-- spine highlights -->
   <g fill="#fff" opacity=".28"><rect x="9" y="19.5" width="40" height="2.2"/><rect x="12" y="33.5" width="40" height="2.2"/><rect x="10" y="47.5" width="40" height="2.2"/></g>
   <!-- belt around the stack -->
