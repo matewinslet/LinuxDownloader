@@ -1,48 +1,10 @@
-<svg viewBox="0 0 512 512" width="512" height="512" xmlns="http://www.w3.org/2000/svg">
-  <defs>
-    <clipPath id="au-clip"><rect x="24" y="24" width="464" height="464" rx="128"></rect></clipPath>
-    <radialGradient id="au-b1" cx="0.25" cy="0.2" r="0.6">
-      <stop offset="0" stop-color="#ff4fd8"></stop><stop offset="1" stop-color="#ff4fd8" stop-opacity="0"></stop>
-    </radialGradient>
-    <radialGradient id="au-b2" cx="0.85" cy="0.32" r="0.62">
-      <stop offset="0" stop-color="#4f7bff"></stop><stop offset="1" stop-color="#4f7bff" stop-opacity="0"></stop>
-    </radialGradient>
-    <radialGradient id="au-b3" cx="0.55" cy="0.95" r="0.7">
-      <stop offset="0" stop-color="#27e6c8"></stop><stop offset="1" stop-color="#27e6c8" stop-opacity="0"></stop>
-    </radialGradient>
-    <linearGradient id="au-frost" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#ffffff" stop-opacity="0.42"></stop>
-      <stop offset="0.45" stop-color="#ffffff" stop-opacity="0.18"></stop>
-      <stop offset="1" stop-color="#ffffff" stop-opacity="0.30"></stop>
-    </linearGradient>
-    <linearGradient id="au-sheen" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#ffffff" stop-opacity="0.85"></stop>
-      <stop offset="0.3" stop-color="#ffffff" stop-opacity="0"></stop>
-    </linearGradient>
-    <filter id="au-soft" x="-40%" y="-40%" width="180%" height="180%"><feGaussianBlur stdDeviation="6"></feGaussianBlur></filter>
-  </defs>
-
-  
-  <rect x="38" y="60" width="436" height="436" rx="124" fill="#6a3bd6" opacity="0.28" filter="url(#au-soft)"></rect>
-
-  <g clip-path="url(#au-clip)">
-    <rect x="24" y="24" width="464" height="464" fill="#1c1147"></rect>
-    <rect x="-40" y="-40" width="400" height="400" fill="url(#au-b1)"></rect>
-    <rect x="180" y="-30" width="380" height="380" fill="url(#au-b2)"></rect>
-    <rect x="40" y="200" width="440" height="360" fill="url(#au-b3)"></rect>
-    
-    <rect x="24" y="24" width="464" height="464" fill="url(#au-frost)"></rect>
-    <rect x="24" y="24" width="464" height="210" fill="url(#au-sheen)"></rect>
-
-    
-    <g filter="url(#au-soft)" opacity="0.45">
-      <path d="M222 96 h68 a18 18 0 0 1 18 18 v112 h44 a7 7 0 0 1 5.4 11.4 l-95 116 a8 8 0 0 1 -12.4 0 l-95 -116 a7 7 0 0 1 5.4 -11.4 h44 v-112 a18 18 0 0 1 18 -18 z" transform="translate(0,8)" fill="#3a1d7a"></path>
-    </g>
-    <path d="M222 96 h68 a18 18 0 0 1 18 18 v112 h44 a7 7 0 0 1 5.4 11.4 l-95 116 a8 8 0 0 1 -12.4 0 l-95 -116 a7 7 0 0 1 5.4 -11.4 h44 v-112 a18 18 0 0 1 18 -18 z" fill="#ffffff"></path>
-    <rect x="178" y="368" width="156" height="22" rx="11" fill="#ffffff"></rect>
-  </g>
-
-  
-  <rect x="25.5" y="25.5" width="461" height="461" rx="126.5" fill="none" stroke="#ffffff" stroke-opacity="0.7" stroke-width="2"></rect>
-  <rect x="28" y="28" width="456" height="456" rx="124" fill="none" stroke="#2a1560" stroke-opacity="0.25" stroke-width="1.5"></rect>
-</svg>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256"><defs>
+<linearGradient id="bg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#2a2f3a"/><stop offset="1" stop-color="#0d1016"/></linearGradient>
+<linearGradient id="fl" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#ffe17a"/><stop offset=".45" stop-color="#ff8a1f"/><stop offset="1" stop-color="#e0301e"/></linearGradient>
+<radialGradient id="glow" cx=".5" cy=".62" r=".5"><stop offset="0" stop-color="#ff7a1a" stop-opacity=".55"/><stop offset="1" stop-color="#ff7a1a" stop-opacity="0"/></radialGradient></defs>
+<rect x="8" y="8" width="240" height="240" rx="60" fill="url(#bg)"/>
+<rect x="8" y="8" width="240" height="240" rx="60" fill="url(#glow)"/>
+<path d="M128 40 C 150 70 120 82 146 108 L 146 128 L 184 128 L 128 196 L 72 128 L 110 128 L 110 100 C 110 78 126 70 128 40 Z" fill="url(#fl)"/>
+<path d="M128 70 C 140 88 124 96 136 112 L 136 138 L 158 138 L 128 174 L 98 138 L 120 138 L 120 108 C 120 92 128 86 128 70 Z" fill="#fff4c4" opacity=".55"/>
+<rect x="72" y="206" width="112" height="12" rx="6" fill="#ff8a1f"/>
+<g fill="#ffd166"><circle cx="70" cy="80" r="4"/><circle cx="188" cy="66" r="3"/><circle cx="196" cy="104" r="2.5"/><circle cx="60" cy="118" r="2.5"/></g></svg>
