@@ -1621,6 +1621,13 @@ class FlNameDelegate(_FlBaseDelegate):
             cls._fallbacks_cached = []
         return cls._fallbacks_cached
 
+    @classmethod
+    def _bengali_fallbacks(cls):
+        # Short list for hot paint paths: only the preferred Bengali UI faces.
+        # Every other script still renders through Qt's own fontconfig
+        # fallback; the full list (~1,900 families) makes drawText crawl.
+        return [f for f in cls._fallbacks() if 'Noto Sans Bengali UI' in f]
+
     def paint(self, painter, option, index):
         painter.save()
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
@@ -2034,11 +2041,23 @@ IDM_FONT_FAMILY = "Segoe UI"
 
 
 class _IdmBaseDelegate(_FlBaseDelegate):
+    # One shared font (+ metrics) per pixel size. Building a QFont with the
+    # full fallback-family list for every cell made each scroll repaint ~95 ms.
+    _font_cache = {}
+
     def _font_px(self, px=12):
-        f = QFont(IDM_FONT_FAMILY)
-        f.setFamilies([IDM_FONT_FAMILY, self._sans] + FlNameDelegate._fallbacks())
-        f.setPixelSize(px)
-        return f
+        key = (px, self._sans)
+        cached = _IdmBaseDelegate._font_cache.get(key)
+        if cached is None:
+            f = QFont(IDM_FONT_FAMILY)
+            f.setFamilies([IDM_FONT_FAMILY, self._sans] + FlNameDelegate._bengali_fallbacks())
+            f.setPixelSize(px)
+            cached = _IdmBaseDelegate._font_cache[key] = (f, QFontMetrics(f))
+        return cached[0]
+
+    def _metrics_px(self, px=12):
+        self._font_px(px)
+        return _IdmBaseDelegate._font_cache[(px, self._sans)][1]
 
     def _paint_bg(self, painter, option):
         selected = bool(option.state & QStyle.StateFlag.State_Selected)
@@ -2066,7 +2085,7 @@ class _IdmBaseDelegate(_FlBaseDelegate):
     def _draw_text(self, painter, option, text, highlighted, color=None, x_pad=6):
         painter.setFont(self._font_px())
         painter.setPen(color if (color is not None and not highlighted) else self._text_color(highlighted))
-        fm = painter.fontMetrics()
+        fm = self._metrics_px()
         r = option.rect.adjusted(x_pad, 0, -4, 0)
         painter.drawText(r, int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
                          fm.elidedText(text, Qt.TextElideMode.ElideRight, r.width()))
@@ -5776,6 +5795,13 @@ class DownloadThread(QThread):
                 _ct_head = head.headers.get("Content-Type", "").split(";")[0].strip().lower()
                 _url_ext = os.path.splitext(urlparse(self.url).path)[1].lower()
                 if _ct_head in ("text/html", "application/xhtml+xml") and _url_ext not in (".html", ".htm"):
+                    # Cloudflare's "security check" page (bot challenge) needs a
+                    # real browser — say so instead of the generic HTML error.
+                    if head.headers.get("cf-mitigated", "").lower() == "challenge":
+                        self.finished.emit(
+                            "Error: site requires a browser check \u2014 download it in Firefox"
+                        )
+                        return
                     detail = (
                         f" [{_GOFILE_LAST_ERR}]"
                         if is_gofile_url(self.url) and _GOFILE_LAST_ERR
@@ -7566,7 +7592,7 @@ class DownloadManager(QMainWindow):
     @staticmethod
     def _toolbar_label_font():
         f = QFont(IDM_FONT_FAMILY)
-        f.setFamilies([IDM_FONT_FAMILY] + FlNameDelegate._fallbacks())
+        f.setFamilies([IDM_FONT_FAMILY] + FlNameDelegate._bengali_fallbacks())
         f.setPixelSize(12)
         return f
 
