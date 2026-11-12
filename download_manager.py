@@ -416,6 +416,28 @@ def open_and_select(path):
 
     threading.Thread(target=_show, daemon=True).start()
 
+# KVS (Kernel Video Sharing) sites hand the player a time-stamped
+# /get_file/<server>/<hash>/<dir>/<id>/<id>.mp4/ link that the server answers
+# with 410 Gone (kvs-errno 3) once it expires — minutes after the page loaded.
+_KVS_GET_FILE_RE = re.compile(r'^https?://[^/]+/get_file/\d+/[0-9a-f]{20,}/', re.I)
+
+
+def kvs_page_for(url, referer):
+    """For an expiring KVS get_file link captured on its video page, return
+    that page so yt-dlp mints a fresh link when the download starts (and again
+    on any later retry). None when url isn't a KVS link or no usable page."""
+    if not referer or not _KVS_GET_FILE_RE.match(url or ""):
+        return None
+    try:
+        u, r = urlparse(url), urlparse(referer)
+    except Exception:
+        return None
+    if r.scheme not in ("http", "https") or "/get_file/" in r.path:
+        return None
+    site = lambda h: ".".join((h or "").lower().split(".")[-2:])
+    return referer if site(u.hostname) == site(r.hostname) else None
+
+
 def normalize_stream_url(url):
     """
     Strip embed path prefixes (/e/, /embed/) that iframe players add.
@@ -1139,6 +1161,19 @@ def resolve_mixdrop_url(url):
         return None, None, None
 
 
+def is_pixeldrain_captcha_url(url):
+    """pixeldrain /api/file/<id>?download&recaptcha_response=… — the token is
+    single-use, so the first request that reaches the server spends it."""
+    try:
+        u = urlparse(url)
+    except Exception:
+        return False
+    host = (u.hostname or "").lower()
+    return (host in ("pixeldrain.com", "pixeldrain.net", "pixeldra.in")
+            and u.path.startswith("/api/file/")
+            and "recaptcha_response=" in u.query)
+
+
 def is_gofile_url(url):
     try:
         host = (urlparse(url).hostname or "").lower()
@@ -1517,12 +1552,16 @@ class _FlBaseDelegate(QStyledItemDelegate):
     def _start_anim(cls, view):
         if view is None or not hasattr(view, "viewport"):
             return
-        cls._shared_views.add(view)
-        if cls._shared_timer is None:
+        # Keep ONE timer on the base class. `cls._shared_timer = t` on a column
+        # subclass made every column delegate start its own 25 fps timer
+        # (~200 ticks/s, each scanning every row) — LDM idled at ~20% CPU (11/6/26).
+        base = _FlBaseDelegate
+        base._shared_views.add(view)
+        if base._shared_timer is None:
             t = QTimer()
-            t.timeout.connect(cls._tick)
+            t.timeout.connect(base._tick)
             t.start(40)
-            cls._shared_timer = t
+            base._shared_timer = t
 
     @classmethod
     def _tick(cls):
@@ -1532,6 +1571,10 @@ class _FlBaseDelegate(QStyledItemDelegate):
                 vp = v.viewport()
                 if vp is None:
                     dead.append(v)
+                    continue
+                # Nothing to animate while the window is hidden in the tray or minimized.
+                win = v.window()
+                if not v.isVisible() or (win is not None and win.isMinimized()):
                     continue
                 if cls._any_row_animating(v):
                     vp.update()
@@ -1548,6 +1591,13 @@ class _FlBaseDelegate(QStyledItemDelegate):
             return False
         if model is None:
             return False
+        # The stripes live in the progress column (1); the IDM-style main list
+        # hides it, so there is nothing visible to animate there.
+        try:
+            if view.isColumnHidden(1):
+                return False
+        except Exception:
+            pass
         for r in range(model.rowCount()):
             s = model.index(r, 5).data(Qt.ItemDataRole.DisplayRole)
             if s == "Downloading":
@@ -2388,6 +2438,8 @@ class YouTubeDownloadThread(QThread):
         self.url = url
         self.ydl_opts = ydl_opts
         self.running = True
+        # Video + audio come down as separate streams; the size label sums them.
+        self._done_bytes = 0
 
     def run(self):
         try:
@@ -2399,6 +2451,9 @@ class YouTubeDownloadThread(QThread):
                 info = ydl.extract_info(self.url, download=True)
                 if info is None:
                     raise Exception("Could not download video")
+            if self._done_bytes:
+                total = format_size(self._done_bytes)
+                self.size_info.emit(f"{total} / {total}")
             self.finished.emit("Finished")
         except _YTCancelled:
             self.finished.emit("Cancelled")
@@ -2426,7 +2481,9 @@ class YouTubeDownloadThread(QThread):
             dl = d.get('downloaded_bytes') or 0
             total = d.get('total_bytes') or d.get('total_bytes_estimate') or 0
             if total:
-                self.size_info.emit(f"{format_size(dl)} / {format_size(total)}")
+                done = self._done_bytes + dl
+                expected = max(self._expected_bytes(d), self._done_bytes + total)
+                self.size_info.emit(f"{format_size(done)} / {format_size(expected)}")
                 eta_secs = d.get('eta') or 0
                 self.eta.emit(format_eta(eta_secs))
             else:
@@ -2434,9 +2491,17 @@ class YouTubeDownloadThread(QThread):
                 self.eta.emit("—")
             self.log.emit(f"Downloading... {p}% at {speed_str}")
         elif d['status'] == 'finished':
+            self._done_bytes += d.get('total_bytes') or d.get('downloaded_bytes') or 0
             self.progress.emit(100)
             self.eta.emit("—")
             self.log.emit("Processing / merging...")
+
+    @staticmethod
+    def _expected_bytes(d):
+        """Combined size of all requested streams (video + audio), 0 if unknown."""
+        fmts = (d.get('info_dict') or {}).get('requested_formats') or []
+        sizes = [f.get('filesize') or f.get('filesize_approx') for f in fmts]
+        return sum(sizes) if sizes and all(sizes) else 0
 
 
 # ── Dialog style ─────────────────────────────────────────────────────────────
@@ -5787,6 +5852,11 @@ class DownloadThread(QThread):
                     return
             self.status.emit("Requesting file size…")
             try:
+                # A HEAD would spend pixeldrain's one-time captcha token and
+                # the real GET would then fail with 424; the extension has
+                # already resolved the filename from /api/file/<id>/info.
+                if is_pixeldrain_captcha_url(self.url):
+                    raise RuntimeError("skip HEAD")
                 head = session.head(self.url, allow_redirects=True, timeout=10, verify=False)
                 # If the server hands us an HTML page for what should be a
                 # binary file, auth failed (e.g. Gofile token not authorized
@@ -6022,7 +6092,10 @@ class DownloadThread(QThread):
         except requests.exceptions.Timeout:
             self.finished.emit("Timeout")
         except requests.exceptions.HTTPError as e:
-            self.finished.emit(f"HTTP {e.response.status_code}")
+            if e.response.status_code == 424 and is_pixeldrain_captcha_url(self.url):
+                self.finished.emit("Error: pixeldrain link used up — start it again from the pixeldrain page")
+            else:
+                self.finished.emit(f"HTTP {e.response.status_code}")
         except Exception as e:
             self.finished.emit(f"Error: {str(e)[:50]}")
 
@@ -8922,6 +8995,15 @@ class DownloadManager(QMainWindow):
 
     def _on_yt_finished(self, url, status):
         row = self.yt_url_to_row.get(url)
+        fallback = getattr(self, "_kvs_fallback", {}).pop(url, None)
+        if (fallback and status not in ("Finished", "Cancelled")
+                and (row is None or self.row_progress.get(row, 0) == 0)):
+            # yt-dlp couldn't use the KVS page and nothing was downloaded:
+            # try the direct link the browser captured, once.
+            direct, fname, page = fallback
+            print(f"[kvs] page failed ({status[:80]}); retrying direct link", flush=True)
+            QTimer.singleShot(0, lambda: self.open_core_dialog(
+                url=direct, filename=fname, referer=page, autostart=True))
         if row is None:
             print(f"[warn] _on_yt_finished dropped: no row for status={status} url={url[:120]}", flush=True)
             return
@@ -9627,6 +9709,21 @@ class DownloadManager(QMainWindow):
                     r'(?:twitter\.com|x\.com)/[^/]+/status/\d+', norm_referer or ''
                 ):
                     norm_url = norm_referer
+                _kvs_page = kvs_page_for(norm_url, norm_referer)
+                if _kvs_page:
+                    # Keep the captured get_file link as a backup: if yt-dlp
+                    # can't read the page (Cloudflare check, age gate, login,
+                    # changed player), _on_yt_finished retries with it once.
+                    if not hasattr(self, "_kvs_fallback"):
+                        self._kvs_fallback = {}
+                    self._kvs_fallback[_kvs_page] = (
+                        norm_url, filename if filename else "stream.mp4", norm_referer)
+                    self.open_stream_dialog(
+                        url=_kvs_page,
+                        filename=filename if filename else "stream.mp4",
+                        page_referer=norm_referer,
+                    )
+                    continue
                 # A plain progressive file (e.g. Bunkr's scdn.st .mp4 sniffed
                 # from the player page) gains nothing from yt-dlp: its generic
                 # extractor fetches it as a "webpage" with no retry, so one CDN
