@@ -502,6 +502,39 @@ browser.webRequest.onHeadersReceived.addListener(
   ["blocking", "responseHeaders"]
 );
 
+// pixeldrain "hotlink-protected" files: the page solves a reCAPTCHA and
+// navigates to /api/file/<id>?download&recaptcha_response=<token>. The token
+// is single-use, so catching it in onHeadersReceived (after Firefox's request
+// already spent it) hands LDM a dead URL → HTTP 424 "recpatcha_failed".
+// Cancel it before it leaves the browser and let LDM make the only request.
+browser.webRequest.onBeforeRequest.addListener(
+  function(details) {
+    if (!interceptEnabled) return {};
+    var m = details.url.match(/\/api\/file\/([A-Za-z0-9]+)\?/);
+    if (!m || details.url.indexOf("recaptcha_response=") === -1) return {};
+    var origin = new URL(details.url).origin;
+    var referer = details.originUrl || details.documentUrl || "";
+    // /info doesn't touch the token; it gives the real filename.
+    fetch(origin + "/api/file/" + m[1] + "/info")
+      .then(function(r) { return r.json(); })
+      .catch(function() { return {}; })
+      .then(function(info) {
+        var name = (info && info.name) || (m[1] + ".bin");
+        sendToPython(details.url, name, "file", referer);
+      });
+    return { cancel: true };
+  },
+  {
+    urls: [
+      "*://pixeldrain.com/api/file/*",
+      "*://pixeldrain.net/api/file/*",
+      "*://pixeldra.in/api/file/*"
+    ],
+    types: ["main_frame", "sub_frame", "xmlhttprequest", "other"]
+  },
+  ["blocking"]
+);
+
 browser.downloads.onCreated.addListener(function(downloadItem) {
   var url = downloadItem.url || "";
   var lowerUrl = url.toLowerCase();
