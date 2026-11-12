@@ -611,17 +611,24 @@
     const accent    = isYT ? '#dc2626' : '#e0f2fe';
     const hoverBg   = isYT ? 'rgba(220,38,38,0.25)' : '#12334a';
     const label     = isYT ? '&#9654; YouTube'   : LDM_ICON_DL + 'Download';
-    const sendingTx = isYT ? '&#8987; Sending...' : LDM_ICON_SPIN + 'Sending';
-    const sentTx    = isYT ? '&#10003; Sent!'     : LDM_ICON_OK + 'Sent to LDM';
     const failedTx  = isYT ? '&#10007; Failed'    : LDM_ICON_FAIL + 'Failed';
 
     // ── Wrapper ───────────────────────────────────────────────────────────────
     const wrapper = document.createElement('div');
+    // Fixed, in viewport coordinates: an absolute overlay at a feed video's
+    // page position kept the document taller than the viewport, so when
+    // Instagram opened a reel viewer (body shrunk to the viewport) the window
+    // stayed scrolled, the viewer sat half off-screen and no reel played.
     Object.assign(wrapper.style, {
-      position:      'absolute',
+      position:      'fixed',
       zIndex:        '2147483647',
       display:       'flex',
       alignItems:    'stretch',
+      // One line always. A fixed box sizes itself to the space right of its
+      // `left`; flush against the right edge of a full-width player (embeds
+      // such as vidara, RedGifs inside Reddit) there was only room for
+      // "Download", so the longer "Sent to LDM" wrapped onto three lines.
+      whiteSpace:    'nowrap',
       pointerEvents: 'all',
       userSelect:    'none',
       touchAction:   'none',
@@ -693,28 +700,32 @@
     });
     btn.addEventListener('mouseenter', () => { btn.style.background = hoverBg; });
     btn.addEventListener('mouseleave', () => { btn.style.background = baseBg; });
+    // The texts differ in width, so re-align to the video after each change.
+    const setLabel = html => { btn.innerHTML = html; positionOverlay(video, wrapper); };
+    // Quiet send: the text stays "Download" (only dimmed) while the link goes
+    // to LDM, and the button leaves the moment LDM has it. Only a failure
+    // is spelled out.
+    let busy = false;
     btn.addEventListener('click', e => {
       e.stopPropagation(); e.preventDefault();
-      btn.innerHTML = sendingTx;
-      btn.style.opacity = '0.7';
+      if (busy) return;
+      busy = true;
+      btn.style.opacity = '0.6';
       captureVideo(video)
         .then(() => {
-          btn.innerHTML = sentTx;
-          btn.style.color = '#22c55e';
-          btn.style.opacity = '1';
           // Retire it like ×: removeOverlay alone clears data-ldm-overlay, and
           // the next DOM mutation would attach a fresh button to this video.
           video.setAttribute('data-ldm-dismissed', '1');
-          setTimeout(() => removeOverlay(video), 1500);
+          removeOverlay(video);
         })
         .catch(() => {
-          btn.innerHTML = failedTx;
+          setLabel(failedTx);
           btn.style.color = '#ef4444';
           btn.style.opacity = '1';
           setTimeout(() => {
-            btn.innerHTML = label;
+            setLabel(label);
             btn.style.color = accent;
-            btn.style.opacity = '1';
+            busy = false;
           }, 2000);
         });
     });
@@ -831,12 +842,10 @@
       }
       e.preventDefault();
       // Keep it on screen so it can't be dropped somewhere unreachable.
-      var sx = window.scrollX || window.pageXOffset || 0;
-      var sy = window.scrollY || window.pageYOffset || 0;
       var vw = document.documentElement.clientWidth  || window.innerWidth;
       var vh = document.documentElement.clientHeight || window.innerHeight;
-      var left = Math.min(Math.max(start.left + dx, sx), sx + vw - wrapper.offsetWidth);
-      var top  = Math.min(Math.max(start.top  + dy, sy), sy + vh - wrapper.offsetHeight);
+      var left = Math.min(Math.max(start.left + dx, 0), vw - wrapper.offsetWidth);
+      var top  = Math.min(Math.max(start.top  + dy, 0), vh - wrapper.offsetHeight);
       wrapper.style.left = left + 'px';
       wrapper.style.top  = top  + 'px';
     }
@@ -852,11 +861,9 @@
         // Remember the spot relative to the video, so the reposition that
         // runs when it scrolls back into view keeps the user's placement.
         var r  = video.getBoundingClientRect();
-        var sx = window.scrollX || window.pageXOffset || 0;
-        var sy = window.scrollY || window.pageYOffset || 0;
         video._ldmDragOffset = {
-          dx: (parseFloat(wrapper.style.left) || 0) - (r.left + sx),
-          dy: (parseFloat(wrapper.style.top)  || 0) - (r.top  + sy),
+          dx: (parseFloat(wrapper.style.left) || 0) - r.left,
+          dy: (parseFloat(wrapper.style.top)  || 0) - r.top,
         };
         suppressClick = e.type === 'pointerup';
         // Not every drag ends in a click (released off the overlay), so don't
@@ -881,23 +888,24 @@
     if (r.width < 100 || r.height < 60) { wrapper.style.display = 'none'; return; }
     wrapper.style.display = 'flex';
     const btnH   = wrapper.offsetHeight || 28;
-    const scrollX = window.scrollX || window.pageXOffset || 0;
-    const scrollY = window.scrollY || window.pageYOffset || 0;
     if (video._ldmDragOffset) {
-      wrapper.style.left = `${r.left + scrollX + video._ldmDragOffset.dx}px`;
-      wrapper.style.top  = `${r.top  + scrollY + video._ldmDragOffset.dy}px`;
+      // Keep a dragged button fully on screen when its text gets longer.
+      const vw = document.documentElement.clientWidth || window.innerWidth;
+      const want = r.left + video._ldmDragOffset.dx;
+      wrapper.style.left = `${Math.max(0, Math.min(want, vw - (wrapper.offsetWidth || 160)))}px`;
+      wrapper.style.top  = `${r.top  + video._ldmDragOffset.dy}px`;
       return;
     }
     if (r.top > btnH + 4) {
-      wrapper.style.top  = `${r.top + scrollY - btnH - 4}px`;
+      wrapper.style.top  = `${r.top - btnH - 4}px`;
     } else {
-      wrapper.style.top  = `${r.top + scrollY + 6}px`;
+      wrapper.style.top  = `${r.top + 6}px`;
     }
     // Right-align to the video using the button's real width: the Download
     // button (with its stream tag) is wider than the old fixed 160px guess and
     // overhung the video's right edge.
     const btnW = wrapper.offsetWidth || 160;
-    wrapper.style.left = `${Math.max(r.left, r.right - btnW - 6) + scrollX}px`;
+    wrapper.style.left = `${Math.max(r.left, r.right - btnW - 6)}px`;
   }
 
   // Active overlay registry — used to purge hosts orphaned by SPA re-renders
@@ -1074,9 +1082,42 @@
   // A video that's still in the DOM but not on screen in any real sense:
   // display:none / visibility:hidden ancestors, collapsed, or (YouTube) the
   // player kept alive after leaving the watch page.
+  // How much of the video really shows through ancestors that clip overflow.
+  // Instagram carousels keep the neighbouring slide's <video> laid out beside
+  // the visible one inside an overflow:hidden track: its own rect looks fine,
+  // but nothing of it is on screen, and its button floated beside the post.
+  // Only ancestors in the video's containing-block chain clip it (CSS: an
+  // absolutely positioned box escapes overflow of non-positioned ancestors).
+  // YouTube's <body> is overflow:scroll with height 0 while ytd-app is
+  // position:absolute — treating body as a clip hid every YouTube button (3.1.20).
+  function clippedRect(v, r) {
+    var left = r.left, top = r.top, right = r.right, bottom = r.bottom;
+    var pos = getComputedStyle(v).position;        // position of the box being clipped
+    for (var el = v.parentElement; el && el !== document.documentElement; el = el.parentElement) {
+      var cs = getComputedStyle(el);
+      var makesCB = cs.position !== 'static' || cs.transform !== 'none' ||
+                    cs.filter !== 'none' || /paint|layout|strict|content/.test(cs.contain || '');
+      var inChain = pos === 'absolute' ? makesCB
+                  : pos === 'fixed'    ? (cs.transform !== 'none' || cs.filter !== 'none' || /paint|layout|strict|content/.test(cs.contain || ''))
+                  : true;
+      if (!inChain) continue;                       // this ancestor can't clip the box
+      var clipX = cs.overflowX !== 'visible', clipY = cs.overflowY !== 'visible';
+      if (clipX || clipY) {
+        var pr = el.getBoundingClientRect();
+        if (clipX) { left = Math.max(left, pr.left); right = Math.min(right, pr.right); }
+        if (clipY) { top = Math.max(top, pr.top); bottom = Math.min(bottom, pr.bottom); }
+        if (right - left <= 0 || bottom - top <= 0) return { width: 0, height: 0 };
+      }
+      pos = cs.position;                            // continue from this box's own positioning
+    }
+    return { width: right - left, height: bottom - top };
+  }
+
   function videoShown(v) {
     var r = v.getBoundingClientRect();
     if (r.width < 100 || r.height < 60) return false;
+    var c = clippedRect(v, r);
+    if (c.width < r.width * 0.5 || c.height < 40) return false;
     if (v.checkVisibility && !v.checkVisibility({ visibilityProperty: true, checkVisibilityCSS: true })) return false;
     if (v._ldmIsYT && !isYouTubePage()) return false;
     // Facebook reels: the visibility observer hides buttons of reels that
@@ -1099,6 +1140,10 @@
       return;
     }
     _cleanOrphanedOverlays();
+    repositionAll();
+  }, 500);
+
+  function repositionAll() {
     _ldmActiveOverlays.forEach(function(item) {
       var v = item.video, w = v._ldmBtn;
       if (!w || v._ldmDragging) return;
@@ -1106,7 +1151,22 @@
       item.host.style.display = '';
       positionOverlay(v, w);
     });
-  }, 500);
+  }
+
+  // Buttons are position:fixed, so they no longer ride along with the page:
+  // follow every scroll (capture also catches inner scrollers such as reel
+  // viewers) and resize, once per frame.
+  var _ldmRepositionQueued = false;
+  function queueReposition() {
+    if (_ldmRepositionQueued || !_ldmActiveOverlays.length) return;
+    _ldmRepositionQueued = true;
+    requestAnimationFrame(function() {
+      _ldmRepositionQueued = false;
+      repositionAll();
+    });
+  }
+  window.addEventListener('scroll', queueReposition, { capture: true, passive: true });
+  window.addEventListener('resize', queueReposition, { passive: true });
 
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', attachToVideos);
