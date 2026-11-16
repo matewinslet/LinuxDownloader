@@ -8406,7 +8406,13 @@ class DownloadManager(QMainWindow):
         toast.adjustSize()
         w = max(toast.sizeHint().width() + 48, 280)
         toast.setFixedSize(w, 40)
-        toast.move((self.width() - w) // 2, self.height() - 80)
+        # centre over the right pane (list side), not the whole window
+        pane = getattr(self, "_content_widget", None)
+        if pane is not None and pane.isVisible():
+            pr = QRect(pane.mapTo(self, QPoint(0, 0)), pane.size())
+            toast.move(pr.x() + (pr.width() - w) // 2, self.height() - 80)
+        else:
+            toast.move((self.width() - w) // 2, self.height() - 80)
 
         effect = QGraphicsOpacityEffect(toast)
         toast.setGraphicsEffect(effect)
@@ -8928,6 +8934,12 @@ class DownloadManager(QMainWindow):
         self._shutdown_action.setChecked(self.shutdown_on_finish)
         self._shutdown_action.triggered.connect(self._toggle_shutdown_on_finish)
         view_menu.addAction(self._shutdown_action)
+        if _autostart_supported():
+            self._autostart_action = QAction("Start with System", self)
+            self._autostart_action.setCheckable(True)
+            self._autostart_action.setChecked(autostart_enabled())
+            self._autostart_action.triggered.connect(self._toggle_autostart)
+            view_menu.addAction(self._autostart_action)
         view_menu.addSeparator()
         reset_cols_action = QAction("Reset Column Widths", self)
         reset_cols_action.triggered.connect(self._reset_column_widths)
@@ -9293,8 +9305,13 @@ class DownloadManager(QMainWindow):
         empty_layout.setSpacing(12)
         empty_layout.addStretch()
 
-        self._empty_icon = QLabel("⬇")
+        self._empty_icon = QLabel()
         self._empty_icon.setObjectName("emptyIcon")
+        _pix = self._empty_state_icon_pixmap(80)
+        if _pix is not None:
+            self._empty_icon.setPixmap(_pix)
+        else:
+            self._empty_icon.setText("⬇")
         self._empty_icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
         empty_layout.addWidget(self._empty_icon)
 
@@ -9686,6 +9703,15 @@ class DownloadManager(QMainWindow):
         self._settings["notifications"] = self.notify_enabled
         save_settings(self._settings)
 
+    def _toggle_autostart(self):
+        want = not autostart_enabled()
+        if set_autostart(want):
+            self._show_toast("LDM will start in the tray when you log in" if want
+                             else "LDM won't start when you log in")
+        else:
+            self._show_toast("Couldn't change the startup setting")
+        self._autostart_action.setChecked(autostart_enabled())
+
     def _toggle_shutdown_on_finish(self):
         self.shutdown_on_finish = not self.shutdown_on_finish
         self._shutdown_action.setChecked(self.shutdown_on_finish)
@@ -9895,6 +9921,22 @@ class DownloadManager(QMainWindow):
         is_empty = self.table.rowCount() == 0
         self._table_stack.setCurrentIndex(1 if is_empty else 0)
         self._content_widget.update()        # the list's shadow comes and goes with it
+
+    def _empty_state_icon_pixmap(self, size):
+        """The LDM app icon for the empty list, rendered sharp at the screen's scale."""
+        dpr = self.devicePixelRatioF() if hasattr(self, "devicePixelRatioF") else 1.0
+        icon = getattr(self, "app_icon", None)
+        if icon is None or icon.isNull():
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            for name in ("icons/linux-downloader.svg", "icons/linux-downloader-256.png"):
+                path = os.path.join(script_dir, name)
+                if os.path.exists(path):
+                    icon = QIcon(path)
+                    break
+        if icon is None or icon.isNull():
+            return None
+        pix = icon.pixmap(QSize(size, size), dpr)
+        return None if pix.isNull() else pix
 
     def _style_empty_state(self):
         if not hasattr(self, "_empty_state"):
@@ -11654,6 +11696,90 @@ def _end_tray_activation():
         pass
 
 
+# ── Start with system ─────────────────────────────────────────────────────────
+# A standard XDG autostart entry. It starts LDM with --background, so it sits
+# in the tray (bridge running, extension works) without opening the window.
+BACKGROUND_FLAG = "--background"
+AUTOSTART_FILE = os.path.join(_XDG_CONFIG_HOME, "autostart", "linux-downloader.desktop")
+
+
+def _autostart_supported():
+    # Inside Flatpak ~/.config/autostart isn't ours to write.
+    return not os.environ.get("FLATPAK_ID")
+
+
+def _autostart_exec():
+    """The command the login session should run, ending in --background."""
+    import shlex
+    appimage = os.environ.get("APPIMAGE")
+    if appimage:
+        return f"{shlex.quote(appimage)} {BACKGROUND_FLAG}"
+    # Reuse the installed launcher's command, so whatever it sets up (PATH for
+    # Deno, a wrapper script, the packaged /usr/bin/linux-downloader) still applies.
+    for desktop in (
+        os.path.join(HOME, ".local", "share", "applications", "downloader.desktop"),
+        os.path.join(HOME, ".local", "share", "applications", "linux-download-manager.desktop"),
+        "/usr/share/applications/linux-download-manager.desktop",
+    ):
+        try:
+            with open(desktop, encoding="utf-8") as f:
+                for line in f:
+                    if line.startswith("Exec="):
+                        cmd = re.sub(r"\s%[A-Za-z]", "", line[5:].strip())
+                        if cmd:
+                            return f"{cmd} {BACKGROUND_FLAG}"
+        except OSError:
+            continue
+    return (f"{shlex.quote(sys.executable)} "
+            f"{shlex.quote(os.path.abspath(__file__))} {BACKGROUND_FLAG}")
+
+
+def autostart_enabled():
+    try:
+        with open(AUTOSTART_FILE, encoding="utf-8") as f:
+            text = f.read()
+    except OSError:
+        return False
+    return not re.search(r"^(Hidden=true|X-GNOME-Autostart-enabled=false)\s*$",
+                         text, re.M | re.I)
+
+
+def set_autostart(enabled):
+    """Write or remove the autostart entry. Returns True on success."""
+    try:
+        if not enabled:
+            if os.path.exists(AUTOSTART_FILE):
+                os.remove(AUTOSTART_FILE)
+            return True
+        os.makedirs(os.path.dirname(AUTOSTART_FILE), exist_ok=True)
+        with open(AUTOSTART_FILE, "w", encoding="utf-8") as f:
+            f.write(
+                "[Desktop Entry]\n"
+                "Type=Application\n"
+                "Name=Ferospark LDM\n"
+                "Comment=Start Ferospark LDM in the tray when you log in\n"
+                f"Exec={_autostart_exec()}\n"
+                "Icon=linux-downloader\n"
+                "Terminal=false\n"
+                "X-GNOME-Autostart-enabled=true\n"
+                "X-GNOME-Autostart-Delay=5\n"
+            )
+        return True
+    except OSError:
+        return False
+
+
+def _ldm_already_running(port=9999):
+    """True if an LDM is already answering on the bridge port."""
+    try:
+        import urllib.request
+        with urllib.request.urlopen(
+                f"http://127.0.0.1:{port}/ping", timeout=2) as r:
+            return r.read().strip() == b"LDM-OK"
+    except Exception:
+        return False
+
+
 def _hand_off_to_running_instance(port=9999):
     """Ask an already-running LDM to unhide itself. True if one answered.
 
@@ -11676,7 +11802,13 @@ if __name__ == "__main__":
         os.environ["QT_QPA_PLATFORMTHEME"] = "gtk3"
     _ensure_ytdlp_config()
     _end_startup_feedback()
-    if _hand_off_to_running_instance():
+    background = BACKGROUND_FLAG in sys.argv
+    if background:
+        sys.argv = [a for a in sys.argv if a != BACKGROUND_FLAG]
+        # Login start while LDM is already up: nothing to do, show nothing.
+        if _ldm_already_running():
+            sys.exit(0)
+    elif _hand_off_to_running_instance():
         sys.exit(0)
     app = QApplication(sys.argv)
     app.setApplicationName("Ferospark LDM")
@@ -11688,7 +11820,23 @@ if __name__ == "__main__":
     app.setQuitOnLastWindowClosed(False)
     _load_dialog_fonts()
     window = DownloadManager()
-    window.show()
+    if not background:
+        window.show()
+    elif window.tray is None:
+        # At login the panel's tray can appear a few seconds after LDM. Wait
+        # for it; if it never comes there'd be no way back in, so open the window.
+        _tray_wait = {"left": 20}
+        def _wait_for_tray():
+            if QSystemTrayIcon.isSystemTrayAvailable():
+                window._init_tray()
+            if window.tray is not None:
+                return
+            _tray_wait["left"] -= 1
+            if _tray_wait["left"] <= 0:
+                window.show()
+            else:
+                QTimer.singleShot(1000, _wait_for_tray)
+        QTimer.singleShot(1000, _wait_for_tray)
     rc = app.exec()
     # curl_cffi runs transfers on a ThreadPoolExecutor, and concurrent.futures
     # registers an atexit hook that joins those workers regardless of daemon

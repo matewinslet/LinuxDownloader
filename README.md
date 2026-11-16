@@ -56,6 +56,7 @@ A download manager for Linux. It takes over your Firefox downloads, grabs videos
 - **Pause it anytime.** The power button in the extension popup lets Firefox handle downloads again until you turn it back on.
 - **Light and dark mode.**
 - **Stays in the tray.** Closing the window keeps downloads running.
+- **Starts with your computer.** Turn on **View → Start with System** and LDM starts in the tray when you log in, ready for the browser, without opening its window.
 
 ---
 
@@ -129,6 +130,11 @@ If you don't want the button on a page, click its **×**. To hide it everywhere,
 3. Choose the quality or audio format and click **Download**.
 
 You can also paste a YouTube link into the URL box in LDM and press **Download**.
+
+### Start LDM when you log in
+Open **View → Start with System**. From then on LDM starts quietly in the tray each time you log in, so the browser extension works without you opening the app first. Click the tray icon when you want the window. Turn the same switch off to stop it.
+
+If your desktop has no tray (plain GNOME without an AppIndicator extension), LDM opens its window at login instead, so you can still reach it.
 
 ---
 
