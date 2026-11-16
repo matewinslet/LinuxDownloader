@@ -73,6 +73,12 @@
   </branding>
 
   <releases>
+    <release version="3.1.0" date="2026-11-17">
+      <description>
+        <p>New View, Start with System switch: LDM starts in the tray when you log in, so the browser extension works without opening the app first.</p>
+        <p>The browser extension's Download button now shows on Facebook videos opened from posts with several videos.</p>
+      </description>
+    </release>
     <release version="3.0.0" date="2026-11-17">
       <description>
         <p>Renamed to Ferospark LDM, with a new icon.</p>

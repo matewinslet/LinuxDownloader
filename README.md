@@ -5,7 +5,7 @@ A download manager for Linux. It takes over your Firefox downloads, grabs videos
 ![Platform](https://img.shields.io/badge/platform-Linux-blue)
 ![Python](https://img.shields.io/badge/python-3.10%2B-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
-![Version](https://img.shields.io/badge/version-3.0-green)
+![Version](https://img.shields.io/badge/version-3.1-green)
 
 ---
 
