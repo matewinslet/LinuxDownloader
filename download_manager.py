@@ -7722,6 +7722,17 @@ def _menu_glyph_paint(p, kind, x, y):
         p.setPen(QPen(QColor("#991b1b"), 1)); p.setBrush(vg(y + 3, y + 13, "#f87171", "#dc2626"))
         p.drawPath(rr(QRectF(x + 1.5, y + 3, 13, 10), 3))
         p.setPen(NP); p.setBrush(QColor("#ffffff")); p.drawPolygon(poly((x + 6.4, y + 5.4), (x + 6.4, y + 10.6), (x + 10.6, y + 8)))
+    elif kind == "sunrise":       # sun coming up over the horizon = starts at login
+        p.setPen(rpen("#f59e0b", 1.3))
+        for ax, ay, bx, by in ((8, 1.2, 8, 3), (2.6, 4, 3.9, 5.2), (13.4, 4, 12.1, 5.2),
+                               (0.8, 9, 2.6, 9), (15.2, 9, 13.4, 9)):
+            p.drawLine(QPointF(x + ax, y + ay), QPointF(x + bx, y + by))
+        g = QRadialGradient(x + 7, y + 6.5, 7); g.setColorAt(0, QColor("#fff3b0")); g.setColorAt(1, QColor("#f59e0b"))
+        sun = QPainterPath(); sun.moveTo(x + 3.2, y + 10.5)
+        sun.arcTo(QRectF(x + 3.2, y + 5.7, 9.6, 9.6), 180, -180); sun.closeSubpath()
+        p.setPen(QPen(QColor("#c2410c"), 1)); p.setBrush(QBrush(g)); p.drawPath(sun)
+        p.setPen(QPen(QColor("#1e5fa8"), 1)); p.setBrush(vg(y + 10.5, y + 14.5, "#7cc4f5", "#2b7fd4"))
+        p.drawPath(rr(QRectF(x + 1, y + 10.5, 14, 3.8), 1.5))
     elif kind == "columns":
         p.setPen(QPen(QColor("#6b7786"), 1)); p.setBrush(QColor("#ffffff")); p.drawPath(rr(QRectF(x + 1.5, y + 2.5, 13, 11), 1.5))
         p.setPen(NP); p.setBrush(QColor("#8fb8e8")); p.drawRect(QRectF(x + 2, y + 3, 12, 3))
@@ -8959,6 +8970,8 @@ class DownloadManager(QMainWindow):
                              (self._shutdown_action, "power"), (reset_cols_action, "columns"),
                              (deps_action, "deps"), (about_action, "info")):
             GlossMenu.tag(_act, _glyph)
+        if getattr(self, "_autostart_action", None) is not None:
+            GlossMenu.tag(self._autostart_action, "sunrise")
 
         outer.addWidget(self._menubar)
 
