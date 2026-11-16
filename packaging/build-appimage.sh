@@ -8,7 +8,7 @@
 set -euo pipefail
 
 SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-VER="${VER:-3.0.0}"
+VER="${VER:-3.1.0}"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 cd "$WORK"
