@@ -73,6 +73,14 @@
   </branding>
 
   <releases>
+    <release version="3.0.0" date="2026-11-17">
+      <description>
+        <p>Renamed to Ferospark LDM, with a new icon.</p>
+        <p>New look: an IDM-style download list, redrawn icons, menus and tooltips.</p>
+        <p>Select several downloads at once. Clear now removes only finished downloads.</p>
+        <p>Lower idle CPU use, and fixes for expiring links, pixeldrain and YouTube file sizes.</p>
+      </description>
+    </release>
     <release version="2.0.0" date="2026-06-16">
       <description>
         <p>Bunkr download pages now resolve to their direct, signed CDN links automatically.</p>

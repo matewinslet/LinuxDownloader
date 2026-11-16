@@ -1,31 +1,11 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="80" height="80" viewBox="0 0 80 80">
-  <defs>
-    <linearGradient id="bg-folder" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#fde047"></stop>
-      <stop offset="1" stop-color="#d97706"></stop>
-    </linearGradient>
-    <linearGradient id="hl-folder" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="white" stop-opacity="0.38"></stop>
-      <stop offset="0.5" stop-color="white" stop-opacity="0"></stop>
-    </linearGradient>
-    <radialGradient id="gloss-folder" cx="0.5" cy="0" r="0.9">
-      <stop offset="0" stop-color="white" stop-opacity="0.25"></stop>
-      <stop offset="1" stop-color="white" stop-opacity="0"></stop>
-    </radialGradient>
-  </defs>
-  <rect width="80" height="80" rx="22" fill="url(#bg-folder)"></rect>
-  <rect width="80" height="80" rx="22" fill="url(#gloss-folder)"></rect>
-  <rect width="80" height="80" rx="22" fill="url(#hl-folder)"></rect>
-  
-  <defs>
-    <linearGradient id="bg-folder-front" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#fef3c7"></stop>
-      <stop offset="1" stop-color="#f59e0b"></stop>
-    </linearGradient>
-  </defs>
-  <path d="M18 26 Q18 22 22 22 L32 22 L38 28 L58 28 Q62 28 62 32 L62 36 L18 36 Z" fill="#fbbf24" stroke="rgba(0,0,0,0.1)" stroke-width="0.5"></path>
-  <path d="M16 34 Q16 30 20 30 L60 30 Q64 30 64 34 L62 58 Q61.5 62 57.5 62 L22.5 62 Q18.5 62 18 58 Z" fill="url(#bg-folder-front)"></path>
-  <path d="M16 34 Q16 30 20 30 L60 30 Q64 30 64 34 L62 58 Q61.5 62 57.5 62 L22.5 62 Q18.5 62 18 58 Z" fill="none" stroke="rgba(255,255,255,0.5)" stroke-width="1"></path>
-  <rect x="0.5" y="0.5" width="79" height="79" rx="21.5" fill="none" stroke="rgba(255,255,255,0.25)" stroke-width="1"></rect>
-  <rect x="0" y="0" width="80" height="80" rx="22" fill="none" stroke="rgba(0,0,0,0.18)" stroke-width="0.6"></rect>
+<defs><linearGradient id="bg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#2dd4bf" stop-opacity="1"/><stop offset="1" stop-color="#0f766e" stop-opacity="1"/></linearGradient><linearGradient id="hl" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#fff" stop-opacity="0.38"/><stop offset="0.5" stop-color="#fff" stop-opacity="0"/></linearGradient><radialGradient id="gloss" cx="0.5" cy="0" r="0.9"><stop offset="0" stop-color="#fff" stop-opacity="0.25"/><stop offset="1" stop-color="#fff" stop-opacity="0"/></radialGradient><linearGradient id="back" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#e3a92f" stop-opacity="1"/><stop offset="1" stop-color="#b97a12" stop-opacity="1"/></linearGradient><linearGradient id="front" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#ffe08a" stop-opacity="1"/><stop offset="0.5" stop-color="#fbc94a" stop-opacity="1"/><stop offset="1" stop-color="#eaa51f" stop-opacity="1"/></linearGradient><linearGradient id="paper" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#ffffff" stop-opacity="1"/><stop offset="1" stop-color="#e2e8f0" stop-opacity="1"/></linearGradient></defs>
+<rect width="80" height="80" rx="22" fill="url(#bg)"/><rect width="80" height="80" rx="22" fill="url(#gloss)"/><rect width="80" height="80" rx="22" fill="url(#hl)"/>
+<ellipse cx="40" cy="64.5" rx="27" ry="3" fill="#042f2e" fill-opacity="0.35"/>
+<path d="M15 25 q0 -4 4 -4 h12.5 l5 5 h24.5 q4 0 4 4 v30 h-50 z" fill="url(#back)" stroke="#7c4a03" stroke-opacity="0.6" stroke-width="0.6"/>
+<rect x="21" y="26.5" width="38" height="24" rx="1.2" fill="url(#paper)" stroke="#64748b" stroke-opacity="0.5" stroke-width="0.5" transform="rotate(-3 40 38)"/>
+<path d="M26 31.5 h22 M26 35 h16" stroke="#94a3b8" stroke-width="1.1" stroke-linecap="round" transform="rotate(-3 40 38)"/>
+<path d="M12.5 38 q-0.3 -3.4 3.2 -3.4 h48.6 q3.5 0 3.2 3.4 l-2 21.6 q-0.3 3.4 -3.6 3.4 h-43.8 q-3.3 0 -3.6 -3.4 z" fill="url(#front)" stroke="#8a5a06" stroke-opacity="0.6" stroke-width="0.6"/>
+<path d="M16.2 36.4 h47.6" stroke="#fff" stroke-opacity="0.8" stroke-width="1.2" stroke-linecap="round"/>
+<rect x="0.5" y="0.5" width="79" height="79" rx="21.5" fill="none" stroke="#fff" stroke-opacity="0.25"/><rect width="80" height="80" rx="22" fill="none" stroke="#000" stroke-opacity="0.18" stroke-width="0.6"/>
 </svg>

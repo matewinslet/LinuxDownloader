@@ -580,7 +580,8 @@
 
   // Overlay icons, drawn rather than emoji so they look the same everywhere.
   var LDM_SVG = '<svg width="13" height="13" viewBox="0 0 16 16" style="flex:none" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" ';
-  var LDM_ICON_DL   = LDM_SVG + 'stroke-width="1.8" color="#38bdf8"><path d="M8 2v8m0 0L4.5 6.5M8 10l3.5-3.5M3 13.5h10"/></svg>';
+  // Solid arrow over a tray, with a dark rim so it reads as a raised shape.
+  var LDM_ICON_DL   = '<svg width="13" height="13" viewBox="0 0 16 16" style="flex:none"><path d="M6 1.5h4v5.2h3L8 11.6 3 6.7h3z" fill="#6cc8ff" stroke="#06223a" stroke-width=".7" stroke-linejoin="round"/><rect x="2.5" y="12.6" width="11" height="2.2" rx="1.1" fill="#6cc8ff" stroke="#06223a" stroke-width=".7"/></svg>';
   var LDM_ICON_SPIN = LDM_SVG + 'stroke-width="1.8"><g><path d="M8 2a6 6 0 1 1-6 6"/><animateTransform attributeName="transform" type="rotate" from="0 8 8" to="360 8 8" dur="1s" repeatCount="indefinite"/></g></svg>';
   var LDM_ICON_OK   = LDM_SVG + 'stroke-width="2"><path d="M3 8.5l3 3 7-7"/></svg>';
   var LDM_ICON_FAIL = LDM_SVG + 'stroke-width="2"><path d="M4 4l8 8M12 4l-8 8"/></svg>';
@@ -604,12 +605,20 @@
 
     video.setAttribute('data-ldm-overlay', '1');
     const isYT = isYouTubePage();
-    // YouTube keeps its original look. Everywhere else the left tag names the
-    // stream LDM will be sent (see streamKind), so it's clear before clicking
-    // whether a real stream was found or LDM will fall back to the page link.
-    const baseBg    = '#0f172a';
-    const accent    = isYT ? '#dc2626' : '#e0f2fe';
-    const hoverBg   = isYT ? 'rgba(220,38,38,0.25)' : '#12334a';
+    // Outside YouTube the left tag names the stream LDM will be sent (see
+    // streamKind), so it's clear before clicking whether a real stream was
+    // found or LDM will fall back to the page link.
+    // "Raised navy" look: one top-lit plate (gradient + bright top edge + dark
+    // bottom edge) painted on the wrapper; the three parts are transparent
+    // and separated by a dark groove with a light line beside it.
+    const plateBg   = 'linear-gradient(#2a3a5c 0%, #17233d 48%, #0e172b 52%, #0a1122 100%)';
+    const groove    = '1px solid rgba(0,0,0,0.6)';
+    const grooveHi  = '1px 0 0 rgba(255,255,255,0.09)';
+    const baseBg    = 'transparent';
+    const accent    = isYT ? '#ff5148' : '#eef8ff';
+    const hoverBg   = isYT ? 'linear-gradient(rgba(255,90,80,0.24), rgba(255,90,80,0.07))'
+                           : 'linear-gradient(rgba(120,200,255,0.22), rgba(120,200,255,0.06))';
+    const pressBg   = 'linear-gradient(rgba(0,0,0,0.45), rgba(0,0,0,0.15))';
     const label     = isYT ? '&#9654; YouTube'   : LDM_ICON_DL + 'Download';
     const failedTx  = isYT ? '&#10007; Failed'    : LDM_ICON_FAIL + 'Failed';
 
@@ -634,9 +643,9 @@
       touchAction:   'none',
       borderRadius:  isYT ? '5px' : '6px',
       overflow:      'hidden',
-      background:    baseBg,
-      border:        isYT ? '1px solid rgba(255,255,255,0.1)' : '1px solid rgba(56,189,248,0.35)',
-      boxShadow:     isYT ? '0 2px 10px rgba(0,0,0,0.6)' : '0 2px 12px rgba(0,0,0,0.6)',
+      background:    plateBg,
+      border:        '1px solid #04070d',
+      boxShadow:     'inset 0 1px 0 rgba(255,255,255,0.28), inset 0 -1px 0 rgba(0,0,0,0.6), 0 1px 0 rgba(255,255,255,0.1), 0 3px 9px rgba(0,0,0,0.65)',
     });
 
     // ── Left tag: "LDM" on YouTube, stream type + LDM elsewhere ───────────────
@@ -647,7 +656,8 @@
       badge.innerHTML = 'LDM';
       Object.assign(badge.style, {
         background:  baseBg,
-        color:       '#475569',
+        color:       '#8fd8ff',
+        textShadow:  '0 -1px 0 #000',
         fontFamily:  'sans-serif',
         fontSize:    '9px',
         fontWeight:  '700',
@@ -655,7 +665,8 @@
         letterSpacing: '0.1em',
         display:     'flex',
         alignItems:  'center',
-        borderRight: '1px solid rgba(255,255,255,0.06)',
+        borderRight: groove,
+        boxShadow:   grooveHi,
         cursor:      'grab',
       });
     } else {
@@ -663,20 +674,21 @@
       const brand = document.createElement('div');
       brand.textContent = 'LDM';
       Object.assign(kindLbl.style, {
-        font: '700 10px/1.1 ui-monospace, monospace', color: '#7dd3fc', letterSpacing: '0.04em',
+        font: '700 10px/1.1 ui-monospace, monospace', color: '#8fd8ff', letterSpacing: '0.04em',
+        textShadow: '0 -1px 0 #000',
       });
       Object.assign(brand.style, {
-        font: '500 8.5px/1.2 ui-monospace, monospace', color: '#5f89a3',
+        font: '500 8.5px/1.2 ui-monospace, monospace', color: '#6f93ad',
       });
       badge.appendChild(kindLbl);
       badge.appendChild(brand);
       Object.assign(badge.style, {
-        background:     '#0b2536',
         display:        'flex',
         flexDirection:  'column',
         justifyContent: 'center',
         padding:        '0 9px',
-        borderRight:    '1px solid rgba(56,189,248,0.25)',
+        borderRight:    groove,
+        boxShadow:      grooveHi,
         cursor:         'grab',
       });
     }
@@ -696,10 +708,21 @@
       display:     'flex',
       alignItems:  'center',
       gap:         isYT ? '5px' : '6px',
-      borderRight: '1px solid rgba(255,255,255,0.06)',
+      textShadow:  '0 -1px 0 rgba(0,0,0,0.8)',
+      borderRight: groove,
+      boxShadow:   grooveHi,
     });
-    btn.addEventListener('mouseenter', () => { btn.style.background = hoverBg; });
-    btn.addEventListener('mouseleave', () => { btn.style.background = baseBg; });
+    // Pressed = darker and the label drops 1px (height stays the same).
+    let over = false;
+    const press = down => {
+      btn.style.background    = down ? pressBg : (over ? hoverBg : baseBg);
+      btn.style.paddingTop    = down ? '7px' : '6px';
+      btn.style.paddingBottom = down ? '5px' : '6px';
+    };
+    btn.addEventListener('mouseenter', () => { over = true;  press(false); });
+    btn.addEventListener('mouseleave', () => { over = false; press(false); });
+    btn.addEventListener('mousedown',  e => { if (e.button === 0) press(true); });
+    btn.addEventListener('mouseup',    () => press(false));
     // The texts differ in width, so re-align to the video after each change.
     const setLabel = html => { btn.innerHTML = html; positionOverlay(video, wrapper); };
     // Quiet send: the text stays "Download" (only dimmed) while the link goes
@@ -735,7 +758,8 @@
     closeBtn.innerHTML = '&#215;';
     Object.assign(closeBtn.style, {
       background:  baseBg,
-      color:       '#475569',
+      color:       '#7d8ba1',
+      textShadow:  '0 -1px 0 #000',
       fontFamily:  'sans-serif',
       fontSize:    '13px',
       fontWeight:  '700',
@@ -745,12 +769,12 @@
       alignItems:  'center',
     });
     closeBtn.addEventListener('mouseenter', () => {
-      closeBtn.style.background = 'rgba(239,68,68,0.2)';
-      closeBtn.style.color = '#ef4444';
+      closeBtn.style.background = 'rgba(239,68,68,0.18)';
+      closeBtn.style.color = '#ff6b6b';
     });
     closeBtn.addEventListener('mouseleave', () => {
       closeBtn.style.background = baseBg;
-      closeBtn.style.color = '#475569';
+      closeBtn.style.color = '#7d8ba1';
     });
     closeBtn.addEventListener('click', e => {
       e.stopPropagation(); e.preventDefault();

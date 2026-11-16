@@ -29,8 +29,8 @@ first use, so it's an `optdepends`/`Recommends`, not a hard requirement.
 
 ```bash
 packaging/build-deb.sh
-# -> dist/linux-download-manager_2.0.0_amd64.deb
-sudo apt install ./dist/linux-download-manager_2.0.0_amd64.deb
+# -> dist/linux-download-manager_3.0.0_amd64.deb
+sudo apt install ./dist/linux-download-manager_3.0.0_amd64.deb
 ```
 
 The control file depends on the build host's `python3.X` interpreter package, so
@@ -42,8 +42,8 @@ install on a release that ships the same Python minor (e.g. Ubuntu 24.04 / Mint
 ```bash
 sudo dnf install -y rpm-build python3 python3-pip
 packaging/rpm/build-rpm.sh
-# -> dist/linux-download-manager-2.0.0-1.fc*.x86_64.rpm
-sudo dnf install ./dist/linux-download-manager-2.0.0-1.*.x86_64.rpm
+# -> dist/linux-download-manager-3.0.0-1.fc*.x86_64.rpm
+sudo dnf install ./dist/linux-download-manager-3.0.0-1.*.x86_64.rpm
 ```
 
 ## AUR (Arch / Manjaro)
@@ -70,9 +70,9 @@ all deps via [python-appimage](https://github.com/niess/python-appimage).
 
 ```bash
 packaging/build-appimage.sh
-# -> dist/Linux_Download_Manager-2.0.0-x86_64.AppImage
-chmod +x dist/Linux_Download_Manager-2.0.0-x86_64.AppImage
-./dist/Linux_Download_Manager-2.0.0-x86_64.AppImage
+# -> dist/Linux_Download_Manager-3.0.0-x86_64.AppImage
+chmod +x dist/Linux_Download_Manager-3.0.0-x86_64.AppImage
+./dist/Linux_Download_Manager-3.0.0-x86_64.AppImage
 ```
 
 Runs on most x86_64 desktops (glibc ≥ 2.17). Very minimal systems may need
@@ -83,7 +83,7 @@ Runs on most x86_64 desktops (glibc ≥ 2.17). Very minimal systems may need
 `.github/workflows/release.yml` builds **all three** (`.deb` on Ubuntu, `.rpm`
 in a Fedora container, AppImage) and attaches them to the GitHub Release. It
 runs when a `v*` tag is pushed, or on demand via **Actions → Build & ship
-packages → Run workflow** (defaults to `v2.0`). This is how the `.rpm` gets
+packages → Run workflow** (defaults to `v3.0`). This is how the `.rpm` gets
 built without a local Fedora machine.
 
 ## Distributing the packages
@@ -92,7 +92,7 @@ CI attaches `.deb` / `.rpm` / `.AppImage` to the tag's GitHub Release
 automatically. To upload a locally built one by hand:
 
 ```bash
-gh release upload v2.0 dist/linux-download-manager_2.0.0_amd64.deb
+gh release upload v3.0 dist/linux-download-manager_3.0.0_amd64.deb
 ```
 
 ## Already works today
