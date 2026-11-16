@@ -1,35 +1,9 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="80" height="80" viewBox="0 0 80 80">
-  <defs>
-    <linearGradient id="bg-cancel" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#fef3c7"></stop>
-      <stop offset="1" stop-color="#d97706"></stop>
-    </linearGradient>
-    <linearGradient id="hl-cancel" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="white" stop-opacity="0.38"></stop>
-      <stop offset="0.5" stop-color="white" stop-opacity="0"></stop>
-    </linearGradient>
-    <radialGradient id="gloss-cancel" cx="0.5" cy="0" r="0.9">
-      <stop offset="0" stop-color="white" stop-opacity="0.25"></stop>
-      <stop offset="1" stop-color="white" stop-opacity="0"></stop>
-    </radialGradient>
-  </defs>
-  <rect width="80" height="80" rx="22" fill="url(#bg-cancel)"></rect>
-  <rect width="80" height="80" rx="22" fill="url(#gloss-cancel)"></rect>
-  <rect width="80" height="80" rx="22" fill="url(#hl-cancel)"></rect>
-  
-  <defs>
-    <linearGradient id="stop-grad" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#f87171"></stop>
-      <stop offset="0.5" stop-color="#dc2626"></stop>
-      <stop offset="1" stop-color="#991b1b"></stop>
-    </linearGradient>
-  </defs>
-  <g style="filter: drop-shadow(1.5px 3px 3px rgba(0,0,0,0.45))">
-    <path d="M 28 12 L 52 12 L 68 28 L 68 52 L 52 68 L 28 68 L 12 52 L 12 28 Z" fill="white" stroke="rgba(0,0,0,0.7)" stroke-width="1"></path>
-    <path d="M 29 14 L 51 14 L 66 29 L 66 51 L 51 66 L 29 66 L 14 51 L 14 29 Z" fill="url(#stop-grad)" stroke="rgba(120,20,20,0.6)" stroke-width="0.6"></path>
-    <text x="40" y="44.6" text-anchor="middle" font-size="13" font-weight="900" fill="white" font-family="&#39;Arial Black&#39;, &#39;Helvetica Neue&#39;, Helvetica, sans-serif" letter-spacing="0.3">STOP</text>
-    <path d="M32 17 L48 17" stroke="rgba(255,255,255,0.5)" stroke-width="1.2" stroke-linecap="round"></path>
-  </g>
-  <rect x="0.5" y="0.5" width="79" height="79" rx="21.5" fill="none" stroke="rgba(255,255,255,0.25)" stroke-width="1"></rect>
-  <rect x="0" y="0" width="80" height="80" rx="22" fill="none" stroke="rgba(0,0,0,0.18)" stroke-width="0.6"></rect>
+<defs><linearGradient id="bg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#fef3c7" stop-opacity="1"/><stop offset="1" stop-color="#d97706" stop-opacity="1"/></linearGradient><linearGradient id="hl" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#fff" stop-opacity="0.38"/><stop offset="0.5" stop-color="#fff" stop-opacity="0"/></linearGradient><radialGradient id="gloss" cx="0.5" cy="0" r="0.9"><stop offset="0" stop-color="#fff" stop-opacity="0.25"/><stop offset="1" stop-color="#fff" stop-opacity="0"/></radialGradient><linearGradient id="red" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#ff6b6b" stop-opacity="1"/><stop offset="0.45" stop-color="#e11d1d" stop-opacity="1"/><stop offset="1" stop-color="#8f1010" stop-opacity="1"/></linearGradient><linearGradient id="chrome" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#ffffff" stop-opacity="1"/><stop offset="0.5" stop-color="#e5e7eb" stop-opacity="1"/><stop offset="1" stop-color="#9ca3af" stop-opacity="1"/></linearGradient><radialGradient id="ball" cx="0.38" cy="0.3" r="0.75"><stop offset="0" stop-color="#ff8f8f" stop-opacity="1"/><stop offset="0.45" stop-color="#e11d1d" stop-opacity="1"/><stop offset="1" stop-color="#7f0d0d" stop-opacity="1"/></radialGradient><linearGradient id="chromer" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#ffffff" stop-opacity="1"/><stop offset="0.5" stop-color="#d1d5db" stop-opacity="1"/><stop offset="1" stop-color="#6b7280" stop-opacity="1"/></linearGradient></defs>
+<rect width="80" height="80" rx="22" fill="url(#bg)"/><rect width="80" height="80" rx="22" fill="url(#gloss)"/><rect width="80" height="80" rx="22" fill="url(#hl)"/><circle cx="41.4" cy="43.4" r="29" fill="#3b1d00" fill-opacity="0.38"/>
+<circle cx="40" cy="40" r="29" fill="url(#chromer)" stroke="#44403c" stroke-width="1"/>
+<circle cx="40" cy="40" r="25.5" fill="url(#ball)" stroke="#7f1d1d" stroke-width="0.8"/>
+<rect x="22" y="35.4" width="36" height="11" rx="2.2" fill="#5c0a0a" fill-opacity="0.5"/>
+<rect x="22" y="34.2" width="36" height="11" rx="2.2" fill="#ffffff"/>
+<path d="M19 30 Q22 17.5 40 16.5 Q58 17.5 61 30 Q40 37 19 30 Z" fill="#fff" fill-opacity="0.28"/><rect x="0.5" y="0.5" width="79" height="79" rx="21.5" fill="none" stroke="#fff" stroke-opacity="0.25"/><rect width="80" height="80" rx="22" fill="none" stroke="#000" stroke-opacity="0.18" stroke-width="0.6"/>
 </svg>

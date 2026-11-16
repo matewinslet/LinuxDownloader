@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="80" height="80" viewBox="0 0 80 80">
+<defs>
+<linearGradient id="bg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#6b7280" stop-opacity="1"/><stop offset="1" stop-color="#111318" stop-opacity="1"/></linearGradient>
+<linearGradient id="hl" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#fff" stop-opacity="0.38"/><stop offset="0.5" stop-color="#fff" stop-opacity="0"/></linearGradient>
+<radialGradient id="gloss" cx="0.5" cy="0" r="0.9"><stop offset="0" stop-color="#fff" stop-opacity="0.25"/><stop offset="1" stop-color="#fff" stop-opacity="0"/></radialGradient>
+<linearGradient id="bezel" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#ffffff" stop-opacity="1"/><stop offset="0.45" stop-color="#c9d1dc" stop-opacity="1"/><stop offset="1" stop-color="#5f6b7c" stop-opacity="1"/></linearGradient>
+<linearGradient id="bezel2" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#5f6b7c" stop-opacity="1"/><stop offset="1" stop-color="#eef1f5" stop-opacity="1"/></linearGradient>
+<radialGradient id="cap" cx="0.5" cy="0.3" r="0.8"><stop offset="0" stop-color="#4b5563" stop-opacity="1"/><stop offset="1" stop-color="#0b0d12" stop-opacity="1"/></radialGradient>
+<linearGradient id="capgl" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#fff" stop-opacity="0.32"/><stop offset="1" stop-color="#fff" stop-opacity="0"/></linearGradient>
+<linearGradient id="red" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#ff8a8a" stop-opacity="1"/><stop offset="1" stop-color="#ef2b2b" stop-opacity="1"/></linearGradient>
+</defs>
+<rect width="80" height="80" rx="22" fill="url(#bg)"/><rect width="80" height="80" rx="22" fill="url(#gloss)"/><rect width="80" height="80" rx="22" fill="url(#hl)"/>
+<ellipse cx="40" cy="45" rx="27" ry="26" fill="#000" fill-opacity="0.35"/>
+<circle cx="40" cy="41" r="26" fill="url(#bezel)" stroke="#1f2937" stroke-width="1"/>
+<circle cx="40" cy="41" r="21.5" fill="url(#bezel2)"/>
+<circle cx="40" cy="41" r="19.5" fill="url(#cap)" stroke="#05070a" stroke-width="1"/>
+<path d="M22.5 36 A18 18 0 0 1 57.5 36 Q40 43 22.5 36 Z" fill="url(#capgl)"/>
+<path d="M32.6 33.2 A10.6 10.6 0 1 0 47.4 33.2" fill="none" stroke="#ff3b3b" stroke-opacity="0.35" stroke-width="8" stroke-linecap="round"/>
+<path d="M40 27.5 V40" stroke="#ff3b3b" stroke-opacity="0.35" stroke-width="8" stroke-linecap="round"/>
+<path d="M32.6 33.2 A10.6 10.6 0 1 0 47.4 33.2" fill="none" stroke="url(#red)" stroke-width="4.4" stroke-linecap="round"/>
+<path d="M40 27.5 V40" stroke="url(#red)" stroke-width="4.4" stroke-linecap="round"/>
+<path d="M40 28 V39" stroke="#ffd0d0" stroke-opacity="0.8" stroke-width="1.2" stroke-linecap="round"/>
+<rect x="0.5" y="0.5" width="79" height="79" rx="21.5" fill="none" stroke="#fff" stroke-opacity="0.25"/><rect width="80" height="80" rx="22" fill="none" stroke="#000" stroke-opacity="0.18" stroke-width="0.6"/>
+</svg>

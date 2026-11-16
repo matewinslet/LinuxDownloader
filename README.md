@@ -1,75 +1,79 @@
 # Ferospark LDM
 
-A powerful download manager for Linux — with a Firefox extension, YouTube downloader, automatic file categorization, and video capture from streaming sites.
+A download manager for Linux. It takes over your Firefox downloads, grabs videos from most sites, downloads from YouTube, and sorts everything into folders for you.
 
 ![Platform](https://img.shields.io/badge/platform-Linux-blue)
 ![Python](https://img.shields.io/badge/python-3.10%2B-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
-![Version](https://img.shields.io/badge/version-2.1-green)
+![Version](https://img.shields.io/badge/version-3.0-green)
 
 ---
 
 ## Screenshots
 
-### Main Window
-![Main Window](screenshots/01-main-window.png)
+### Main window
+![Main window](screenshots/01-main-window.png)
 
-### YouTube Downloader
-![YouTube Capture Button](screenshots/02-youtube-page.png)
+### Firefox extension
+![Download button on a video, and the extension popup](screenshots/10-firefox-extension.png)
+
+### YouTube
+![YouTube page](screenshots/02-youtube-page.png)
 
 ![YouTube Downloader](screenshots/07-youtube-downloader.png)
 
-![YouTube Download Complete](screenshots/08-youtube-download-complete.png)
+![YouTube download finished](screenshots/08-youtube-download-complete.png)
 
-### Video Capture from Streaming Sites
+### Videos from other sites
 
 **Facebook**
-![Video Capture — Facebook](screenshots/03-video-capture-facebook.png)
+![Facebook](screenshots/03-video-capture-facebook.png)
 
 **Facebook Gaming**
-![Video Capture — Facebook Gaming](screenshots/04-video-capture-facebook-gaming.png)
+![Facebook Gaming](screenshots/04-video-capture-facebook-gaming.png)
 
 **Instagram**
-![Video Capture — Instagram](screenshots/05-video-capture-instagram.png)
+![Instagram](screenshots/05-video-capture-instagram.png)
 
 **TikTok**
-![Video Capture — TikTok](screenshots/06-video-capture-tiktok.png)
+![TikTok](screenshots/06-video-capture-tiktok.png)
 
-### Stream Downloader
-![Stream Downloader](screenshots/09-stream-downloader.png)
+### Stream downloader
+![Stream downloader](screenshots/09-stream-downloader.png)
 
 ---
 
-## Features
+## What it does
 
-- **Silent download interception** — Firefox downloads are automatically redirected to LDM with no "Cancelled" flash
-- **YouTube Downloader** — download YouTube videos in any quality (Best, 1080p, 720p, 480p, 360p) or audio only (mp3, m4a, flac, wav, ogg, aac)
-- **Video capture** — unlock right-click protection on streaming sites (Facebook, Instagram, TikTok, etc.) and capture video URLs directly
-- **Auto file categorization** — files are automatically sorted into Videos, Music, Documents, Compressed, Programs, Others
-- **Real-time progress** — progress bar, download speed, and file size displayed for every download
-- **Already downloaded detection** — warns you if you try to download the same file again
-- **Right-click context menu** — send any link directly to LDM from Firefox
-- **Toggle interception** — disable automatic interception anytime from the extension popup
-- **Dark / Light theme** — toggle between dark and light mode
-- **Per-category sidebar** — color-coded categories with badge counts
+- **Takes over Firefox downloads.** When you click a download link, the file goes to LDM instead of Firefox.
+- **Download button on videos.** A small Download button shows up in the corner of videos on most sites (Facebook, Instagram, TikTok, Reddit and many more). One click sends the video to LDM.
+- **YouTube.** Pick a quality (Best, 1080p, 720p, 480p, 360p) or save just the audio as mp3, m4a, flac, wav, ogg or aac.
+- **Sorted for you.** Files land in Videos, Music, Documents, Compressed, Programs or Others.
+- **A list you can read at a glance.** Name, size, status, speed and time left for every download, in a layout that will feel familiar if you have used IDM.
+- **Warns about repeats.** If you start a download you already have, LDM tells you first.
+- **Unlocks right-click.** Some sites block right-click to stop you saving things. The extension can switch that back on.
+- **Right-click a link** in Firefox and choose *Download with Linux Manager*.
+- **Pause it anytime.** The power button in the extension popup lets Firefox handle downloads again until you turn it back on.
+- **Light and dark mode.**
+- **Stays in the tray.** Closing the window keeps downloads running.
 
 ---
 
 ## Requirements
 
-- Linux (Ubuntu/Debian based, tested on Zorin OS)
-- Python 3.10+
-- Firefox browser
+- Linux (Ubuntu or Debian based; tested on Zorin OS)
+- Python 3.10 or newer
+- Firefox
 
 ---
 
 ## Installation
 
-### 1. Clone the repository
+### 1. Get the code
 
 ```bash
-git clone https://github.com/matewinslet/linux-downloader.git
-cd linux-downloader
+git clone https://github.com/matewinslet/LinuxDownloader.git
+cd LinuxDownloader
 ```
 
 ### 2. Run the installer
@@ -79,63 +83,61 @@ chmod +x install.sh
 ./install.sh
 ```
 
-The installer will automatically:
-- Install system packages (ffmpeg, curl)
-- Install Python packages (PyQt6, requests, yt-dlp, curl_cffi, pycryptodome)
-- Install Deno (JavaScript runtime required for YouTube)
-- Generate and install app icons
-- Create the desktop entry for your application menu
+The installer sets up everything LDM needs:
+- ffmpeg and curl
+- The Python packages (PyQt6, requests, yt-dlp, curl_cffi, pycryptodome)
+- Deno, which YouTube downloads need
+- The app icon and a menu entry
 
-### 3. Install the Firefox Extension
+### 3. Add the Firefox extension
 
-Install the extension from the Firefox Add-ons store:
+Get it from Firefox Add-ons:
 
 [Ferospark LDM on Firefox Add-ons](https://addons.mozilla.org/en-US/firefox/addon/49cdbb655b5d47a7bce3/)
 
-Or install manually by downloading the `.xpi` file from the [Releases](https://github.com/matewinslet/linux-downloader/releases) page and dragging it into Firefox.
+You can also download the `.xpi` file from the [Releases](https://github.com/matewinslet/LinuxDownloader/releases) page and drag it into Firefox.
 
 ---
 
-## Usage
+## How to use it
 
-### Basic Downloads
-1. Launch **Ferospark LDM** from your application menu
-2. Install the Firefox extension
-3. Click any download link in Firefox — it will automatically be sent to LDM
+### Normal downloads
+1. Open **Ferospark LDM** from your app menu.
+2. Click any download link in Firefox. The file shows up in LDM.
 
-### YouTube Downloads
-1. Open a YouTube video in Firefox
-2. Click the LDM extension icon in the toolbar
-3. Click **Capture YouTube** — the YouTube Downloader dialog will open
-4. Select quality and format, click **Download**
+### Videos
+1. Play or open a video on the site.
+2. Click **Download** in the video's top-right corner.
 
-Or paste a YouTube URL directly into the LDM URL bar and click **Start Download**.
+If you don't want the button on a page, click its **×**. To hide it everywhere, open the extension popup and turn off **Video buttons**.
 
-### Video Capture from Streaming Sites
-1. Navigate to a streaming site (Facebook, Instagram, TikTok, etc.)
-2. Click the LDM extension icon
-3. Click **1. Unlock Right-Click** to remove right-click protection
-4. Right-click the video and copy the video URL
-5. Click **2. Send to LDM** to start the download
+### YouTube
+1. Open a video on YouTube.
+2. Click the **YouTube** button in the corner of the player.
+3. Choose the quality or audio format and click **Download**.
+
+You can also paste a YouTube link into the URL box in LDM and press **Download**.
 
 ---
 
-## Manual Installation (without installer)
+## Installing by hand
+
+If you'd rather not use the installer:
 
 ```bash
 # 1. System packages
 sudo apt install -y ffmpeg curl
 
 # 2. Python packages
-# curl_cffi MUST stay <0.15 (yt-dlp disables browser impersonation on 0.15+)
+# Keep curl_cffi below 0.15: yt-dlp turns off browser impersonation on 0.15 and newer.
 pip install PyQt6 requests yt-dlp "curl_cffi>=0.10,<0.15" pycryptodome --break-system-packages
 
-# 3. Deno (required for YouTube)
+# 3. Deno (for YouTube)
 curl -fsSL https://deno.land/install.sh | sh
 sudo ln -sf ~/.deno/bin/deno /usr/local/bin/deno
 ```
 
-Then make the app executable:
+Then start it:
 
 ```bash
 chmod +x download_manager.py
@@ -147,36 +149,36 @@ python3 download_manager.py
 ## Updating
 
 ```bash
-cd linux-downloader
+cd LinuxDownloader
 git pull
 ```
 
+If YouTube downloads stop working, use **Update yt-dlp** in the YouTube Downloader window.
+
 ---
 
-## Dependencies
+## What it's built on
 
-| Package | Purpose |
-|---------|---------|
-| PyQt6 | GUI framework |
-| requests | HTTP downloads |
-| yt-dlp | YouTube and video downloads |
-| curl_cffi (>=0.10,<0.15) | Browser TLS fingerprinting for impersonation-gated CDNs (e.g. Lulu) |
-| pycryptodome | AES decryption of encrypted HLS streams |
-| ffmpeg | Video/audio processing |
-| curl | Download fallback for complex sites |
-| Deno | JavaScript runtime for YouTube signature solving |
+| Package | Used for |
+|---------|----------|
+| PyQt6 | The app window |
+| requests | Regular downloads |
+| yt-dlp | YouTube and other video sites |
+| curl_cffi (>=0.10,<0.15) | Looking like a real browser to sites that check (Lulu, for example) |
+| pycryptodome | Decrypting encrypted video streams |
+| ffmpeg | Joining video and audio |
+| curl | Backup downloader for difficult sites |
+| Deno | Solving YouTube's player code |
 
 ---
 
 ## Support
 
-Having issues? Contact the developer:
-
-**tpodbcs@gmail.com**
+Something not working? Email **tpodbcs@gmail.com**.
 
 ---
 
 ## License
 
-Licensed under the MIT License — Copyright (c) 2026 Tanjim.
+MIT License. Copyright (c) 2026 Tanjim.
 See [LICENSE.txt](LICENSE.txt) for details.

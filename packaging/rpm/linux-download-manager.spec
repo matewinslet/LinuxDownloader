@@ -1,5 +1,5 @@
 Name:           linux-download-manager
-Version:        2.1.0
+Version:        3.0.0
 Release:        1%{?dist}
 Summary:        Ferospark LDM
 License:        MIT
@@ -76,6 +76,12 @@ gtk-update-icon-cache -f /usr/share/icons/hicolor &>/dev/null || :
 update-desktop-database /usr/share/applications &>/dev/null || :
 
 %changelog
+* Tue Nov 17 2026 Tanjim <tpodbcs@gmail.com> - 3.0.0-1
+- Renamed to Ferospark LDM, with a new icon.
+- New look: IDM-style download list, redrawn icons, menus and tooltips.
+- Select several downloads at once; Clear removes finished ones.
+- Lower idle CPU; fixes for expiring links, pixeldrain and YouTube sizes.
+
 * Fri Sep 25 2026 Tanjim <tpodbcs@gmail.com> - 2.1.0-1
 - Keep running in the system tray; instant Quit; relaunch reopens the window.
 - Open Folder highlights the downloaded file; Close button on finished

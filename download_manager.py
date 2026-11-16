@@ -32,11 +32,11 @@ from PyQt6.QtWidgets import (
     QGraphicsOpacityEffect, QGraphicsDropShadowEffect, QStackedWidget,
     QSystemTrayIcon
 )
-from PyQt6.QtCore import QThread, pyqtSignal, QTimer, Qt, QSize, QRect, QPointF, QRectF
+from PyQt6.QtCore import QThread, pyqtSignal, QTimer, Qt, QSize, QRect, QPoint, QPointF, QRectF, QEvent, QObject
 from PyQt6.QtGui import (
     QIcon, QColor, QFont, QPainter, QAction, QPixmap, QPen,
     QLinearGradient, QRadialGradient, QPalette, QPainterPath, QBrush,
-    QFontDatabase, QFontMetrics
+    QFontDatabase, QFontMetrics, QShortcut, QKeySequence, QRegion
 )
 
 HOME = os.path.expanduser("~")
@@ -171,7 +171,7 @@ CATEGORY_ICON_FILE = {
     "Videos":        "videos_film.svg",     # classic film strip (10/23); old squircle = videos.svg
     "Music":         "music.svg",
     "Documents":     "documents.svg",
-    "Compressed":    "compressed_books.svg",  # WinRAR-style books + belt (10/23); old = compressed.svg
+    "Compressed":    "compressed_zip.svg",    # zipped folder (11/15); old = compressed_books.svg (WinRAR-style books), compressed.svg
     "Programs":      "programs.svg",
     "Others":        "others.svg",
 }
@@ -6607,17 +6607,591 @@ class CoreDownloaderDialog(DownloaderDialogBase):
 
 
 # ── Variant C sidebar hero card ──────────────────────────────────────────────
+class StatusSwitch(QWidget):
+    """All | Unfinished | Finished switch between the search box and the URL field
+    (11/17, IDM's Unfinished / Finished folders as a three-way switch). Framed like the
+    fields; the chosen segment is a glossy blue capsule. Emits changed(index)."""
+    changed = pyqtSignal(int)
+    LABELS = ("All", "Unfinished", "Finished")
+    H = 36
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._index = 0
+        self._counts = [0, 0, 0]
+        self._dark = False
+        self._hover = -1
+        self._f_label = QFont("Segoe UI"); self._f_label.setPixelSize(13); self._f_label.setWeight(QFont.Weight.Medium)
+        self._f_count = QFont("Segoe UI"); self._f_count.setPixelSize(12); self._f_count.setWeight(QFont.Weight.DemiBold)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setMouseTracking(True)
+        self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        self.setToolTip("Show\nAll downloads, only unfinished ones, or only finished ones")
+        self._relayout()
+
+    def index(self):
+        return self._index
+
+    def set_index(self, i):
+        if i != self._index and 0 <= i < 3:
+            self._index = i
+            self.update()
+            self.changed.emit(i)
+
+    def set_counts(self, total, unfinished, finished):
+        new = [total, unfinished, finished]
+        if new != self._counts:
+            self._counts = new
+            self._relayout()
+
+    def set_dark(self, dark):
+        self._dark = bool(dark)
+        self.update()
+
+    def _relayout(self):
+        fl, fc = QFontMetrics(self._f_label), QFontMetrics(self._f_count)
+        self._cells = []
+        x = 3
+        for lab, n in zip(self.LABELS, self._counts):
+            w = fl.horizontalAdvance(lab) + 6 + fc.horizontalAdvance(str(n)) + 30
+            self._cells.append((x, w))
+            x += w
+        self.setFixedSize(x + 3, self.H)
+        self.update()
+
+    def _cell_at(self, x):
+        for i, (cx, w) in enumerate(self._cells):
+            if cx <= x < cx + w:
+                return i
+        return -1
+
+    def mouseMoveEvent(self, e):
+        h = self._cell_at(e.position().x())
+        if h != self._hover:
+            self._hover = h
+            self.update()
+
+    def leaveEvent(self, e):
+        self._hover = -1
+        self.update()
+
+    def mousePressEvent(self, e):
+        if e.button() == Qt.MouseButton.LeftButton:
+            i = self._cell_at(e.position().x())
+            if i >= 0:
+                self.set_index(i)
+
+    def paintEvent(self, _event):
+        d = self._dark
+        p = QPainter(self)
+        p.setRenderHints(QPainter.RenderHint.Antialiasing | QPainter.RenderHint.TextAntialiasing)
+        AL = Qt.AlignmentFlag
+
+        def rr(r, rad):
+            pa = QPainterPath(); pa.addRoundedRect(r, rad, rad); return pa
+
+        def vg(top, bot, *stops):
+            g = QLinearGradient(0, top, 0, bot)
+            for o, c in stops:
+                g.setColorAt(o, QColor(c))
+            return QBrush(g)
+        fr = QRectF(1, 1, self.width() - 2, self.height() - 2)
+        p.setPen(QPen(QColor("#475a78" if d else "#a3afbf"), 2))
+        p.setBrush(vg(0, self.height(), (0, "#243044" if d else "#ffffff"), (1, "#1b2536" if d else "#eef2f7")))
+        p.drawPath(rr(fr, 10))
+        fl, fc = QFontMetrics(self._f_label), QFontMetrics(self._f_count)
+        for i, (x, w) in enumerate(self._cells):
+            sel = (i == self._index)
+            cell = QRectF(x, 0, w, self.height())
+            if sel:
+                cap = cell.adjusted(1, 4, -1, -4)
+                p.setPen(QPen(QColor("#145a97"), 1))
+                p.setBrush(vg(cap.top(), cap.bottom(), (0, "#8fd3fa"), (.5, "#2b8fdd"), (1, "#1766ab")))
+                p.drawPath(rr(cap, 7))
+                p.fillPath(rr(QRectF(cap.left() + 3, cap.top() + 2, cap.width() - 6, cap.height() * .4), 5),
+                           QColor(255, 255, 255, 70))
+            elif i == self._hover:
+                p.fillPath(rr(cell.adjusted(1, 4, -1, -4), 7), QColor(92, 184, 242, 40) if d else QColor(43, 143, 221, 26))
+            if i > 0 and not sel and (i - 1) != self._index:
+                p.setPen(QPen(QColor("#3b4b66" if d else "#d5dbe4"), 1))
+                p.drawLine(QPointF(x + .5, 9), QPointF(x + .5, self.height() - 9))
+            lab, n = self.LABELS[i], str(self._counts[i])
+            lw, nw = fl.horizontalAdvance(lab), fc.horizontalAdvance(n)
+            tx = x + (w - lw - 6 - nw) / 2
+            # Label and count share ONE baseline (centring each font's own box put the
+            # smaller count visibly lower than the label).
+            base_y = (self.height() + fl.ascent() - fl.descent()) / 2.0
+            p.setFont(self._f_label)
+            p.setPen(QColor("#ffffff") if sel else QColor("#e2e8f0" if d else "#0f172a"))
+            p.drawText(QPointF(tx, base_y), lab)
+            p.setFont(self._f_count)
+            p.setPen(QColor("#dbeeff") if sel else QColor("#94a3b8"))
+            p.drawText(QPointF(tx + lw + 6, base_y), n)
+        p.end()
+
+
+class GlassPane(QWidget):
+    """Background pane of the "blue glass" look (11/17): a soft vertical gradient with
+    painted drop shadows under the widgets registered via add_card(), so every widget
+    reads as its own card. kind="side" also draws the divider on its right edge.
+    Shadows are painted here (only when the pane repaints) instead of using
+    QGraphicsDropShadowEffect, which re-renders the whole child on every update."""
+    COLORS = {            # (top, bottom, divider, divider highlight)
+        ("page", False): ("#dce8f6", "#c9d8ea", None, None),
+        ("page", True):  ("#101a2c", "#0b1220", None, None),
+        ("side", False): ("#eef4fb", "#dfe9f5", "#9db1c9", "#ffffff"),
+        ("side", True):  ("#1c2638", "#141c2b", "#2c3a52", None),
+        # 11/17: Tj kept the glass look for the right pane only; the sidebar is flat again
+        ("plain", False): ("#ffffff", "#ffffff", None, None),
+        ("plain", True):  ("#1e293b", "#1e293b", None, None),
+        # 11/17 sidebar pick "tint + glass details": lighter than the page, no cards
+        ("tint", False): ("#f6f9fd", "#e8f0f9", "#9db1c9", "#ffffff"),
+        ("tint", True):  ("#1c2638", "#141c2b", "#2c3a52", None),
+    }
+
+    def __init__(self, kind="page", parent=None):
+        super().__init__(parent)
+        self._kind = kind
+        self._dark = False
+        self._cards = []          # (widget, radius, strength)
+
+    def add_card(self, widget, radius, strength=7):
+        self._cards.append((widget, radius, strength))
+        widget.installEventFilter(self)
+
+    def eventFilter(self, obj, ev):
+        # A card moved / resized / appeared: its painted shadow is in the old place.
+        # Qt only repaints the area the card itself uncovers, which left stale shadow
+        # patches (e.g. beside the status switch when its counts changed its width).
+        if ev.type() in (QEvent.Type.Move, QEvent.Type.Resize, QEvent.Type.Show, QEvent.Type.Hide):
+            self.update()
+        return False
+
+    def set_dark(self, dark):
+        self._dark = bool(dark)
+        self.update()
+
+    def color_at(self, y):
+        """Background colour at pane y (used by the list frame for its corner slivers)."""
+        top, bot = (QColor(c) for c in self.COLORS[(self._kind, self._dark)][:2])
+        f = min(1.0, max(0.0, y / max(1, self.height())))
+        return QColor(round(top.red() + (bot.red() - top.red()) * f),
+                      round(top.green() + (bot.green() - top.green()) * f),
+                      round(top.blue() + (bot.blue() - top.blue()) * f))
+
+    def paintEvent(self, _event):
+        top, bot, div, div_hl = self.COLORS[(self._kind, self._dark)]
+        p = QPainter(self)
+        g = QLinearGradient(0, 0, 0, self.height())
+        g.setColorAt(0, QColor(top)); g.setColorAt(1, QColor(bot))
+        p.fillRect(self.rect(), QBrush(g))
+        if div:
+            x = self.width() - 0.5
+            if div_hl:
+                p.setPen(QPen(QColor(div_hl), 1)); p.drawLine(QPointF(x - 1, 0), QPointF(x - 1, self.height()))
+            p.setPen(QPen(QColor(div), 1)); p.drawLine(QPointF(x, 0), QPointF(x, self.height()))
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        for w, rad, strength in self._cards:
+            if not w.isVisibleTo(self):
+                continue
+            r = QRectF(QRect(w.mapTo(self, QPoint(0, 0)), w.size()))
+            alpha = strength + (5 if self._dark else 0)
+            for i in range(7, 0, -1):
+                pa = QPainterPath()
+                pa.addRoundedRect(r.adjusted(-i + 1, -i + 3, i - 1, i + 1), rad + i, rad + i)
+                p.fillPath(pa, QColor(8, 20, 45, alpha))
+        p.end()
+
+
+class ListFrameOverlay(QWidget):
+    """Draws the download list's frame ON TOP of the table (11/14): a visible 1px border
+    with four rounded corners. The table's viewport/header/scrollbar are square, so the
+    overlay also fills the four corner slivers outside the rounded rect with the page
+    colour. Mouse-transparent; follows the table's size via an event filter."""
+
+    RADIUS = 10
+
+    def __init__(self, table):
+        super().__init__(table)
+        self._table = table
+        self._page = QColor("#f4f7fb")
+        self._edge = QColor("#b4bfcd")
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
+        table.installEventFilter(self)
+        # The scrollbars live in container widgets that Qt shows/raises whenever a bar
+        # appears; watch them too, or they end up stacked above the frame and hide it.
+        self._watched = [table]
+        for bar in (table.verticalScrollBar(), table.horizontalScrollBar()):
+            for w in (bar, bar.parentWidget()):
+                if w is not None and w is not table and w not in self._watched:
+                    w.installEventFilter(self)
+                    self._watched.append(w)
+        self.setGeometry(table.rect())
+        self.show()
+        self.raise_()
+        QTimer.singleShot(0, self._sync)
+
+    def _sync(self):
+        self.setGeometry(self._table.rect())
+        self.raise_()
+        self._queue_backdrop()
+
+    # The corner slivers must show exactly what is behind the list (page gradient AND
+    # the list's own painted shadow) — a flat page colour left light notches in the
+    # shadow. So copy those pixels from the GlassPane whenever the geometry changes.
+    def set_backdrop(self, pane):
+        self._pane = pane
+        self._queue_backdrop()
+
+    def _queue_backdrop(self):
+        if getattr(self, "_pane", None) is not None and not getattr(self, "_backdrop_pending", False):
+            self._backdrop_pending = True
+            QTimer.singleShot(0, self._refresh_backdrop)
+
+    def _refresh_backdrop(self):
+        self._backdrop_pending = False
+        pane = getattr(self, "_pane", None)
+        if pane is None or self.width() <= 0 or self.height() <= 0 or not self._table.isVisibleTo(pane):
+            return
+        dpr = self.devicePixelRatioF()
+        pm = QPixmap(int(self.width() * dpr), int(self.height() * dpr))
+        pm.setDevicePixelRatio(dpr)
+        pm.fill(QColor(0, 0, 0, 0))
+        src = QRect(self._table.mapTo(pane, QPoint(0, 0)), self.size())
+        pane.render(pm, QPoint(0, 0), QRegion(src), QWidget.RenderFlag.DrawWindowBackground)
+        self._backdrop = pm
+        self.update()
+
+    def set_colors(self, page, edge, page_bottom=None):
+        self._page, self._edge = QColor(page), QColor(edge)
+        self._page_bottom = QColor(page_bottom) if page_bottom is not None else QColor(page)
+        self._queue_backdrop()
+        self.update()
+
+    def eventFilter(self, obj, ev):
+        if ev.type() in (QEvent.Type.Resize, QEvent.Type.Show, QEvent.Type.ZOrderChange):
+            if obj is self._table:
+                self._sync()
+            else:
+                QTimer.singleShot(0, self._sync)   # after Qt has finished raising the bar
+        return False
+
+    def paintEvent(self, _event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        full = QPainterPath()
+        full.addRect(QRectF(self.rect()))
+        inner = QPainterPath()
+        inner.addRoundedRect(QRectF(self.rect()), self.RADIUS, self.RADIUS)
+        # Cover up to the MIDDLE of the border line: stopping at its outer edge left a
+        # ring of half-covered pixels where the white table showed through (light smudge
+        # on the corners only). The border is stroked on top and hides the seam.
+        cover = QPainterPath()
+        cover.addRoundedRect(QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5),
+                             self.RADIUS - 0.5, self.RADIUS - 0.5)
+        slivers = full.subtracted(cover)
+        backdrop = getattr(self, "_backdrop", None)
+        if backdrop is not None and backdrop.size() == self.size() * self.devicePixelRatioF():
+            p.save(); p.setClipPath(slivers); p.drawPixmap(0, 0, backdrop); p.restore()
+        else:
+            half = QPainterPath(); half.addRect(QRectF(0, 0, self.width(), self.height() / 2))
+            p.fillPath(slivers.intersected(half), self._page)
+            p.fillPath(slivers.subtracted(half), getattr(self, "_page_bottom", self._page))
+        p.setPen(QPen(self._edge, 1))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawRoundedRect(QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5),
+                          self.RADIUS - 0.5, self.RADIUS - 0.5)
+        p.end()
+
+
+def _field_glyph_paint(p, kind, cx, cy):
+    """Paint one small skeuomorphic field glyph centred on (cx, cy), ~18 px box."""
+    def pen(c, w):
+        q = QPen(QColor(c), w)
+        q.setCapStyle(Qt.PenCapStyle.RoundCap)
+        q.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        return q
+    if kind == "search":
+        p.setPen(pen("#3b2a1a", 4.2)); p.drawLine(QPointF(cx + 3.2, cy + 3.2), QPointF(cx + 7.4, cy + 7.4))
+        p.setPen(pen("#b9793a", 2.4)); p.drawLine(QPointF(cx + 3.6, cy + 3.6), QPointF(cx + 7.2, cy + 7.2))
+        g = QRadialGradient(cx - 3, cy - 3.5, 8)
+        g.setColorAt(0, QColor("#ffffff")); g.setColorAt(0.6, QColor("#bfe6fb")); g.setColorAt(1, QColor("#6fb9e6"))
+        p.setPen(pen("#5b6676", 1.8)); p.setBrush(QBrush(g)); p.drawEllipse(QPointF(cx - 1.5, cy - 1.5), 5.6, 5.6)
+        p.setPen(pen("#ffffff", 1.2)); p.setBrush(Qt.BrushStyle.NoBrush); p.drawArc(QRectF(cx - 5, cy - 5, 6, 6), 100 * 16, 70 * 16)
+    elif kind == "globe":
+        r = 7.6
+        g = QRadialGradient(cx - 2.6, cy - 3, r * 1.7)
+        g.setColorAt(0, QColor("#c9ecff")); g.setColorAt(0.45, QColor("#3ba3ea")); g.setColorAt(1, QColor("#0f4f96"))
+        p.setPen(pen("#0c3f78", 1.1)); p.setBrush(QBrush(g)); p.drawEllipse(QPointF(cx, cy), r, r)
+        p.setPen(pen("#eaf6ff", 0.9)); p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawEllipse(QPointF(cx, cy), r * 0.45, r - 0.6)
+        p.drawLine(QPointF(cx - r + 0.8, cy), QPointF(cx + r - 0.8, cy))
+        p.drawArc(QRectF(cx - r * 0.86, cy - r * 0.95, r * 1.72, r * 0.9), 200 * 16, 140 * 16)
+        p.drawArc(QRectF(cx - r * 0.86, cy + r * 0.05, r * 1.72, r * 0.9), 20 * 16, 140 * 16)
+        p.setPen(Qt.PenStyle.NoPen); p.setBrush(QColor(255, 255, 255, 110))
+        p.drawEllipse(QPointF(cx - 2.4, cy - 3.6), 2.8, 1.5)
+    elif kind == "chain":
+        # Two plain, thick oval links along one diagonal; no inner outline (it turned
+        # jagged at 16 px). Left link is darker and crosses over the right one once.
+        def _link(dx, colour):
+            p.save(); p.translate(cx, cy); p.rotate(-38); p.translate(dx, 0)
+            p.setPen(pen(colour, 2.7)); p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawRoundedRect(QRectF(-5.6, -3.3, 11.2, 6.6), 3.3, 3.3)
+            p.restore()
+        _link(3.7, "#8b97a8")
+        _link(-3.7, "#4b596d")
+        p.save(); p.translate(cx, cy); p.rotate(-38); p.translate(3.7, 0)
+        p.setPen(pen("#8b97a8", 2.7)); p.drawLine(QPointF(-4.2, 3.3), QPointF(-1.2, 3.3))
+        p.restore()
+    elif kind == "window":
+        r = QRectF(cx - 8, cy - 6.5, 16, 13)
+        path = QPainterPath(); path.addRoundedRect(r, 2.2, 2.2)
+        p.setPen(pen("#1e3a8a", 1.1)); p.setBrush(QColor("#ffffff")); p.drawPath(path)
+        g = QLinearGradient(0, r.top(), 0, r.top() + 4.5); g.setColorAt(0, QColor("#7db7fb")); g.setColorAt(1, QColor("#1d4ed8"))
+        bar = QPainterPath(); bar.addRoundedRect(QRectF(r.left() + 0.6, r.top() + 0.6, r.width() - 1.2, 4.2), 1.6, 1.6)
+        p.setPen(Qt.PenStyle.NoPen); p.setBrush(QBrush(g)); p.drawPath(bar)
+        p.setBrush(QColor("#e8eef6")); p.drawRoundedRect(QRectF(r.left() + 2, r.top() + 6.4, r.width() - 4, 2.6), 1.2, 1.2)
+        p.setBrush(QColor("#94a3b8")); p.drawRect(QRectF(r.left() + 2, r.top() + 10, 8, 1.1))
+    elif kind == "clear":
+        g = QLinearGradient(0, cy - 7, 0, cy + 7); g.setColorAt(0, QColor("#cbd5e1")); g.setColorAt(1, QColor("#8492a6"))
+        p.setPen(Qt.PenStyle.NoPen); p.setBrush(QBrush(g)); p.drawEllipse(QPointF(cx, cy), 7, 7)
+        p.setPen(pen("#ffffff", 1.7))
+        p.drawLine(QPointF(cx - 2.6, cy - 2.6), QPointF(cx + 2.6, cy + 2.6))
+        p.drawLine(QPointF(cx + 2.6, cy - 2.6), QPointF(cx - 2.6, cy + 2.6))
+
+
+def _field_glyph_icon(kind, box=20, size=16):
+    """QIcon of a field glyph. QLineEdit draws action icons at 16 px, so render exactly
+    16 px (and a 32 px @2x) straight from the vector paint code — letting Qt shrink a
+    big pixmap made the thin strokes jagged."""
+    icon = QIcon()
+    for dpr in (1, 2):
+        pm = QPixmap(size * dpr, size * dpr)
+        pm.fill(QColor(0, 0, 0, 0))
+        p = QPainter(pm)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        p.scale(size * dpr / box, size * dpr / box)
+        _field_glyph_paint(p, kind, box / 2.0, box / 2.0)
+        p.end()
+        pm.setDevicePixelRatio(dpr)
+        icon.addPixmap(pm)
+    return icon
+
+
+URL_FIELD_GLYPH = "chain"      # "globe" | "chain" | "window"  (11/15: Tj disliked the paperclip-like link)
+
+
+class UrlActionButton(QPushButton):
+    """Glossy rounded-rectangle button inside the URL field: grey "Paste" while the field is empty,
+    green "Download" once it holds text. Keeps itself pinned to the field's right edge."""
+
+    def __init__(self, field):
+        super().__init__(field)
+        self._field = field
+        self._mode = "paste"
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        field.installEventFilter(self)
+        field.textChanged.connect(self._sync)
+        self._sync()
+
+    def mode(self):
+        return self._mode
+
+    def _sync(self, *_):
+        self._mode = "download" if self._field.text().strip() else "paste"
+        w = 84 if self._mode == "download" else 70
+        h = max(18, self._field.height() - 10)
+        self.setFixedSize(w, h)
+        self.move(self._field.width() - w - 5, (self._field.height() - h) // 2)
+        self._field.setTextMargins(0, 0, w + 6, 0)
+        self.setToolTip("Start downloading this link" if self._mode == "download"
+                        else "Paste the link from the clipboard")
+        self.update()
+
+    def eventFilter(self, obj, ev):
+        if obj is self._field and ev.type() in (QEvent.Type.Resize, QEvent.Type.Show):
+            self._sync()
+        return False
+
+    def enterEvent(self, ev):
+        self.update()
+        super().enterEvent(ev)
+
+    def leaveEvent(self, ev):
+        self.update()
+        super().leaveEvent(ev)
+
+    def paintEvent(self, _event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        p.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+        light, base = ("#86efac", "#16a34a") if self._mode == "download" else ("#e2e8f0", "#8492a6")
+        base_c = QColor(base)
+        if self.isDown():
+            light, base_c = base, base_c.darker(115)
+        elif self.underMouse():
+            light, base_c = QColor(light).lighter(108).name(), base_c.lighter(110)
+        r = QRectF(0, 0, self.width(), self.height())
+        rad = 7.0          # rounded rectangle (11/17), same rounding as the status switch segment
+        body = QPainterPath()
+        body.addRoundedRect(r, rad, rad)
+        g = QLinearGradient(0, 0, 0, r.height())
+        g.setColorAt(0, QColor(light)); g.setColorAt(0.5, base_c); g.setColorAt(1, base_c.darker(125))
+        p.fillPath(body, QBrush(g))
+        gloss = QPainterPath()
+        gloss.addRoundedRect(QRectF(2, 1.5, r.width() - 4, r.height() * 0.42), rad, rad)
+        p.fillPath(gloss, QColor(255, 255, 255, 85))
+        p.setPen(QPen(base_c.darker(150), 1))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        edge = QPainterPath()
+        edge.addRoundedRect(r.adjusted(0.5, 0.5, -0.5, -0.5), rad, rad)
+        p.drawPath(edge)
+        f = QFont(IDM_FONT_FAMILY); f.setPixelSize(12); f.setWeight(QFont.Weight.DemiBold)
+        p.setFont(f)
+        label = "Download" if self._mode == "download" else "Paste"
+        al = int(Qt.AlignmentFlag.AlignCenter)
+        p.setPen(QColor(0, 0, 0, 70)); p.drawText(r.translated(0, 0.8), al, label)
+        p.setPen(QColor("#ffffff")); p.drawText(r, al, label)
+        p.end()
+
+
+class FooterBar(QWidget):
+    """Footer under the download list (11/14 "framed bar"): bordered rounded strip that
+    matches the list frame, with glossy status dots + counts painted on the left
+    (downloading / completed / missing / total). The speed/ETA chip is a normal child
+    widget laid out on the right."""
+
+    _BLUE = ("#8fd3fa", "#1d7fd1")
+    _GREEN = ("#86efac", "#16a34a")
+    _RED = ("#fca5a5", "#dc2626")
+    _GREY = ("#cbd5e1", "#64748b")
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.dark = False
+        self._counts = None      # (active, completed, missing, total)
+        self.setFixedHeight(28)
+
+    def set_dark(self, dark):
+        self.dark = dark
+        self.update()
+
+    def set_counts(self, active, completed, missing, total):
+        counts = (active, completed, missing, total)
+        if counts != self._counts:
+            self._counts = counts
+            self.update()
+
+    @staticmethod
+    def _font(px, weight=QFont.Weight.Normal):
+        f = QFont(IDM_FONT_FAMILY)
+        f.setPixelSize(px)
+        f.setWeight(weight)
+        return f
+
+    @staticmethod
+    def _ball(p, cx, cy, r, light, base, glyph):
+        g = QRadialGradient(cx - r * 0.3, cy - r * 0.4, r * 1.5)
+        g.setColorAt(0, QColor(light))
+        g.setColorAt(1, QColor(base))
+        p.setPen(QPen(QColor(base).darker(130), 1))
+        p.setBrush(QBrush(g))
+        p.drawEllipse(QPointF(cx, cy), r, r)
+        pen = QPen(QColor("#ffffff"), 1.7)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        p.setPen(pen)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        if glyph == "tick":
+            p.drawPolyline([QPointF(cx - 3.2, cy + 0.2), QPointF(cx - 0.9, cy + 2.6), QPointF(cx + 3.3, cy - 2.4)])
+        elif glyph == "down":
+            p.drawLine(QPointF(cx, cy - 3.2), QPointF(cx, cy + 2.6))
+            p.drawPolyline([QPointF(cx - 2.8, cy), QPointF(cx, cy + 3), QPointF(cx + 2.8, cy)])
+        elif glyph == "bang":
+            p.drawLine(QPointF(cx, cy - 3.2), QPointF(cx, cy + 0.6))
+            p.drawPoint(QPointF(cx, cy + 3.2))
+        else:
+            for dy in (-2.6, 0, 2.6):
+                p.drawLine(QPointF(cx - 2.8, cy + dy), QPointF(cx + 2.8, cy + dy))
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor(255, 255, 255, 90))
+        p.drawEllipse(QPointF(cx - r * 0.25, cy - r * 0.45), r * 0.5, r * 0.28)
+
+    def paintEvent(self, _event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        p.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+        w, h = self.width(), self.height()
+        r = QRectF(0.5, 0.5, w - 1, h - 1)
+        path = QPainterPath()
+        path.addRoundedRect(r, 9, 9)
+        g = QLinearGradient(0, 0, 0, h)
+        g.setColorAt(0, QColor("#1e293b" if self.dark else "#ffffff"))
+        g.setColorAt(1, QColor("#182235" if self.dark else "#f1f5f9"))
+        p.fillPath(path, QBrush(g))
+        p.setPen(QPen(QColor("#3b4b66" if self.dark else "#b4bfcd"), 1))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawPath(path)
+
+        text = QColor("#e2e8f0" if self.dark else "#0f172a")
+        muted = QColor("#94a3b8" if self.dark else "#64748b")
+        sep = QColor("#334155" if self.dark else "#d5dbe4")
+        num_font = self._font(12, QFont.Weight.DemiBold)
+        lab_font = self._font(12)
+        base_y = h / 2.0 + 4.5
+        x = 14.0
+        if self._counts is None:
+            p.setFont(lab_font)
+            p.setPen(muted)
+            p.drawText(QPointF(x, base_y), "Ready")
+            p.end()
+            return
+        active, completed, missing, total = self._counts
+        items = []
+        if active:
+            items.append((self._BLUE, "down", active, "downloading"))
+        items.append((self._GREEN, "tick", completed, "completed"))
+        if missing:
+            items.append((self._RED, "bang", missing, "missing"))
+        items.append((self._GREY, "list", total, "total"))
+        for i, (col, glyph, n, label) in enumerate(items):
+            if i:
+                p.setPen(QPen(sep, 1))
+                p.drawLine(QPointF(x, 7), QPointF(x, h - 7))
+                x += 12
+            self._ball(p, x + 7, h / 2.0, 6.5, col[0], col[1], glyph)
+            x += 19
+            num = str(n)
+            p.setFont(num_font)
+            p.setPen(text)
+            p.drawText(QPointF(x, base_y), num)
+            x += QFontMetrics(num_font).horizontalAdvance(num) + 4
+            p.setFont(lab_font)
+            p.setPen(muted)
+            p.drawText(QPointF(x, base_y), label)
+            x += QFontMetrics(lab_font).horizontalAdvance(label) + 12
+        p.end()
+
+
 class StorageDriveTile(QWidget):
-    """Sidebar storage widget in the Windows 7 "Computer" drive-tile style:
-    drive icon, name, glossy usage bar (blue; red under 10% free), "X GB free of Y GB"."""
+    """Sidebar storage widget (11/14 layout, Tj's sketch): 3D drive on the left; beside it
+    one left-aligned column: "Drive Storage", glass usage bar, "X GB free of Y GB".
+    Bar is blue, amber under 25% free, red under 10% free; the drive LED follows."""
 
     LOW_FREE = 0.10
+    WARN_FREE = 0.25
+    PAD = 12          # inner padding of the card on every side
+    ICON_W, ICON_H = 46, 35
+    BAR_H = 15
+    HEIGHT = 82
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.dark = False
         self.used = self.total = self.free = 0.0
-        self.setFixedHeight(12 + 18 + 8 + 30 + 2 + 16 + 10)   # pad, title, gap, glyph/bar row, gap, text, pad
+        self.setFixedHeight(self.HEIGHT)
 
     def set_usage(self, used_gb, total_gb, free_gb):
         self.used, self.total, self.free = used_gb, total_gb, free_gb
@@ -6637,25 +7211,77 @@ class StorageDriveTile(QWidget):
         f.setWeight(weight)
         return f
 
-    def _paint_drive_icon(self, p, x, y, s):
-        body = QRectF(x, y + s * 0.2, s, s * 0.6)
-        g = QLinearGradient(0, body.top(), 0, body.bottom())
-        g.setColorAt(0, QColor("#f3f4f6"))
-        g.setColorAt(1, QColor("#9ca3af"))
-        path = QPainterPath()
-        path.addRoundedRect(body, 3, 3)
-        p.fillPath(path, QBrush(g))
-        p.setPen(QPen(QColor("#6b7280"), 1))
-        p.setBrush(Qt.BrushStyle.NoBrush)
-        p.drawPath(path)
-        p.fillRect(QRectF(x + 3, y + s * 0.55, s - 6, 1.2), QColor("#6b7280"))
-        p.setPen(Qt.PenStyle.NoPen)
-        p.setBrush(QColor("#22c55e"))
-        p.drawEllipse(QPointF(x + s - 6, y + s * 0.66), 1.8, 1.8)
+    @staticmethod
+    def _vgrad(top, bottom, *stops):
+        g = QLinearGradient(0, top, 0, bottom)
+        for off, col in stops:
+            g.setColorAt(off, QColor(col))
+        return QBrush(g)
 
-    PAD = 12          # inner padding of the card on every side
-    ICON = 30         # drive glyph, centred on the bar
-    BAR_H = 14
+    def _state_colors(self):
+        """(base, light) bar colours for the current free fraction."""
+        frac_free = (self.free / self.total) if self.total else 1.0
+        if frac_free < self.LOW_FREE:
+            return "#dc2626", "#f87171"
+        if frac_free < self.WARN_FREE:
+            return "#d97706", "#fbbf24"
+        return "#1d7fd1", "#5cc0f5"
+
+    def _paint_drive_icon(self, p, x, y, w, h, led):
+        """Brushed-metal external drive, 3/4 front view, with a status LED."""
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor(0, 0, 0, 40))
+        p.drawRoundedRect(QRectF(x + 1, y + h - 3, w - 2, 5), 2.5, 2.5)
+        top = QPainterPath()
+        top.moveTo(x + w * 0.12, y)
+        top.lineTo(x + w * 0.88, y)
+        top.lineTo(x + w, y + h * 0.42)
+        top.lineTo(x, y + h * 0.42)
+        top.closeSubpath()
+        p.fillPath(top, self._vgrad(y, y + h * 0.42, (0, "#f8fafc"), (1, "#cbd5e1")))
+        p.setPen(QPen(QColor("#64748b"), 1))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawPath(top)
+        front = QPainterPath()
+        front.addRoundedRect(QRectF(x, y + h * 0.42, w, h * 0.52), 2.5, 2.5)
+        p.fillPath(front, self._vgrad(y + h * 0.42, y + h * 0.94,
+                                      (0, "#e5e7eb"), (0.5, "#b6bec9"), (1, "#8b95a3")))
+        p.drawPath(front)
+        p.setPen(QPen(QColor(255, 255, 255, 170), 1))
+        p.drawLine(QPointF(x + 2, y + h * 0.42 + 1.5), QPointF(x + w - 2, y + h * 0.42 + 1.5))
+        p.setPen(QPen(QColor("#5b6472"), 1))
+        for i in range(4):
+            p.drawLine(QPointF(x + 5 + i * 3, y + h * 0.6), QPointF(x + 5 + i * 3, y + h * 0.8))
+        c = QColor(led)
+        cx, cy = x + w - 7, y + h * 0.7
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor(c.red(), c.green(), c.blue(), 70))
+        p.drawEllipse(QPointF(cx, cy), 4, 4)
+        p.setBrush(c)
+        p.drawEllipse(QPointF(cx, cy), 2.2, 2.2)
+        p.setBrush(QColor(255, 255, 255, 200))
+        p.drawEllipse(QPointF(cx - 0.6, cy - 0.7), 0.8, 0.8)
+
+    def _paint_bar(self, p, r, frac, base, light):
+        rad = 3
+        track = QPainterPath()
+        track.addRoundedRect(r, rad, rad)
+        p.fillPath(track, self._vgrad(r.top(), r.bottom(),
+                                      (0, "#1e293b" if self.dark else "#cfd6df"),
+                                      (1, "#334155" if self.dark else "#f1f5f9")))
+        if frac > 0:
+            fw = max(r.height(), (r.width() - 2) * min(1.0, frac))
+            f = QRectF(r.left() + 1, r.top() + 1, fw, r.height() - 2)
+            fill = QPainterPath()
+            fill.addRoundedRect(f, rad - 1, rad - 1)
+            p.fillPath(fill, self._vgrad(f.top(), f.bottom(), (0, light), (0.5, base),
+                                         (1, QColor(base).darker(125).name())))
+            gloss = QPainterPath()
+            gloss.addRoundedRect(QRectF(f.left() + 2, f.top() + 1, f.width() - 4, f.height() * 0.38), rad, rad)
+            p.fillPath(gloss, QColor(255, 255, 255, 95))
+        p.setPen(QPen(QColor("#64748b" if self.dark else "#8a94a3"), 1))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawPath(track)
 
     def paintEvent(self, _event):
         p = QPainter(self)
@@ -6663,66 +7289,42 @@ class StorageDriveTile(QWidget):
         p.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
         text = QColor("#e2e8f0" if self.dark else "#0f172a")
         muted = QColor("#94a3b8" if self.dark else "#64748b")
-        track = QColor("#334155" if self.dark else "#e5e7eb")
-        edge = QColor("#64748b" if self.dark else "#8a8a8a")
+        h = self.height()
 
         # Own card, so it reads as a separate compartment from the category list
-        card = QRectF(0.5, 0.5, self.width() - 1, self.height() - 1)
+        card = QRectF(0.5, 0.5, self.width() - 1, h - 1)
         card_path = QPainterPath()
         card_path.addRoundedRect(card, 12, 12)
         if self.dark:
-            p.fillPath(card_path, QColor(255, 255, 255, 10))
-            p.setPen(QPen(QColor(255, 255, 255, 22), 1))
+            p.fillPath(card_path, self._vgrad(0, h, (0, "#2a3850"), (1, "#1a2434")))
+            p.setPen(QPen(QColor("#34435c"), 1))
         else:
-            g = QLinearGradient(0, 0, 0, self.height())
-            g.setColorAt(0, QColor("#ffffff"))
-            g.setColorAt(1, QColor("#f1f5f9"))
-            p.fillPath(card_path, QBrush(g))
-            p.setPen(QPen(QColor("#e2e8f0"), 1))
+            p.fillPath(card_path, self._vgrad(0, h, (0, "#ffffff"), (1, "#e3ecf6")))
+            p.setPen(QPen(QColor("#9db1c9"), 1))
         p.setBrush(Qt.BrushStyle.NoBrush)
         p.drawPath(card_path)
 
+        base, light = self._state_colors()
+        frac_free = (self.free / self.total) if self.total else 1.0
+        led = base if frac_free < self.WARN_FREE else "#22c55e"
         pad = self.PAD
-        inner_w = self.width() - 2 * pad
 
-        # Row 1 — title
-        title_h = 18
+        # Drive on the left, centred against the whole text/bar column
+        self._paint_drive_icon(p, pad, (h - self.ICON_H) / 2.0 - 1, self.ICON_W, self.ICON_H, led)
+
+        # One column: title / bar / free-of-total, all sharing the same left edge
+        left = pad + self.ICON_W + 12
+        width = max(0.0, self.width() - pad - left)
+        align = int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         p.setFont(self._font(12, QFont.Weight.DemiBold))
         p.setPen(text)
-        p.drawText(QRectF(pad, pad, inner_w, title_h),
-                   int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter), "Drive Storage")
-
-        # Row 2 — drive glyph and bar share one centre line
-        row_top = pad + title_h + 8
-        row_h = max(self.ICON, self.BAR_H)
-        cy = row_top + row_h / 2.0
-        self._paint_drive_icon(p, pad, cy - self.ICON / 2.0, self.ICON)
-        left = pad + self.ICON + 10
-        width = max(0.0, self.width() - pad - left)
-        bar = QRectF(left, cy - self.BAR_H / 2.0, width, self.BAR_H)
-        path = QPainterPath()
-        path.addRoundedRect(bar, 1.5, 1.5)
-        p.fillPath(path, track)
+        p.drawText(QRectF(left, 11, width, 18), align, "Drive Storage")
         frac = (self.used / self.total) if self.total else 0.0
-        if frac > 0:
-            fill = QRectF(bar.left() + 1, bar.top() + 1, (bar.width() - 2) * min(1.0, frac), bar.height() - 2)
-            low = self.total and (self.free / self.total) < self.LOW_FREE
-            base = QColor("#da2626") if low else QColor("#26a0da")
-            g = QLinearGradient(0, fill.top(), 0, fill.bottom())
-            g.setColorAt(0, base.lighter(150))
-            g.setColorAt(0.5, base)
-            g.setColorAt(1, base.darker(115))
-            p.fillRect(fill, QBrush(g))
-        p.setPen(QPen(edge, 1))
-        p.setBrush(Qt.BrushStyle.NoBrush)
-        p.drawPath(path)
-
-        # Row 3 — free of total, under the bar
+        self._paint_bar(p, QRectF(left, 33, width, self.BAR_H), frac, base, light)
         p.setFont(self._font(11))
         p.setPen(muted)
         label = f"{self.free:.1f} GB free of {self.total:.0f} GB" if self.total else "—"
-        p.drawText(QRectF(left, row_top + row_h + 2, width, 16),
-                   int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter), label)
+        p.drawText(QRectF(left, 52, width, 16), align, label)
         p.end()
 
 
@@ -6991,6 +7593,577 @@ class _SidebarHeroCard(QWidget):
 
 
 # ── Main window ──────────────────────────────────────────────────────────────
+class SelectOnlyLineEdit(QLineEdit):
+    """Value field for the Properties dialog: click puts a visible caret in the text,
+    drag / double-click / Shift+arrows select any part of it and Ctrl+C copies just
+    that part, but nothing can be typed, pasted, cut or dropped.  (A read-only
+    QLineEdit shows no caret, so clicking it looked like nothing happened.)"""
+    _NAV = (Qt.Key.Key_Left, Qt.Key.Key_Right, Qt.Key.Key_Home, Qt.Key.Key_End)
+
+    def __init__(self, text="", parent=None):
+        super().__init__(text, parent)
+        self.setCursorPosition(0)
+        self.setDragEnabled(False)
+        self.setAcceptDrops(False)
+        self.setAttribute(Qt.WidgetAttribute.WA_InputMethodEnabled, False)
+        self.setCursor(Qt.CursorShape.IBeamCursor)
+
+    def keyPressEvent(self, event):
+        if (event.key() in self._NAV or event.matches(QKeySequence.StandardKey.Copy)
+                or event.matches(QKeySequence.StandardKey.SelectAll)):
+            super().keyPressEvent(event)
+        else:
+            event.ignore()            # Esc / Enter still reach the dialog
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.MiddleButton:
+            event.accept()            # no X11 middle-click paste
+            return
+        super().mouseReleaseEvent(event)
+
+    def contextMenuEvent(self, event):
+        menu = GlossMenu(parent=self, dark=self.palette().base().color().lightness() < 128)
+        copy_act = menu.add("Copy" if self.hasSelectedText() else "Copy All", "copy", "Ctrl+C")
+        all_act = menu.add("Select All", None, "Ctrl+A")
+        chosen = menu.exec(event.globalPos())
+        menu.deleteLater()
+        if chosen == copy_act:
+            if not self.hasSelectedText():
+                self.selectAll()
+            self.copy()
+        elif chosen == all_act:
+            self.selectAll()
+
+
+# ── Glossy menus (11/16: Tj picked option 3 of assets/glyph_options/menu_mockups.py) ──
+def _menu_glyph_paint(p, kind, x, y):
+    """Paints one 16x16 menu glyph with its top-left corner at (x, y)."""
+    NB, NP = Qt.BrushStyle.NoBrush, Qt.PenStyle.NoPen
+
+    def rpen(c, w):
+        return QPen(QColor(c), w, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
+
+    def vg(top, bot, c1, c2):
+        g = QLinearGradient(0, top, 0, bot); g.setColorAt(0, QColor(c1)); g.setColorAt(1, QColor(c2))
+        return QBrush(g)
+
+    def rr(r, rad):
+        pa = QPainterPath(); pa.addRoundedRect(r, rad, rad); return pa
+
+    def ball(c1, c2):
+        cx, cy = x + 8, y + 8
+        g = QRadialGradient(cx - 2, cy - 3, 11); g.setColorAt(0, QColor(c1)); g.setColorAt(1, QColor(c2))
+        p.setPen(QPen(QColor(c2).darker(130), 1)); p.setBrush(QBrush(g)); p.drawEllipse(QPointF(cx, cy), 7.2, 7.2)
+        p.setPen(NP); p.setBrush(QColor(255, 255, 255, 80)); p.drawEllipse(QPointF(cx - 1.5, cy - 3.4), 3.6, 2)
+        p.setPen(rpen("#ffffff", 1.8)); p.setBrush(NB)
+        return cx, cy
+
+    def poly(*pts):
+        from PyQt6.QtGui import QPolygonF
+        return QPolygonF([QPointF(a, b) for a, b in pts])
+
+    p.save()
+    if kind == "open":
+        pa = QPainterPath(); pa.moveTo(x + 3, y + 1.5); pa.lineTo(x + 10, y + 1.5); pa.lineTo(x + 13.5, y + 5)
+        pa.lineTo(x + 13.5, y + 14.5); pa.lineTo(x + 3, y + 14.5); pa.closeSubpath()
+        p.setPen(QPen(QColor("#7b8794"), 1)); p.setBrush(vg(y, y + 16, "#ffffff", "#e3e8ef")); p.drawPath(pa)
+        p.setPen(NP); p.setBrush(QColor("#1d7fd1"))
+        p.drawPolygon(poly((x + 6.3, y + 6.2), (x + 6.3, y + 12), (x + 11, y + 9.1)))
+    elif kind == "folder":
+        p.setPen(QPen(QColor("#b7791f"), 1)); p.setBrush(QColor("#e9b54a"))
+        p.drawPath(rr(QRectF(x + 1.5, y + 3, 7, 5), 1.2))
+        p.setBrush(vg(y + 5, y + 14, "#ffe08a", "#f0b83a")); p.drawPath(rr(QRectF(x + 1.5, y + 5, 13, 8.5), 1.4))
+    elif kind == "rename":
+        p.translate(x + 8, y + 8); p.rotate(45)
+        p.setPen(QPen(QColor("#9a6b12"), 1)); p.setBrush(QColor("#f6c443")); p.drawRect(QRectF(-2, -6.5, 4, 9))
+        p.setBrush(QColor("#f3d9b1")); p.drawPolygon(poly((-2, 2.5), (2, 2.5), (0, 6.8)))
+        p.setPen(NP); p.setBrush(QColor("#e2697a")); p.drawRect(QRectF(-2, -7.5, 4, 2.2))
+    elif kind == "remove":
+        p.setPen(QPen(QColor("#6b7786"), 1)); p.setBrush(vg(y + 5, y + 15, "#eef1f5", "#b9c2ce"))
+        pa = QPainterPath(); pa.moveTo(x + 3.5, y + 5.5); pa.lineTo(x + 12.5, y + 5.5)
+        pa.lineTo(x + 11.5, y + 14.5); pa.lineTo(x + 4.5, y + 14.5); pa.closeSubpath(); p.drawPath(pa)
+        p.drawPath(rr(QRectF(x + 2.5, y + 3, 11, 2.5), 1)); p.drawLine(QPointF(x + 6.5, y + 1.8), QPointF(x + 9.5, y + 1.8))
+        p.setPen(QPen(QColor("#7b8794"), 1))
+        p.drawLine(QPointF(x + 6.5, y + 7.5), QPointF(x + 6.8, y + 12.5)); p.drawLine(QPointF(x + 9.5, y + 7.5), QPointF(x + 9.2, y + 12.5))
+    elif kind == "info":
+        cx, cy = ball("#8fd3fa", "#1d7fd1")
+        p.drawLine(QPointF(cx, cy - .6), QPointF(cx, cy + 3.4)); p.drawPoint(QPointF(cx, cy - 3.6))
+    elif kind == "resume":
+        cx, cy = ball("#86efac", "#16a34a")
+        p.setPen(NP); p.setBrush(QColor("#ffffff")); p.drawPolygon(poly((cx - 2.2, cy - 3.4), (cx - 2.2, cy + 3.4), (cx + 3.6, cy)))
+    elif kind == "deps":          # blue ball, white down arrow
+        cx, cy = ball("#8fd3fa", "#1d7fd1")
+        p.drawLine(QPointF(cx, cy - 3.6), QPointF(cx, cy + 2.8))
+        p.drawPolyline(poly((cx - 3, cy + .2), (cx, cy + 3.2), (cx + 3, cy + .2)))
+    elif kind == "copy":
+        for dx, dy in ((4.5, 1.5), (1.5, 4.5)):
+            p.setPen(QPen(QColor("#7b8794"), 1)); p.setBrush(vg(y, y + 16, "#ffffff", "#e3e8ef"))
+            p.drawPath(rr(QRectF(x + dx, y + dy, 9, 10), 1.3))
+    elif kind == "warn":          # amber ball with "!"
+        cx, cy = ball("#fde68a", "#d97706")
+        p.drawLine(QPointF(cx, cy - 3.4), QPointF(cx, cy + .6)); p.drawPoint(QPointF(cx, cy + 3.4))
+    elif kind == "moon":
+        cx, cy = ball("#64748b", "#1e293b")
+        pa = QPainterPath(); pa.addEllipse(QPointF(cx, cy), 4, 4)
+        cut = QPainterPath(); cut.addEllipse(QPointF(cx + 2.4, cy - 1.6), 3.6, 3.6)
+        p.setPen(NP); p.setBrush(QColor("#fde68a")); p.drawPath(pa.subtracted(cut))
+    elif kind == "bell":
+        p.setPen(QPen(QColor("#a16207"), 1)); p.setBrush(vg(y + 2, y + 13, "#fde68a", "#eab308"))
+        pa = QPainterPath(); pa.moveTo(x + 2.5, y + 11.5); pa.cubicTo(x + 4.5, y + 9.5, x + 3.5, y + 2.5, x + 8, y + 2.5)
+        pa.cubicTo(x + 12.5, y + 2.5, x + 11.5, y + 9.5, x + 13.5, y + 11.5); pa.closeSubpath(); p.drawPath(pa)
+        p.setBrush(QColor("#a16207")); p.drawEllipse(QPointF(x + 8, y + 13.3), 1.5, 1.2)
+    elif kind == "power":
+        cx, cy = ball("#fca5a5", "#dc2626")
+        p.drawArc(QRectF(cx - 3.4, cy - 3, 6.8, 6.8), 130 * 16, -260 * 16); p.drawLine(QPointF(cx, cy - 4.2), QPointF(cx, cy - .4))
+    elif kind == "quit":          # grey ball with a white cross
+        cx, cy = ball("#cbd5e1", "#64748b")
+        p.drawLine(QPointF(cx - 2.6, cy - 2.6), QPointF(cx + 2.6, cy + 2.6)); p.drawLine(QPointF(cx + 2.6, cy - 2.6), QPointF(cx - 2.6, cy + 2.6))
+    elif kind == "youtube":       # red screen, white triangle
+        p.setPen(QPen(QColor("#991b1b"), 1)); p.setBrush(vg(y + 3, y + 13, "#f87171", "#dc2626"))
+        p.drawPath(rr(QRectF(x + 1.5, y + 3, 13, 10), 3))
+        p.setPen(NP); p.setBrush(QColor("#ffffff")); p.drawPolygon(poly((x + 6.4, y + 5.4), (x + 6.4, y + 10.6), (x + 10.6, y + 8)))
+    elif kind == "columns":
+        p.setPen(QPen(QColor("#6b7786"), 1)); p.setBrush(QColor("#ffffff")); p.drawPath(rr(QRectF(x + 1.5, y + 2.5, 13, 11), 1.5))
+        p.setPen(NP); p.setBrush(QColor("#8fb8e8")); p.drawRect(QRectF(x + 2, y + 3, 12, 3))
+        p.setPen(QPen(QColor("#6b7786"), 1))
+        p.drawLine(QPointF(x + 6, y + 3), QPointF(x + 6, y + 13)); p.drawLine(QPointF(x + 10.5, y + 3), QPointF(x + 10.5, y + 13))
+    p.restore()
+
+
+class GlossMenu(QMenu):
+    """Popup menu painted to match the list frame: 2px rounded frame, soft shadow,
+    glossy blue highlight (same blues as the scrollbar), 16px glyphs, right-aligned
+    shortcut hints, glass switches for checkable actions and an optional file header.
+    Qt still does layout / hover / keyboard; QSS only reserves the space."""
+    M = 10            # transparent margin that holds the shadow
+    PAD = 6
+    HEADER_H = 44
+
+    def __init__(self, title="", parent=None, dark=False):
+        super().__init__(title, parent)
+        self._dark = dark
+        self._header = None       # (QPixmap | None, title, subtitle)
+        self._header_act = None
+        self.setWindowFlags(self.windowFlags() | Qt.WindowType.FramelessWindowHint
+                            | Qt.WindowType.NoDropShadowWindowHint)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.aboutToShow.connect(self._restyle)
+        self._restyle()
+
+    # -- building ----------------------------------------------------------
+    def add(self, text, glyph=None, hint="", danger=False):
+        """addAction with a glyph name, a shortcut hint shown on the right and a red 'danger' tint."""
+        act = self.addAction(f"{text}\t{hint}" if hint else text)
+        self.tag(act, glyph, danger)
+        return act
+
+    @staticmethod
+    def tag(act, glyph=None, danger=False):
+        act.setProperty("glyph", glyph or "")
+        act.setProperty("danger", bool(danger))
+        return act
+
+    def set_header(self, pixmap, title, subtitle=""):
+        """Call before adding actions. Room for the header is a disabled spacer action:
+        asymmetric QSS padding made Qt think the menu overflowed, so the last item
+        turned into a scroll zone and could not be clicked."""
+        self._header = (pixmap, title, subtitle)
+        if self._header_act is None:
+            from PyQt6.QtWidgets import QWidgetAction
+            spacer = QWidget(self)
+            spacer.setFixedHeight(self.HEADER_H)
+            spacer.setMinimumWidth(250)
+            spacer.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+            self._header_act = QWidgetAction(self)
+            self._header_act.setDefaultWidget(spacer)
+            self._header_act.setEnabled(False)
+            first = self.actions()[0] if self.actions() else None
+            self.insertAction(first, self._header_act)
+        self.update()
+
+    def set_dark(self, dark):
+        self._dark = bool(dark)
+        self.update()
+
+    def _restyle(self):
+        has_switch = any(a.isCheckable() for a in self.actions())
+        right = 62 if has_switch else 14
+        outer = self.M + self.PAD
+        qss = (
+            "QMenu { background: transparent; border: none; font-family: 'Segoe UI'; font-size: 13px;"
+            f" padding: {outer}px; }}"
+            f"QMenu::item {{ background: transparent; border: none; padding: 6px {right}px 6px 34px; }}"
+            "QMenu::item:selected { background: transparent; }"
+            "QMenu::separator { background: transparent; height: 9px; margin: 0; }"
+            "QMenu::indicator { width: 0px; height: 0px; }"
+        )
+        if qss != self.styleSheet():
+            self.setStyleSheet(qss)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        # Qt placed the (invisible) shadow margin at the anchor; pull the frame up to it.
+        self.move(self.x() - self.M, self.y() - self.M + 2)
+
+    # -- painting ----------------------------------------------------------
+    @staticmethod
+    def _rr(r, rad):
+        pa = QPainterPath(); pa.addRoundedRect(r, rad, rad); return pa
+
+    @staticmethod
+    def _vg(top, bot, *stops):
+        g = QLinearGradient(0, top, 0, bot)
+        for o, c in stops:
+            g.setColorAt(o, QColor(c))
+        return QBrush(g)
+
+    def _font(self, px=13, bold=False):
+        f = QFont("Segoe UI"); f.setPixelSize(px)
+        f.setWeight(QFont.Weight.DemiBold if bold else QFont.Weight.Normal)
+        return f
+
+    def paintEvent(self, event):
+        d = self._dark
+        AL = Qt.AlignmentFlag
+        NB = Qt.BrushStyle.NoBrush
+        text_c = QColor("#e2e8f0" if d else "#0f172a")
+        muted_c = QColor("#94a3b8" if d else "#7b8794")
+        off_c = QColor("#64748b" if d else "#a3acb9")
+        p = QPainter(self)
+        p.setRenderHints(QPainter.RenderHint.Antialiasing | QPainter.RenderHint.TextAntialiasing
+                         | QPainter.RenderHint.SmoothPixmapTransform)
+        M = self.M
+        fr = QRectF(self.rect()).adjusted(M, M, -M, -M)
+        for i in range(8, 0, -1):         # soft shadow, a little lower than the frame
+            p.fillPath(self._rr(fr.adjusted(-i + 1, -i + 4, i - 1, i + 1), 10 + i),
+                       QColor(0, 0, 0, 9 if d else 6))
+        body = fr.adjusted(1, 1, -1, -1)
+        p.setPen(QPen(QColor("#4b5d7a" if d else "#a3afbf"), 2))
+        p.setBrush(self._vg(fr.top(), fr.bottom(), (0, "#243044" if d else "#ffffff"),
+                            (1, "#1a2434" if d else "#f1f5f9")))
+        p.drawPath(self._rr(body, 10))
+
+        if self._header:
+            pix, title, sub = self._header
+            hb = QRectF(fr.left() + 2, fr.top() + 2, fr.width() - 4, self.HEADER_H + self.PAD - 5)
+            p.save(); p.setClipPath(self._rr(fr.adjusted(2, 2, -2, -2), 8))
+            p.fillRect(hb, self._vg(hb.top(), hb.bottom(), (0, "#2b3950" if d else "#f4f7fb"),
+                                    (1, "#222e42" if d else "#e3e9f1")))
+            p.restore()
+            p.setPen(QPen(QColor("#3b4b66" if d else "#c5cedb"), 1))
+            p.drawLine(QPointF(hb.left(), hb.bottom() + .5), QPointF(hb.right(), hb.bottom() + .5))
+            tx = fr.left() + 14
+            if pix is not None and not pix.isNull():
+                p.drawPixmap(QRectF(fr.left() + 12, hb.center().y() - 11, 22, 22), pix, QRectF(pix.rect()))
+                tx = fr.left() + 43
+            tw_ = fr.right() - 12 - tx
+            f = self._font(13, True); p.setFont(f); p.setPen(text_c)
+            p.drawText(QRectF(tx, hb.top() + 5, tw_, 18), int(AL.AlignLeft | AL.AlignVCenter),
+                       QFontMetrics(f).elidedText(title, Qt.TextElideMode.ElideMiddle, int(tw_)))
+            f = self._font(11); p.setFont(f); p.setPen(QColor("#94a3b8" if d else "#64748b"))
+            p.drawText(QRectF(tx, hb.top() + 23, tw_, 15), int(AL.AlignLeft | AL.AlignVCenter),
+                       QFontMetrics(f).elidedText(sub, Qt.TextElideMode.ElideRight, int(tw_)))
+
+        active = self.activeAction()
+        default = self.defaultAction()
+        for a in self.actions():
+            if not a.isVisible() or a is self._header_act:
+                continue
+            r = QRectF(self.actionGeometry(a))
+            if r.isEmpty():
+                continue
+            if a.isSeparator():
+                p.setPen(QPen(QColor("#334155" if d else "#dfe4eb"), 1))
+                yy = int(r.center().y()) + .5
+                p.drawLine(QPointF(r.left() + 32, yy), QPointF(r.right() - 3, yy))
+                continue
+            enabled = a.isEnabled()
+            hov = enabled and active is not None and a == active
+            col = text_c if enabled else off_c
+            hint_c = muted_c
+            if enabled and a.property("danger"):
+                col = QColor("#f87171" if d else "#b42318")
+            ir = r.adjusted(.5, .5, -.5, -.5)
+            if hov:
+                p.setPen(QPen(QColor("#145a97"), 1))
+                p.setBrush(self._vg(ir.top(), ir.bottom(), (0, "#8fd3fa"), (.5, "#2b8fdd"), (1, "#1766ab")))
+                p.drawPath(self._rr(ir, 7))
+                p.fillPath(self._rr(QRectF(ir.left() + 3, ir.top() + 2, ir.width() - 6, ir.height() * .4), 5),
+                           QColor(255, 255, 255, 70))
+                col = QColor("#ffffff"); hint_c = QColor("#dbeeff")
+            iy = r.top() + (r.height() - 16) / 2
+            glyph = a.property("glyph")
+            if glyph:
+                if not enabled:
+                    p.setOpacity(.45)
+                _menu_glyph_paint(p, glyph, r.left() + 8, iy)
+                p.setOpacity(1)
+            label, _, hint = a.text().partition("\t")
+            label = label.replace("&&", "\0").replace("&", "").replace("\0", "&")
+            if not hint and not a.shortcut().isEmpty():
+                hint = a.shortcut().toString()
+            p.setFont(self._font(13, default is not None and a == default)); p.setPen(col)
+            p.drawText(QRectF(r.left() + 34, r.top(), r.width() - 40, r.height()),
+                       int(AL.AlignLeft | AL.AlignVCenter), label)
+            if a.isCheckable():
+                self._paint_switch(p, r.right() - 38, iy, a.isChecked())
+            elif hint:
+                p.setFont(self._font(12)); p.setPen(hint_c)
+                p.drawText(QRectF(r.left(), r.top(), r.width() - 10, r.height()),
+                           int(AL.AlignRight | AL.AlignVCenter), hint)
+        p.end()
+
+    def _paint_switch(self, p, x, y, on):
+        d = self._dark
+        r = QRectF(x + .5, y + .5, 29, 15)
+        if on:
+            p.setBrush(self._vg(y, y + 16, (0, "#1766ab"), (1, "#5cb8f2"))); p.setPen(QPen(QColor("#145a97"), 1))
+        elif d:
+            p.setBrush(self._vg(y, y + 16, (0, "#0f1726"), (1, "#334155"))); p.setPen(QPen(QColor("#56657c"), 1))
+        else:
+            p.setBrush(self._vg(y, y + 16, (0, "#b6bfcb"), (1, "#dfe4ea"))); p.setPen(QPen(QColor("#8d97a6"), 1))
+        p.drawPath(self._rr(r, 7.5))
+        kx = x + (22 if on else 8)
+        p.setPen(QPen(QColor("#7b8794"), 1))
+        p.setBrush(self._vg(y, y + 16, (0, "#ffffff"), (1, "#d9dfe7")))
+        p.drawEllipse(QPointF(kx, y + 8), 6, 6)
+
+
+def build_donate_dialog(parent, t, dark=False):
+    """Donate dialog. The Binance image is a whole phone screenshot; squeezing all of it
+    into the dialog made the QR and every word tiny, so only the QR code is cut out and
+    shown large, with the wording set in the app's own (bigger) type."""
+    dialog = QDialog(parent)
+    dialog.setWindowTitle("Support Development")
+    dialog.setFixedWidth(440)
+    dialog.setStyleSheet(f"""
+        QDialog {{ background-color: {t['surface']}; color: {t['text']}; }}
+        QLabel {{ color: {t['text']}; background: transparent; font-family: 'Segoe UI'; }}
+        QPushButton {{ font-family: 'Segoe UI'; }}
+    """)
+    layout = QVBoxLayout(dialog)
+    layout.setContentsMargins(32, 26, 32, 24)
+    layout.setSpacing(0)
+    AC = Qt.AlignmentFlag.AlignCenter
+
+    title = QLabel("Support Development")
+    title.setStyleSheet(f"font-size: 24px; font-weight: 700; color: {t['text']};")
+    title.setAlignment(AC)
+    layout.addWidget(title)
+    layout.addSpacing(6)
+
+    sub = QLabel("Scan with the Binance app to donate")
+    sub.setStyleSheet(f"font-size: 16px; color: {t['muted']};")
+    sub.setAlignment(AC)
+    layout.addWidget(sub)
+    layout.addSpacing(18)
+
+    QR = 300
+    qr_label = QLabel()
+    qr_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "icons", "binance_pay.png")
+    qr_pix = QPixmap(qr_path)
+    if not qr_pix.isNull():
+        if qr_pix.width() == 1053 and qr_pix.height() == 1758:
+            qr_pix = qr_pix.copy(QRect(279, 636, 493, 493))     # just the QR code + quiet zone
+        qr_pix = qr_pix.scaled(QR, QR, Qt.AspectRatioMode.KeepAspectRatio,
+                               Qt.TransformationMode.SmoothTransformation)
+    qr_label.setPixmap(qr_pix)
+    qr_label.setAlignment(AC)
+    qr_label.setFixedSize(QR + 24, QR + 24)
+    qr_label.setStyleSheet(f"border: 2px solid {'#4b5d7a' if dark else '#a3afbf'}; border-radius: 12px;"
+                           " background: #ffffff;")
+    layout.addWidget(qr_label, 0, AC)
+    layout.addSpacing(18)
+
+    id_caption = QLabel("Binance Pay ID")
+    id_caption.setStyleSheet(f"font-size: 14px; color: {t['muted']};")
+    id_caption.setAlignment(AC)
+    layout.addWidget(id_caption)
+    layout.addSpacing(2)
+
+    PAY_ID = "User-ec639"
+    user_label = QLabel(PAY_ID)
+    user_label.setStyleSheet(f"font-size: 24px; font-weight: 700; color: {'#fbbf24' if dark else '#b45309'};")
+    user_label.setAlignment(AC)
+    user_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+    layout.addWidget(user_label)
+    layout.addSpacing(20)
+
+    def _btn_qss(top, bot, border, text):
+        return (f"QPushButton {{ background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 {top}, stop:1 {bot});"
+                f" color: {text}; border: 1px solid {border}; border-radius: 10px;"
+                " font-size: 15px; font-weight: 600; padding: 9px 26px; min-width: 96px; }"
+                "QPushButton:hover { border-width: 2px; padding: 8px 25px; }")
+    blue = _btn_qss("#6cc0f5", "#1766ab", "#145a97", "#ffffff")
+    green = _btn_qss("#6ee7a0", "#15803d", "#166534", "#ffffff")
+    grey = (_btn_qss("#3a475c", "#263042", "#56657c", "#e2e8f0") if dark
+            else _btn_qss("#ffffff", "#dfe4ea", "#a3afbf", "#1e293b"))
+
+    copy_btn = QPushButton("Copy ID")
+    copy_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+    copy_btn.setStyleSheet(blue)
+
+    def _copy():
+        QApplication.clipboard().setText(PAY_ID)
+        copy_btn.setText("Copied")
+        copy_btn.setStyleSheet(green)
+        QTimer.singleShot(1800, lambda: (copy_btn.setText("Copy ID"), copy_btn.setStyleSheet(blue)))
+    copy_btn.clicked.connect(_copy)
+
+    close_btn = QPushButton("Close")
+    close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+    close_btn.setStyleSheet(grey)
+    close_btn.clicked.connect(dialog.close)
+
+    btn_row = QHBoxLayout()
+    btn_row.setSpacing(12)
+    btn_row.addStretch()
+    btn_row.addWidget(copy_btn)
+    btn_row.addWidget(close_btn)
+    btn_row.addStretch()
+    layout.addLayout(btn_row)
+    return dialog
+
+
+class GlossTip(QWidget):
+    """Hover text for the whole app (11/17, Tj picked "framed, name + explanation"):
+    2px rounded frame + soft shadow like the menus; a first line followed by more
+    lines is drawn as a bold name with a muted explanation under it. Replaces
+    QToolTip, whose window can't be translucent (rounded corners came out as a
+    solid dark block)."""
+    M = 8                 # transparent margin for the shadow
+    PADX, PADY = 14, 8
+    MAXW = 420
+    dark = False          # set by the main window when the theme changes
+    _inst = None
+
+    @classmethod
+    def instance(cls):
+        if cls._inst is None:
+            cls._inst = cls()
+        return cls._inst
+
+    def __init__(self):
+        super().__init__(None, Qt.WindowType.ToolTip | Qt.WindowType.FramelessWindowHint
+                         | Qt.WindowType.NoDropShadowWindowHint)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self._title = ""
+        self._body = ""
+        self._f_title = QFont("Segoe UI"); self._f_title.setPixelSize(13)
+        self._f_body = QFont("Segoe UI"); self._f_body.setPixelSize(12)
+        self._hide_timer = QTimer(self)
+        self._hide_timer.setSingleShot(True)
+        self._hide_timer.timeout.connect(self.hide)
+
+    def show_text(self, text, global_pos):
+        text = (text or "").strip()
+        if not text:
+            self.hide()
+            return
+        title, _, body = text.partition("\n")
+        self._title, self._body = title.strip(), body.strip()
+        self._f_title.setWeight(QFont.Weight.DemiBold if self._body else QFont.Weight.Normal)
+        flags = int(Qt.TextFlag.TextWordWrap)
+        tr = QFontMetrics(self._f_title).boundingRect(QRect(0, 0, self.MAXW, 2000), flags, self._title)
+        w, h = tr.width(), max(tr.height(), 18)
+        self._title_h = h
+        if self._body:
+            br = QFontMetrics(self._f_body).boundingRect(QRect(0, 0, self.MAXW, 2000), flags, self._body)
+            w = max(w, br.width()); h += 2 + br.height()
+        self.resize(w + 2 * (self.PADX + self.M) + 2, h + 2 * (self.PADY + self.M))
+        x, y = global_pos.x() - 14 - self.M, global_pos.y() + 20 - self.M
+        scr = QApplication.screenAt(global_pos) or QApplication.primaryScreen()
+        if scr is not None:
+            g = scr.availableGeometry()
+            x = max(g.left(), min(x, g.right() - self.width()))
+            if y + self.height() > g.bottom():
+                y = global_pos.y() - self.height() - 4 + self.M
+        self.move(x, y)
+        self.show()
+        self.update()
+        self._hide_timer.start(12000)
+
+    def paintEvent(self, event):
+        d = GlossTip.dark
+        p = QPainter(self)
+        p.setRenderHints(QPainter.RenderHint.Antialiasing | QPainter.RenderHint.TextAntialiasing)
+        M = self.M
+        fr = QRectF(self.rect()).adjusted(M, M, -M, -M)
+
+        def rr(r, rad):
+            pa = QPainterPath(); pa.addRoundedRect(r, rad, rad); return pa
+        for i in range(6, 0, -1):
+            p.fillPath(rr(fr.adjusted(-i + 1, -i + 3, i - 1, i + 1), 9 + i), QColor(0, 0, 0, 9 if d else 6))
+        g = QLinearGradient(0, fr.top(), 0, fr.bottom())
+        g.setColorAt(0, QColor("#2b3950" if d else "#ffffff")); g.setColorAt(1, QColor("#1f2a3c" if d else "#f1f5f9"))
+        p.setPen(QPen(QColor("#4b5d7a" if d else "#a3afbf"), 2)); p.setBrush(QBrush(g))
+        p.drawPath(rr(fr.adjusted(1, 1, -1, -1), 9))
+        flags = int(Qt.TextFlag.TextWordWrap | Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+        inner = fr.adjusted(self.PADX + 1, self.PADY, -self.PADX, -self.PADY)
+        p.setFont(self._f_title); p.setPen(QColor("#e2e8f0" if d else "#0f172a"))
+        p.drawText(QRectF(inner.left(), inner.top(), inner.width(), self._title_h), flags, self._title)
+        if self._body:
+            p.setFont(self._f_body); p.setPen(QColor("#94a3b8" if d else "#64748b"))
+            p.drawText(QRectF(inner.left(), inner.top() + self._title_h + 2, inner.width(),
+                              inner.height() - self._title_h - 2), flags, self._body)
+        p.end()
+
+
+class GlossTipFilter(QObject):
+    """Application event filter: shows GlossTip instead of the native tooltip.
+    Kept cheap — one integer compare for every event that is not tooltip-related."""
+    _T_TIP = QEvent.Type.ToolTip
+    _HIDE = frozenset((QEvent.Type.Leave, QEvent.Type.MouseButtonPress, QEvent.Type.KeyPress,
+                       QEvent.Type.Wheel, QEvent.Type.WindowDeactivate, QEvent.Type.Hide))
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._src = None
+        self._index = None
+
+    def eventFilter(self, obj, event):
+        et = event.type()
+        if et == self._T_TIP:
+            return self._on_tip(obj, event)
+        if self._src is not None:
+            if et in self._HIDE:
+                if et in (QEvent.Type.Leave, QEvent.Type.Hide) and obj is not self._src:
+                    return False
+                self._dismiss()
+            elif et == QEvent.Type.MouseMove and obj is self._src and self._index is not None:
+                view = obj.parent()
+                if isinstance(view, QAbstractItemView) and view.indexAt(event.position().toPoint()) != self._index:
+                    self._dismiss()         # moved on to another cell
+        return False
+
+    def _dismiss(self):
+        self._src = None
+        self._index = None
+        if GlossTip._inst is not None:
+            GlossTip._inst.hide()
+
+    def _on_tip(self, obj, event):
+        if not isinstance(obj, QWidget):
+            return False
+        text, index = "", None
+        view = obj.parent()
+        if isinstance(view, QAbstractItemView) and obj is view.viewport():
+            index = view.indexAt(event.pos())
+            text = index.data(Qt.ItemDataRole.ToolTipRole) if index.isValid() else ""
+            if not text:
+                self._dismiss()
+                return True
+        else:
+            text = obj.toolTip()
+            if not text:
+                return False                # let a parent with a tooltip have it
+        self._src, self._index = obj, index
+        GlossTip.instance().show_text(str(text), event.globalPos())
+        return True
+
+
 class DownloadManager(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -7090,6 +8263,8 @@ class DownloadManager(QMainWindow):
                     self._mono_font_family = fams[0]
 
         self._build_ui()
+        self._tip_filter = GlossTipFilter(self)
+        QApplication.instance().installEventFilter(self._tip_filter)
         self._load_history_into_table()
         self._apply_theme()
         self._update_category_counts()
@@ -7672,7 +8847,7 @@ class DownloadManager(QMainWindow):
     def _restyle_toolbar_labels(self):
         clr = self._toolbar_label_color()
         for name in ("_start_wrap", "_resume_wrap", "_cancel_wrap", "_clear_item_wrap", "_clear_wrap",
-                     "_open_folder_wrap", "_yt_wrap", "_about_wrap", "_donate_wrap"):
+                     "_open_folder_wrap", "_yt_wrap", "_about_wrap", "_donate_wrap", "_exit_wrap"):
             w = getattr(self, name, None)
             lbl = getattr(getattr(w, "_inner_btn", None), "_text_lbl", None)
             if lbl is not None:
@@ -7712,18 +8887,31 @@ class DownloadManager(QMainWindow):
         self._menubar = QMenuBar()
         self._update_menubar_style()
 
-        file_menu = self._menubar.addMenu("File")
+        self._gloss_menus = []
+
+        def _bar_menu(title):
+            m = GlossMenu(title, self._menubar, dark=self.dark_mode)
+            self._menubar.addMenu(m)
+            self._gloss_menus.append(m)
+            return m
+
+        file_menu = _bar_menu("File")
         yt_action = QAction("YouTube Downloader", self)
         yt_action.setShortcut("Ctrl+Y")
         yt_action.triggered.connect(lambda: self.open_youtube_dialog())
         file_menu.addAction(yt_action)
+        file_menu.addSeparator()
+        clear_all_action = QAction("Clear All Downloads…", self)
+        clear_all_action.triggered.connect(self._confirm_clear_all)
+        GlossMenu.tag(clear_all_action, "remove", danger=True)
+        file_menu.addAction(clear_all_action)
         file_menu.addSeparator()
         quit_action = QAction("Quit", self)
         quit_action.setShortcut("Ctrl+Q")
         quit_action.triggered.connect(self._quit_app)
         file_menu.addAction(quit_action)
 
-        view_menu = self._menubar.addMenu("View")
+        view_menu = _bar_menu("View")
         self._dark_action = QAction("Dark Mode", self)
         self._dark_action.setCheckable(True)
         self._dark_action.setChecked(self.dark_mode)
@@ -7745,7 +8933,7 @@ class DownloadManager(QMainWindow):
         reset_cols_action.triggered.connect(self._reset_column_widths)
         view_menu.addAction(reset_cols_action)
 
-        help_menu = self._menubar.addMenu("Help")
+        help_menu = _bar_menu("Help")
         deps_action = QAction("Install Dependencies", self)
         deps_action.triggered.connect(self.install_dependencies)
         help_menu.addAction(deps_action)
@@ -7754,6 +8942,12 @@ class DownloadManager(QMainWindow):
         about_action.triggered.connect(self.show_about)
         help_menu.addAction(about_action)
 
+        for _act, _glyph in ((yt_action, "youtube"), (quit_action, "quit"),
+                             (self._dark_action, "moon"), (self._notif_action, "bell"),
+                             (self._shutdown_action, "power"), (reset_cols_action, "columns"),
+                             (deps_action, "deps"), (about_action, "info")):
+            GlossMenu.tag(_act, _glyph)
+
         outer.addWidget(self._menubar)
 
         body = QWidget()
@@ -7761,7 +8955,7 @@ class DownloadManager(QMainWindow):
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
-        self._sidebar = QWidget()
+        self._sidebar = GlassPane("tint")
         self._sidebar.setFixedWidth(250)
         self._sidebar.setObjectName("sidebar")
         sidebar_layout = QVBoxLayout(self._sidebar)
@@ -7821,6 +9015,17 @@ class DownloadManager(QMainWindow):
         sidebar_layout.addWidget(hero_wrap)
 
         # CATEGORIES caption row: "CATEGORIES"  ……  "72 total"
+        # Categories live in their own card (11/17 blue-glass look)
+        self._cat_card = QFrame()
+        self._cat_card.setObjectName("catCard")
+        cat_card_layout = QVBoxLayout(self._cat_card)
+        cat_card_layout.setContentsMargins(0, 0, 0, 0)
+        cat_card_layout.setSpacing(0)
+        cat_card_wrap = QWidget()
+        cat_card_wrap_layout = QHBoxLayout(cat_card_wrap)
+        cat_card_wrap_layout.setContentsMargins(0, 0, 0, 0)
+        cat_card_wrap_layout.addWidget(self._cat_card)
+
         cat_caption_wrap = QWidget()
         cat_caption_layout = QHBoxLayout(cat_caption_wrap)
         cat_caption_layout.setContentsMargins(14, 0, 14, 8)
@@ -7832,7 +9037,7 @@ class DownloadManager(QMainWindow):
         self._cat_total_label = QLabel("0 total")
         self._cat_total_label.setObjectName("catTotalLabel")
         cat_caption_layout.addWidget(self._cat_total_label)
-        sidebar_layout.addWidget(cat_caption_wrap)
+        cat_card_layout.addWidget(cat_caption_wrap)
 
         # Hidden sentinel kept for backwards compatibility (older code may touch it).
         self._sidebar_sep = QFrame()
@@ -7898,16 +9103,19 @@ class DownloadManager(QMainWindow):
             self._cat_icons.append(icon_lbl)
             self._cat_text_labels.append(text_label)
 
-        cat_layout.addStretch()
-        sidebar_layout.addWidget(self._cat_scroll, 1)
+        cat_card_layout.addWidget(self._cat_scroll)
+        sidebar_layout.addWidget(cat_card_wrap)
+        sidebar_layout.addStretch(1)
 
         # ── Storage card ──────────────────────────────────────────────────────
         self._storage_card = self._build_storage_card()
         sidebar_layout.addWidget(self._storage_card)
 
         root.addWidget(self._sidebar)
+        self._sidebar.add_card(self._hero_card, 16, 9)
+        self._sidebar.add_card(self._storage_tile, 12, 6)
 
-        self._content_widget = QWidget()
+        self._content_widget = GlassPane("page")
         content_layout = QVBoxLayout(self._content_widget)
         content_layout.setContentsMargins(16, 14, 16, 10)
         content_layout.setSpacing(10)
@@ -7915,14 +9123,34 @@ class DownloadManager(QMainWindow):
         # Search + URL row
         top_row = QHBoxLayout()
         self._search_input = QLineEdit()
-        self._search_input.setPlaceholderText("🔍  Search downloads")
+        self._search_input.setPlaceholderText("Search downloads")
         self._search_input.setFixedWidth(220)
+        self._search_input.setFixedHeight(36)
         self._search_input.textChanged.connect(self.filter_by_search)
+        self._search_input.addAction(_field_glyph_icon("search"), QLineEdit.ActionPosition.LeadingPosition)
+        self._search_clear = self._search_input.addAction(_field_glyph_icon("clear"),
+                                                          QLineEdit.ActionPosition.TrailingPosition)
+        self._search_clear.setToolTip("Clear search")
+        self._search_clear.setVisible(False)
+        self._search_clear.triggered.connect(self._search_input.clear)
+        self._search_input.textChanged.connect(lambda txt: self._search_clear.setVisible(bool(txt)))
 
         self.url_input = QLineEdit()
         self.url_input.setPlaceholderText("Paste URL here")
+        self.url_input.setFixedHeight(36)
         self.url_input.returnPressed.connect(self.start_manual)
+        self.url_input.addAction(_field_glyph_icon(URL_FIELD_GLYPH), QLineEdit.ActionPosition.LeadingPosition)
+        self._url_action_btn = UrlActionButton(self.url_input)
+        self._url_action_btn.clicked.connect(self._on_url_action)
+        self._status_switch = StatusSwitch()
+        self._status_switch.changed.connect(lambda _i: self._apply_filters())
+        self._status_timer = QTimer(self)        # debounce: status cells change in bursts
+        self._status_timer.setSingleShot(True)
+        self._status_timer.setInterval(150)
+        self._status_timer.timeout.connect(self._refresh_status_switch)
         top_row.addWidget(self._search_input)
+        top_row.addSpacing(8)
+        top_row.addWidget(self._status_switch)
         top_row.addSpacing(8)
         top_row.addWidget(self.url_input)
         content_layout.addLayout(top_row)
@@ -7935,15 +9163,16 @@ class DownloadManager(QMainWindow):
         toolbar_layout.setSpacing(6)
 
         # Toolbar buttons — squircle SVG icons loaded from assets/toolbar_icons/
-        self._start_wrap       = self._make_toolbar_svg_btn("start.svg",   "Start Download",      "START")
-        self._resume_wrap      = self._make_toolbar_svg_btn("resume.svg",  "Resume Download",     "RESUME")
-        self._cancel_wrap      = self._make_toolbar_svg_btn("cancel.svg",  "Cancel Download",     "CANCEL")
-        self._clear_item_wrap  = self._make_toolbar_svg_btn("remove.svg",  "Remove Item",         "REMOVE")
-        self._clear_wrap       = self._make_toolbar_svg_btn("clear.svg",   "Clear All",           "CLEAR")
-        self._open_folder_wrap = self._make_toolbar_svg_btn("folder.svg",  "Open Folder",         "OPEN")
-        self._yt_wrap          = self._make_toolbar_svg_btn("youtube.svg", "YouTube Downloader",  "YOUTUBE")
-        self._about_wrap       = self._make_toolbar_svg_btn("about.svg",   "About",               "ABOUT")
-        self._donate_wrap      = self._make_toolbar_svg_btn("donate.svg",  "Support Development", "DONATE")
+        self._start_wrap       = self._make_toolbar_svg_btn("start.svg",   "Start\nDownloads the link in the URL box", "START")
+        self._resume_wrap      = self._make_toolbar_svg_btn("resume.svg",  "Resume\nContinues the selected unfinished download", "RESUME")
+        self._cancel_wrap      = self._make_toolbar_svg_btn("cancel.svg",  "Cancel\nStops the most recent running download", "CANCEL")
+        self._clear_item_wrap  = self._make_toolbar_svg_btn("remove.svg",  "Remove\nRemoves the selected downloads from the list", "REMOVE")
+        self._clear_wrap       = self._make_toolbar_svg_btn("clear.svg",   "Clear\nRemoves completed downloads from the list", "CLEAR")
+        self._open_folder_wrap = self._make_toolbar_svg_btn("folder.svg",  "Open\nShows the selected download in its folder", "OPEN")
+        self._yt_wrap          = self._make_toolbar_svg_btn("youtube.svg", "YouTube\nOpens the YouTube downloader", "YOUTUBE")
+        self._about_wrap       = self._make_toolbar_svg_btn("about.svg",   "About\nAbout Ferospark LDM", "ABOUT")
+        self._donate_wrap      = self._make_toolbar_svg_btn("donate.svg",  "Donate\nSupport development with Binance Pay", "DONATE")
+        self._exit_wrap        = self._make_toolbar_svg_btn("exit.svg",    "Exit\nQuits LDM completely, tray icon included", "EXIT")
 
         # Extract inner buttons for signal connections
         self.start_btn = self._start_wrap._inner_btn
@@ -7955,11 +9184,12 @@ class DownloadManager(QMainWindow):
         self.yt_btn = self._yt_wrap._inner_btn
         self.about_btn = self._about_wrap._inner_btn
         self.donate_btn = self._donate_wrap._inner_btn
+        self.exit_btn = self._exit_wrap._inner_btn
 
         for w in [self._start_wrap, self._resume_wrap, self._cancel_wrap,
                   self._clear_item_wrap, self._clear_wrap,
                   self._open_folder_wrap, self._yt_wrap,
-                  self._about_wrap, self._donate_wrap]:
+                  self._about_wrap, self._donate_wrap, self._exit_wrap]:
             toolbar_layout.addWidget(w)
         toolbar_layout.addStretch()
 
@@ -7967,11 +9197,12 @@ class DownloadManager(QMainWindow):
         self.resume_btn.clicked.connect(self._resume_selected)
         self.cancel_btn.clicked.connect(self.cancel_last)
         self.clear_item_btn.clicked.connect(self.clear_item)
-        self.clear_btn.clicked.connect(self.clear_list)
+        self.clear_btn.clicked.connect(self.clear_completed)
         self.open_folder_btn.clicked.connect(self._open_selected_folder)
         self.yt_btn.clicked.connect(lambda: self.open_youtube_dialog())
         self.about_btn.clicked.connect(self.show_about)
         self.donate_btn.clicked.connect(self._open_donate)
+        self.exit_btn.clicked.connect(self._quit_app)
 
         content_layout.addWidget(self._toolbar)
 
@@ -7985,7 +9216,7 @@ class DownloadManager(QMainWindow):
         self.table.setHorizontalHeaderLabels(["File Name", "Progress", "Size", "Transfer rate",
                                               "Time left", "Status", "Date Added", "Description"])
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         for col in range(self.table.columnCount()):
             self.table.horizontalHeader().setSectionResizeMode(col, QHeaderView.ResizeMode.Interactive)
         for col, width in IDM_COLUMN_WIDTHS.items():
@@ -8041,6 +9272,16 @@ class DownloadManager(QMainWindow):
 
         self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self.show_context_menu)
+        # Keys shown as hints in the right-click menu (Del is handled in keyPressEvent).
+        for _seqs, _fn in ((("Return", "Enter"), self._row_open),
+                           (("Ctrl+Return", "Ctrl+Enter"), self._row_open_folder),
+                           (("F2",), self._row_rename),
+                           (("Alt+Return", "Alt+Enter"), self._show_properties),
+                           (("Ctrl+C",), self._row_copy_link)):
+            for _seq in _seqs:
+                _sc = QShortcut(QKeySequence(_seq), self.table)
+                _sc.setContext(Qt.ShortcutContext.WidgetShortcut)
+                _sc.activated.connect(lambda f=_fn: self._on_current_row(f))
 
         self._table_stack = QStackedWidget()
         self._table_stack.addWidget(self.table)
@@ -8079,14 +9320,12 @@ class DownloadManager(QMainWindow):
         # Status bar — summary text on the left, speed/ETA chip on the right.
         # The chip surfaces speed and ETA for the currently selected
         # downloading row (the columns themselves are hidden from the table).
-        self._status_row = QWidget()
-        self._status_row.setFixedHeight(28)
+        self._status_row = FooterBar()      # paints the frame + counts itself
         status_row_layout = QHBoxLayout(self._status_row)
-        status_row_layout.setContentsMargins(4, 0, 4, 0)
+        status_row_layout.setContentsMargins(14, 0, 14, 0)
         status_row_layout.setSpacing(12)
-
-        self._status_bar = QLabel("Ready")
-        status_row_layout.addWidget(self._status_bar, 1)
+        self._status_bar = self._status_row
+        status_row_layout.addStretch(1)
 
         self._status_metric = QWidget()
         self._status_metric.setObjectName("statusMetric")
@@ -8094,8 +9333,8 @@ class DownloadManager(QMainWindow):
         metric_layout.setContentsMargins(0, 0, 0, 0)
         metric_layout.setSpacing(14)
         mono = getattr(self, "_mono_font_family", "IBM Plex Mono")
-        speed_font = QFont(mono); speed_font.setPixelSize(12); speed_font.setWeight(QFont.Weight.Bold)
-        eta_font   = QFont(mono); eta_font.setPixelSize(12); eta_font.setWeight(QFont.Weight.Medium)
+        speed_font = QFont(IDM_FONT_FAMILY); speed_font.setPixelSize(12); speed_font.setWeight(QFont.Weight.DemiBold)
+        eta_font   = QFont(IDM_FONT_FAMILY); eta_font.setPixelSize(12); eta_font.setWeight(QFont.Weight.DemiBold)
         self._status_speed_label = QLabel("")
         self._status_speed_label.setFont(speed_font)
         self._status_speed_label.setStyleSheet("color: #16a34a; background: transparent;")
@@ -8108,53 +9347,49 @@ class DownloadManager(QMainWindow):
         status_row_layout.addWidget(self._status_metric, 0, Qt.AlignmentFlag.AlignRight)
 
         content_layout.addWidget(self._status_row)
+        self._content_widget.add_card(self._search_input, 10, 5)
+        self._content_widget.add_card(self.url_input, 10, 5)
+        self._content_widget.add_card(self._status_switch, 10, 5)
+        self.table.itemChanged.connect(self._on_table_item_changed)
+        self._content_widget.add_card(self._toolbar, 20, 8)
+        self._content_widget.add_card(self.table, 10, 8)
+        self._content_widget.add_card(self._status_row, 9, 5)
 
         root.addWidget(self._content_widget)
         outer.addWidget(body)
 
     def _update_menubar_style(self):
         t = self._theme()
-        accent = t.get("accent", "#2f81f7")
+        d = self.dark_mode
+        for m in getattr(self, "_gloss_menus", []):
+            m.set_dark(d)
+        bar_top, bar_bot = ("#243044", "#1b2536") if d else ("#ffffff", "#eef2f7")
+        bar_line = "#3b4b66" if d else "#9db1c9"
+        hov_bg, hov_bd = ("rgba(92,184,242,0.16)", "rgba(92,184,242,0.35)") if d else ("#e6f0fd", "#bfd7f7")
         self._menubar.setStyleSheet(f"""
             QMenuBar {{
-                background-color: {t['menu_bg']};
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 {bar_top}, stop:1 {bar_bot});
                 color: {t['text']};
-                border-bottom: 1px solid {t['border']};
+                border-bottom: 1px solid {bar_line};
+                font-family: 'Segoe UI';
                 font-size: 13px;
                 padding: 2px 6px;
             }}
             QMenuBar::item {{
-                padding: 5px 12px;
-                border-radius: 6px;
+                padding: 4px 12px;
+                border: 1px solid transparent;
+                border-radius: 7px;
+                background: transparent;
             }}
             QMenuBar::item:selected {{
-                background-color: {t['menu_hover']};
-                color: {t['menu_hover_text']};
+                background: {hov_bg};
+                border: 1px solid {hov_bd};
             }}
-            QMenu {{
-                background-color: {t['surface']};
-                color: {t['text']};
-                border: 1px solid {t['border']};
-                border-radius: 8px;
-                padding: 5px;
-                font-size: 13px;
-            }}
-            QMenu::item {{
-                padding: 8px 22px;
-                border-radius: 5px;
-            }}
-            QMenu::item:selected {{
-                background-color: {t['menu_hover']};
-                color: {t['menu_hover_text']};
-            }}
-            QMenu::separator {{
-                height: 1px;
-                background: {t['border']};
-                margin: 4px 8px;
-            }}
-            QMenu::indicator {{
-                width: 14px;
-                height: 14px;
+            QMenuBar::item:pressed {{
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #8fd3fa, stop:0.5 #2b8fdd, stop:1 #1766ab);
+                border: 1px solid #145a97;
+                color: #ffffff;
             }}
             QToolTip {{
                 background-color: {t['surface']};
@@ -8185,11 +9420,23 @@ class DownloadManager(QMainWindow):
         # Card chrome — surface, 14px radius, thin border, soft shadow.
         # Delegates paint each row's interior; the table itself only provides
         # the outer card and the header strip.
+        # Glass scrollbar (11/14): recessed track + glossy blue handle like the storage bar
+        _sb_stops = (("#0c1422", "#1a2540", "#141d30") if self.dark_mode
+                     else ("#cfd6df", "#e9edf2", "#f4f6f9"))
+        _sb_track_v = ("qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 %s, stop:0.35 %s, stop:1 %s)" % _sb_stops)
+        _sb_track_h = ("qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 %s, stop:0.35 %s, stop:1 %s)" % _sb_stops)
+        _sb_line = "#2a3a55" if self.dark_mode else "#b9c2ce"
+        if getattr(self, "_list_frame", None) is None:
+            self._list_frame = ListFrameOverlay(self.table)
+        _pane = self._content_widget
+        _ty = self.table.mapTo(_pane, QPoint(0, 0)).y() if self.table.window() is _pane.window() else 0
+        _bot = _pane.color_at(_ty + self.table.height()).darker(108)     # sits in the card's shadow
+        self._list_frame.set_colors(_pane.color_at(_ty), "#3b4b66" if self.dark_mode else "#b4bfcd", _bot)
+        self._list_frame.set_backdrop(_pane)
         self.table.setStyleSheet(f"""
             QTableWidget {{
                 background-color: {t['surface']};
-                border: 1px solid {t['border']};
-                border-radius: 14px;
+                border: none;      /* frame is drawn by ListFrameOverlay */
                 gridline-color: transparent;
                 outline: none;
                 selection-background-color: {t['selected']};
@@ -8217,11 +9464,9 @@ class DownloadManager(QMainWindow):
                 border-bottom: 1px solid {'#334155' if self.dark_mode else '#d5d5d5'};
             }}
             QHeaderView::section:first {{
-                border-top-left-radius: 14px;
                 padding-left: 28px;
             }}
             QHeaderView::section:last {{
-                border-top-right-radius: 14px;
                 border-right: none;
             }}
             QHeaderView::section:hover {{
@@ -8231,38 +9476,52 @@ class DownloadManager(QMainWindow):
                 background-color: {t['header']};
             }}
             QScrollBar:vertical {{
-                background: transparent;
-                width: 8px;
-                margin: 4px 2px;
+                background: {_sb_track_v};
+                width: 14px;
+                margin: 0;
+                border-left: 1px solid {_sb_line};
             }}
             QScrollBar::handle:vertical {{
-                background: {t['scrollbar_handle']};
-                border-radius: 4px;
-                min-height: 30px;
+                background: qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #8fd3fa, stop:0.4 #5cc0f5, stop:0.5 #1d7fd1, stop:1 #1766ab);
+                border: 1px solid #14568f;
+                border-radius: 5px;
+                min-height: 36px;
+                margin: 2px 1px 2px 1px;
             }}
             QScrollBar::handle:vertical:hover {{
-                background: {t['muted']};
+                background: qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #b5e3fd, stop:0.4 #7fd0fa, stop:0.5 #2f93e6, stop:1 #1e78c6);
             }}
             QScrollBar::add-line:vertical,
             QScrollBar::sub-line:vertical {{
                 height: 0; border: none; background: none;
             }}
+            QScrollBar::add-page:vertical,
+            QScrollBar::sub-page:vertical {{
+                background: none;
+            }}
             QScrollBar:horizontal {{
-                background: transparent;
-                height: 8px;
-                margin: 2px 4px;
+                background: {_sb_track_h};
+                height: 14px;
+                margin: 0;
+                border-top: 1px solid {_sb_line};
             }}
             QScrollBar::handle:horizontal {{
-                background: {t['scrollbar_handle']};
-                border-radius: 4px;
-                min-width: 30px;
+                background: qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 #8fd3fa, stop:0.4 #5cc0f5, stop:0.5 #1d7fd1, stop:1 #1766ab);
+                border: 1px solid #14568f;
+                border-radius: 5px;
+                min-width: 36px;
+                margin: 1px 2px 1px 2px;
             }}
             QScrollBar::handle:horizontal:hover {{
-                background: {t['muted']};
+                background: qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 #b5e3fd, stop:0.4 #7fd0fa, stop:0.5 #2f93e6, stop:1 #1e78c6);
             }}
             QScrollBar::add-line:horizontal,
             QScrollBar::sub-line:horizontal {{
                 width: 0; border: none; background: none;
+            }}
+            QScrollBar::add-page:horizontal,
+            QScrollBar::sub-page:horizontal {{
+                background: none;
             }}
         """)
 
@@ -8282,6 +9541,7 @@ class DownloadManager(QMainWindow):
     def _apply_theme(self):
         t = self._theme()
         accent = t.get("accent", "#2f81f7")
+        GlossTip.dark = self.dark_mode
 
         # ── Main window ───────────────────────────────────────────────────────
         self.centralWidget().setStyleSheet(f"""
@@ -8298,11 +9558,13 @@ class DownloadManager(QMainWindow):
         self._restyle_toolbar_labels()
 
         # ── Sidebar ────────────────────────────────────────────────────────────
-        self._sidebar.setStyleSheet(f"""
-            QWidget#sidebar {{
-                background-color: {t['sidebar']};
-                border-right: none;
-            }}
+        d = self.dark_mode
+        self._sidebar.set_dark(d)
+        self._content_widget.set_dark(d)
+        self._status_switch.set_dark(d)
+        self._sidebar.setStyleSheet("")
+        self._cat_card.setStyleSheet(f"""
+            QFrame#catCard {{ background: transparent; border: none; }}
         """)
         self._sidebar_title.setStyleSheet(f"""
             background-color: transparent;
@@ -8353,21 +9615,25 @@ class DownloadManager(QMainWindow):
         self._style_empty_state()
 
         # ── Content area ───────────────────────────────────────────────────────
-        self._content_widget.setStyleSheet(f"background-color: {t['bg']};")
+        self._content_widget.setStyleSheet("")      # GlassPane paints the page itself
 
         # ── Inputs ─────────────────────────────────────────────────────────────
+        _in_shade = "#0a1220" if self.dark_mode else "#dfe4ea"
+        _in_edge = "#475a78" if self.dark_mode else "#a3afbf"
         input_style = f"""
             QLineEdit {{
-                background-color: {t['input_bg']};
+                background-color: qlineargradient(x1:0,y1:0,x2:0,y2:1,
+                    stop:0 {_in_shade}, stop:0.16 {t['input_bg']}, stop:1 {t['input_bg']});
                 color: {t['text']};
-                border: 2px solid {t['border']};
-                border-radius: 14px;
-                padding: 11px 16px;
+                border: 2px solid {_in_edge};
+                border-radius: 10px;
+                padding: 0px 8px;
                 font-size: 13px;
             }}
             QLineEdit:focus {{
                 border: 2px solid {accent};
-                background-color: {t['input_focus']};
+                background-color: qlineargradient(x1:0,y1:0,x2:0,y2:1,
+                    stop:0 {_in_shade}, stop:0.16 {t['input_focus']}, stop:1 {t['input_focus']});
             }}
             QLineEdit::placeholder {{
                 color: {t['faint']};
@@ -8377,42 +9643,27 @@ class DownloadManager(QMainWindow):
         self._search_input.setStyleSheet(input_style)
 
         # ── Toolbar ────────────────────────────────────────────────────────────
+        _tb = ("stop:0 #2a3850, stop:0.5 #222e42, stop:1 #1a2434" if d
+               else "stop:0 #ffffff, stop:0.5 #f4f8fc, stop:1 #e3ecf6")
         self._toolbar.setStyleSheet(f"""
             QWidget#toolbar {{
-                background-color: {t.get('toolbar_bg', t['surface'])};
-                border: none;
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1, {_tb});
+                border: 1px solid {'#34435c' if d else '#9db1c9'};
                 border-radius: 20px;
             }}
         """)
-        # Toolbar drop shadow
-        toolbar_shadow = QGraphicsDropShadowEffect(self._toolbar)
-        toolbar_shadow.setBlurRadius(24)
-        toolbar_shadow.setOffset(0, 4)
-        toolbar_shadow.setColor(QColor(0, 0, 0, 30))
-        self._toolbar.setGraphicsEffect(toolbar_shadow)
-
-        # Sidebar shadow for floating depth
-        sidebar_shadow = QGraphicsDropShadowEffect(self._sidebar)
-        sidebar_shadow.setBlurRadius(20)
-        sidebar_shadow.setOffset(3, 0)
-        sidebar_shadow.setColor(QColor(0, 0, 0, 18))
-        self._sidebar.setGraphicsEffect(sidebar_shadow)
+        # Shadows under the toolbar / sidebar cards are painted by GlassPane now.
+        self._toolbar.setGraphicsEffect(None)
+        self._sidebar.setGraphicsEffect(None)
 
         # ── Table ──────────────────────────────────────────────────────────────
         self._apply_table_style()
 
         # ── Status bar ─────────────────────────────────────────────────────────
-        self._status_bar.setStyleSheet(f"""
-            QLabel {{
-                background-color: {t['status_bar']};
-                color: {t['muted']};
-                border: none;
-                border-radius: 12px;
-                font-size: 11px;
-                padding: 4px 12px;
-                letter-spacing: 0.3px;
-            }}
-        """)
+        self._status_bar.set_dark(self.dark_mode)
+        _chip = "#5cc0f5" if self.dark_mode else "#1d7fd1"
+        self._status_speed_label.setStyleSheet(f"color: {_chip}; background: transparent;")
+        self._status_eta_label.setStyleSheet(f"color: {_chip}; background: transparent;")
 
         # ── Update progress delegate dark flag ─────────────────────────────────
         for row_info in self.all_rows:
@@ -8543,6 +9794,8 @@ class DownloadManager(QMainWindow):
 
         if hasattr(self, "_cat_total_label"):
             self._cat_total_label.setText(f"{counts.get('All Downloads', 0)} total")
+        if hasattr(self, "_status_timer"):
+            self._status_timer.start()
         self._refresh_hero_card()
 
     def _on_column_resized(self, col, old_width, new_width):
@@ -8566,6 +9819,11 @@ class DownloadManager(QMainWindow):
         t = THEMES["dark" if self.dark_mode else "light"]
         text_color = "#0f172a" if not self.dark_mode else t['text']
         mono = getattr(self, "_mono_font_family", "IBM Plex Mono")
+        # Selected row = framed glass highlight, same blues as the toolbar frame (11/17)
+        if self.dark_mode:
+            sel_grad, sel_edge = "stop:0 rgba(92,184,242,0.24), stop:1 rgba(92,184,242,0.10)", "#3d6a9c"
+        else:
+            sel_grad, sel_edge = "stop:0 #f3f9ff, stop:1 #c6defa", "#84acdd"
         for i, (label, emoji, color) in enumerate(CATEGORIES):
             btn = self._cat_buttons[i]
             badge = self._cat_badges[i]
@@ -8574,7 +9832,8 @@ class DownloadManager(QMainWindow):
             if is_sel:
                 btn.setStyleSheet(f"""
                     QWidget#catBtn_{i} {{
-                        background: rgba({r},{g},{b}, 0.10);
+                        background: qlineargradient(x1:0, y1:0, x2:0, y2:1, {sel_grad});
+                        border: 1px solid {sel_edge};
                         border-radius: 7px;
                     }}
                     QLabel#catText_{i} {{
@@ -8597,6 +9856,7 @@ class DownloadManager(QMainWindow):
                 btn.setStyleSheet(f"""
                     QWidget#catBtn_{i} {{
                         background: transparent;
+                        border: 1px solid transparent;
                         border-radius: 7px;
                     }}
                     QWidget#catBtn_{i}:hover {{
@@ -8634,12 +9894,13 @@ class DownloadManager(QMainWindow):
             return
         is_empty = self.table.rowCount() == 0
         self._table_stack.setCurrentIndex(1 if is_empty else 0)
+        self._content_widget.update()        # the list's shadow comes and goes with it
 
     def _style_empty_state(self):
         if not hasattr(self, "_empty_state"):
             return
         t = THEMES["dark" if self.dark_mode else "light"]
-        self._empty_state.setStyleSheet(f"QWidget#emptyState {{ background-color: {t['bg']}; }}")
+        self._empty_state.setStyleSheet("QWidget#emptyState { background: transparent; }")
         self._empty_icon.setStyleSheet(
             f"QLabel#emptyIcon {{ color: {t['faint']}; font-size: 56px; background: transparent; }}"
         )
@@ -8650,29 +9911,62 @@ class DownloadManager(QMainWindow):
             f"QLabel#emptyHint {{ color: {t['faint']}; font-size: 13px; background: transparent; }}"
         )
 
-    def filter_by_search(self, text):
-        text = text.lower().strip()
+    FINISHED_STATES = ("Finished", "File Missing")     # missing = downloaded, then moved
+
+    def _row_is_finished(self, row):
+        it = self.table.item(row, 5)
+        return bool(it) and it.text() in self.FINISHED_STATES
+
+    def _row_passes_filters(self, row, category, search_text=None):
+        """Category (sidebar) AND search box AND the All/Unfinished/Finished switch."""
         current_cat = CATEGORIES[self._current_cat_row][0]
+        if current_cat != "All Downloads" and category != current_cat:
+            return False
+        if search_text is None:
+            search_text = self._search_input.text().lower().strip()
+        if search_text:
+            name_item = self.table.item(row, 0)
+            if search_text not in (name_item.text().lower() if name_item else ""):
+                return False
+        mode = self._status_switch.index() if hasattr(self, "_status_switch") else 0
+        if mode:
+            fin = self._row_is_finished(row)
+            if (mode == 1 and fin) or (mode == 2 and not fin):
+                return False
+        return True
+
+    def _apply_filters(self):
+        text = self._search_input.text().lower().strip()
         for row_info in self.all_rows:
             row = row_info["row"]
-            cat = row_info["category"]
-            name_item = self.table.item(row, 0)
-            filename = name_item.text().lower() if name_item else ""
-            cat_match = (current_cat == "All Downloads" or cat == current_cat)
-            search_match = (not text or text in filename)
-            self.table.setRowHidden(row, not (cat_match and search_match))
+            self.table.setRowHidden(row, not self._row_passes_filters(row, row_info["category"], text))
+
+    def filter_by_search(self, text):
+        self._apply_filters()
 
     def filter_by_category(self, index):
-        selected = CATEGORIES[index][0]
-        search_text = self._search_input.text().lower().strip()
+        self._apply_filters()
+        self._refresh_status_switch(refilter=False)     # counts follow the chosen category
+
+    def _on_table_item_changed(self, item):
+        if item.column() == 5:
+            self._status_timer.start()
+
+    def _refresh_status_switch(self, refilter=True):
+        """Counts on the switch (within the chosen category); re-filter if it is active."""
+        if not hasattr(self, "_status_switch"):
+            return
+        current_cat = CATEGORIES[self._current_cat_row][0]
+        total = fin = 0
         for row_info in self.all_rows:
-            row = row_info["row"]
-            cat = row_info["category"]
-            name_item = self.table.item(row, 0)
-            filename = name_item.text().lower() if name_item else ""
-            cat_match = (selected == "All Downloads" or cat == selected)
-            search_match = (not search_text or search_text in filename)
-            self.table.setRowHidden(row, not (cat_match and search_match))
+            if current_cat != "All Downloads" and row_info.get("category") != current_cat:
+                continue
+            total += 1
+            if self._row_is_finished(row_info["row"]):
+                fin += 1
+        self._status_switch.set_counts(total, total - fin, fin)
+        if refilter and self._status_switch.index():
+            self._apply_filters()
 
     def install_dependencies(self):
         dialog = QDialog(self)
@@ -8774,7 +10068,7 @@ class DownloadManager(QMainWindow):
         name_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(name_label)
 
-        version_label = QLabel("Version 2.1")
+        version_label = QLabel("Version 3.0")
         version_label.setStyleSheet(f"font-size: 12px; color: {t['muted']};")
         version_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(version_label)
@@ -8979,8 +10273,7 @@ class DownloadManager(QMainWindow):
         self._insert_row_items(row, display_name, full_path, url, "Downloading", "—", category, _now)
         self.row_progress[row] = 0
         self.yt_url_to_row[url] = row
-        current_cat = CATEGORIES[self._current_cat_row][0]
-        if current_cat != "All Downloads" and current_cat != category:
+        if not self._row_passes_filters(row, category):
             self.table.setRowHidden(row, True)
         self._update_category_counts()
 
@@ -9144,13 +10437,17 @@ class DownloadManager(QMainWindow):
                            if self.table.item(r["row"], 5) and
                            self.table.item(r["row"], 5).text() == "Finished")
 
+        missing_rows = sum(1 for r in self.all_rows
+                           if self.table.item(r["row"], 5) and
+                           self.table.item(r["row"], 5).text() == "File Missing")
+
         if count > 0:
             avg = int(total_pct / count)
             self.setWindowTitle(f"Ferospark LDM  [{avg}% — {count} active]")
-            self._status_bar.setText(f"  ⬇ {count} active  |  ✓ {finished_rows} completed  |  Total: {total_rows} downloads")
+            self._status_bar.set_counts(count, finished_rows, missing_rows, total_rows)
         else:
             self.setWindowTitle("Ferospark LDM")
-            self._status_bar.setText(f"  ✓ {finished_rows} completed  |  Total: {total_rows} downloads")
+            self._status_bar.set_counts(0, finished_rows, missing_rows, total_rows)
         self._refresh_status_chip()
 
     def is_duplicate(self, url):
@@ -9315,106 +10612,133 @@ class DownloadManager(QMainWindow):
         row = self.table.rowAt(pos.y())
         if row < 0:
             return
-        t = self._theme()
-        menu = QMenu()
-        menu.setStyleSheet(f"""
-            QMenu {{
-                background-color: {t['surface']};
-                color: {t['text']};
-                border: 1px solid {t['border']};
-                border-radius: 8px;
-                padding: 5px;
-                font-size: 13px;
-            }}
-            QMenu::item {{ padding: 8px 18px; border-radius: 5px; }}
-            QMenu::item:selected {{
-                background-color: {t['menu_hover']};
-                color: {t['menu_hover_text']};
-            }}
-        """)
-
+        name_item = self.table.item(row, 0)
         stat_item = self.table.item(row, 5)
         status = stat_item.text() if stat_item else ""
+        url = (name_item.data(Qt.ItemDataRole.UserRole + 2) or "") if name_item else ""
 
-        open_act        = menu.addAction("Open")
-        open_folder_act = menu.addAction("Open in Folder")
-        menu.addSeparator()
-        rename_act = menu.addAction("Rename")
-        remove_act = menu.addAction("Remove")
-        menu.addSeparator()
-        props_act = menu.addAction("Properties")
+        menu = GlossMenu(parent=self, dark=self.dark_mode)
+        if name_item:
+            filename = name_item.text().strip()
+            category = name_item.data(FL_ROLE_CATEGORY) or next(
+                (r.get("category") for r in self.all_rows if r.get("row") == row), "Others")
+            ext = os.path.splitext(filename)[1].lstrip(".").upper()
+            size_item = self.table.item(row, 2)
+            size = size_item.text().strip() if size_item else ""
+            shown = {"Finished": "Complete"}.get(status, status)
+            sub = "  ·  ".join(x for x in (ext, size, shown) if x)
+            menu.set_header(get_file_icon_pixmap(category, 44), filename, sub)
 
+        open_act        = menu.add("Open", "open", "Enter")
+        menu.setDefaultAction(open_act)
+        open_folder_act = menu.add("Open in Folder", "folder", "Ctrl+Enter")
+        menu.addSeparator()
+        # Resume only for failed/cancelled downloads
+        resume_act = None
+        if status not in ("Finished", "File Missing", "Downloading"):
+            resume_act = menu.add("Resume Download", "resume")
+        copy_link_act = menu.add("Copy Download Link", "copy", "Ctrl+C")
+        copy_link_act.setEnabled(bool(url))
         # Copy Error — only for error statuses
         copy_err_act = None
         non_error = {"Finished", "File Missing", "Downloading", "Cancelled", ""}
         if status and status not in non_error:
-            menu.addSeparator()
-            copy_err_act = menu.addAction("Copy Error Message")
-
-        # Show Resume for failed/cancelled downloads
-        resume_act = None
-        if status not in ("Finished", "File Missing", "Downloading"):
-            menu.addSeparator()
-            resume_act = menu.addAction("▶  Resume Download")
+            copy_err_act = menu.add("Copy Error Message", "warn")
+        menu.addSeparator()
+        rename_act = menu.add("Rename", "rename", "F2")
+        sel_rows = {ix.row() for ix in self.table.selectionModel().selectedRows()}
+        multi = len(sel_rows) > 1 and row in sel_rows
+        remove_act = menu.add(f"Remove {len(sel_rows)} from List" if multi else "Remove from List",
+                              "remove", "Del", danger=True)
+        menu.addSeparator()
+        props_act = menu.add("Properties", "info", "Alt+Enter")
 
         action = menu.exec(self.table.viewport().mapToGlobal(pos))
-
-        path = self.table.item(row, 0).data(Qt.ItemDataRole.UserRole) if self.table.item(row, 0) else None
-
+        menu.deleteLater()
+        if action is None:
+            return
         if action == open_act:
-            if path and os.path.exists(path):
-                subprocess.Popen(['xdg-open', path])
-            else:
-                self._show_toast("File not found on disk")
-
+            self._row_open(row)
         elif action == open_folder_act:
-            if path and os.path.exists(path):
-                open_and_select(path)
-            elif path and os.path.isdir(os.path.dirname(path)):
-                # File gone but its folder still exists — open the folder
-                # (no highlight is possible without the file) and tell the
-                # user why nothing got selected.
-                subprocess.Popen(['xdg-open', os.path.dirname(path)])
-                self._show_toast("File missing — opened its folder")
-            else:
-                self._show_toast("Folder not found on disk")
-
+            self._row_open_folder(row)
         elif action == rename_act:
-            if path and os.path.exists(path):
-                from PyQt6.QtWidgets import QInputDialog
-                old_name = os.path.basename(path)
-                new_name, ok = QInputDialog.getText(self, "Rename", "New filename:", text=old_name)
-                if ok and new_name.strip() and new_name.strip() != old_name:
-                    new_path = os.path.join(os.path.dirname(path), new_name.strip())
-                    try:
-                        os.rename(path, new_path)
-                        name_item = self.table.item(row, 0)
-                        if name_item:
-                            name_item.setText(new_name.strip())
-                            name_item.setData(Qt.ItemDataRole.UserRole, new_path)
-                            # Update history so the new name/path persists across restarts
-                            url = name_item.data(Qt.ItemDataRole.UserRole + 2) or ''
-                            for entry in self.history:
-                                if entry.get('url') == url or entry.get('path') == path:
-                                    entry['filename'] = new_name.strip()
-                                    entry['path']     = new_path
-                                    break
-                            save_history(self.history)
-                    except Exception as e:
-                        QMessageBox.warning(self, "Rename", f"Could not rename:\n{e}")
-
+            self._row_rename(row)
         elif action == remove_act:
-            self.table.removeRow(row)
-            self.all_rows = [r for r in self.all_rows if r.get('row') != row]
-
+            # Same full removal as the Del key / toolbar (history + partial files).
+            if not multi:
+                self.table.setCurrentCell(row, 0)
+            self.clear_item()
         elif action == props_act:
             self._show_properties(row)
-
+        elif action == copy_link_act:
+            self._row_copy_link(row)
         elif copy_err_act and action == copy_err_act:
             QApplication.clipboard().setText(status)
-
         elif resume_act and action == resume_act:
             self._resume_download(row)
+
+    def _on_current_row(self, fn):
+        row = self.table.currentRow()
+        if row >= 0:
+            fn(row)
+
+    def _row_path(self, row):
+        item = self.table.item(row, 0)
+        return item.data(Qt.ItemDataRole.UserRole) if item else None
+
+    def _row_open(self, row):
+        path = self._row_path(row)
+        if path and os.path.exists(path):
+            subprocess.Popen(['xdg-open', path])
+        else:
+            self._show_toast("File not found on disk")
+
+    def _row_open_folder(self, row):
+        path = self._row_path(row)
+        if path and os.path.exists(path):
+            open_and_select(path)
+        elif path and os.path.isdir(os.path.dirname(path)):
+            # File gone but its folder still exists — open the folder
+            # (no highlight is possible without the file) and tell the
+            # user why nothing got selected.
+            subprocess.Popen(['xdg-open', os.path.dirname(path)])
+            self._show_toast("File missing — opened its folder")
+        else:
+            self._show_toast("Folder not found on disk")
+
+    def _row_copy_link(self, row):
+        item = self.table.item(row, 0)
+        url = (item.data(Qt.ItemDataRole.UserRole + 2) or "") if item else ""
+        if url:
+            QApplication.clipboard().setText(url)
+            self._show_toast("Download link copied")
+
+    def _row_rename(self, row):
+        path = self._row_path(row)
+        if not (path and os.path.exists(path)):
+            self._show_toast("File not found on disk")
+            return
+        from PyQt6.QtWidgets import QInputDialog
+        old_name = os.path.basename(path)
+        new_name, ok = QInputDialog.getText(self, "Rename", "New filename:", text=old_name)
+        if ok and new_name.strip() and new_name.strip() != old_name:
+            new_path = os.path.join(os.path.dirname(path), new_name.strip())
+            try:
+                os.rename(path, new_path)
+                name_item = self.table.item(row, 0)
+                if name_item:
+                    name_item.setText(new_name.strip())
+                    name_item.setData(Qt.ItemDataRole.UserRole, new_path)
+                    # Update history so the new name/path persists across restarts
+                    url = name_item.data(Qt.ItemDataRole.UserRole + 2) or ''
+                    for entry in self.history:
+                        if entry.get('url') == url or entry.get('path') == path:
+                            entry['filename'] = new_name.strip()
+                            entry['path']     = new_path
+                            break
+                    save_history(self.history)
+            except Exception as e:
+                QMessageBox.warning(self, "Rename", f"Could not rename:\n{e}")
 
     def _show_properties(self, row):
         name_item = self.table.item(row, 0)
@@ -9452,7 +10776,8 @@ class DownloadManager(QMainWindow):
             f'QLabel  {{ color: {txt}; font-size: 13px; }}'
             f'QLineEdit {{ background-color: {ibg}; color: {txt};'
             f'  border: 1px solid {bdr}; border-radius: 5px;'
-             '  padding: 5px 10px; font-size: 12px; }}'
+             '  padding: 5px 10px; font-size: 12px;'
+             '  selection-background-color: #2b8fdd; selection-color: #ffffff; }'
              'QPushButton { border-radius: 5px; font-size: 12px;'
              '  font-weight: 600; padding: 6px 14px; border: none; }'
         )
@@ -9479,28 +10804,8 @@ class DownloadManager(QMainWindow):
             lbl.setStyleSheet(f'color: {muted}; font-size: 12px; font-weight: bold;')
             hl.addWidget(lbl)
             if copyable:
-                fld = QLineEdit(value)
-                fld.setReadOnly(True)
+                fld = SelectOnlyLineEdit(value)
                 hl.addWidget(fld)
-                btn = QPushButton('Copy')
-                btn.setFixedWidth(70)
-                btn.setStyleSheet('QPushButton { background-color: #2563eb; color: white; padding: 6px 10px; }'
-                                  'QPushButton:hover { background-color: #1d4ed8; }')
-                # Use QLineEdit select+copy so clipboard works reliably
-                def _make_copy_fn(field, button):
-                    def _do_copy():
-                        field.selectAll()
-                        field.copy()
-                        button.setText('Copied!')
-                        button.setStyleSheet('QPushButton { background-color: #16a34a; color: white; padding: 6px 10px; }')
-                        def _reset():
-                            button.setText('Copy')
-                            button.setStyleSheet('QPushButton { background-color: #2563eb; color: white; padding: 6px 10px; }'
-                                                'QPushButton:hover { background-color: #1d4ed8; }')
-                        QTimer.singleShot(1800, _reset)
-                    return _do_copy
-                btn.clicked.connect(_make_copy_fn(fld, btn))
-                hl.addWidget(btn)
             else:
                 vl = QLabel(value or '—')
                 vl.setStyleSheet(f'color: {txt}; font-size: 12px;')
@@ -9527,6 +10832,7 @@ class DownloadManager(QMainWindow):
             )
             ob.clicked.connect(lambda: open_and_select(path) if path and os.path.exists(path)
                                else subprocess.Popen(['xdg-open', folder]))
+            ob.setFixedSize(112, 32)
             btn_row.addWidget(ob)
         btn_row.addStretch()
         cb = QPushButton('Close')
@@ -9535,8 +10841,12 @@ class DownloadManager(QMainWindow):
             'QPushButton:hover { background-color: #1d4ed8; }'
         )
         cb.clicked.connect(dialog.close)
+        cb.setFixedSize(112, 32)          # same size as Open Folder (11/17)
         btn_row.addWidget(cb)
         layout.addLayout(btn_row)
+        if getattr(self, "_props_no_exec", False):     # offscreen tests grab the dialog instead
+            self._props_dialog = dialog
+            return
         dialog.exec()
 
     def _resume_download(self, row):
@@ -9753,6 +11063,16 @@ class DownloadManager(QMainWindow):
                 url=url, filename=filename if filename else default_name,
                 referer=referer)
 
+    def _on_url_action(self):
+        """Paste / Download capsule inside the URL field."""
+        if self._url_action_btn.mode() == "download":
+            self.start_manual()
+            return
+        txt = (QApplication.clipboard().text() or "").strip()
+        if txt:
+            self.url_input.setText(txt.splitlines()[0].strip())
+        self.url_input.setFocus()
+
     def start_manual(self):
         url = self.url_input.text().strip()
         if not url:
@@ -9832,8 +11152,7 @@ class DownloadManager(QMainWindow):
         self._insert_row_items(row, unique_name, full_path, url, "Downloading", "—", category, _now)
         self.row_progress[row] = 0
 
-        current_cat = CATEGORIES[self._current_cat_row][0]
-        if current_cat != "All Downloads" and current_cat != category:
+        if not self._row_passes_filters(row, category):
             self.table.setRowHidden(row, True)
 
         self.raise_()
@@ -9842,12 +11161,20 @@ class DownloadManager(QMainWindow):
 
         thread = DownloadThread(url, unique_name, is_video, referer)
         self.threads.append(thread)
-        thread.progress.connect(  lambda v, r=row: self._update_progress(r, v))
-        thread.downloaded.connect(lambda s, r=row: self._update_cell(r, 2, s))
-        thread.speed.connect(     lambda s, r=row: self._update_cell(r, 3, s))
-        thread.eta.connect(       lambda e, r=row: self._update_cell(r, 4, e))
-        thread.name_finalized.connect(lambda n, p, r=row: self._on_worker_name_finalized(r, n, p))
-        thread.finished.connect(  lambda m, r=row, u=url, c=category: self._on_finished(m, r, u, c))
+        # The row index lives on the thread and is shifted by _remove_row when rows
+        # above it are removed (multi-select Remove / Clear completed); -1 = row gone.
+        thread._ldm_row = row
+        def _live(fn, t=thread):
+            def call(*a):
+                if t._ldm_row >= 0:
+                    fn(t._ldm_row, *a)
+            return call
+        thread.progress.connect(  _live(lambda r, v: self._update_progress(r, v)))
+        thread.downloaded.connect(_live(lambda r, s: self._update_cell(r, 2, s)))
+        thread.speed.connect(     _live(lambda r, s: self._update_cell(r, 3, s)))
+        thread.eta.connect(       _live(lambda r, e: self._update_cell(r, 4, e)))
+        thread.name_finalized.connect(_live(lambda r, n, p: self._on_worker_name_finalized(r, n, p)))
+        thread.finished.connect(  _live(lambda r, m, u=url, c=category: self._on_finished(m, r, u, c)))
         thread.start()
 
     def _update_progress(self, row, value):
@@ -9968,82 +11295,7 @@ class DownloadManager(QMainWindow):
         self._status_metric.show()
     
     def _open_donate(self):
-        t = self._theme()
-        accent = t.get("accent", "#2563eb")
-        dialog = QDialog(self)
-        dialog.setWindowTitle("Support Development")
-        dialog.setFixedWidth(420)
-        dialog.setStyleSheet(f"""
-            QDialog {{
-                background-color: {t['surface']};
-                color: {t['text']};
-            }}
-            QLabel {{ color: {t['text']}; background: transparent; }}
-            QPushButton {{ border-radius: 14px; font-size: 13px; font-weight: 600; padding: 10px 24px; border: none; }}
-        """)
-        layout = QVBoxLayout(dialog)
-        layout.setContentsMargins(28, 24, 28, 20)
-        layout.setSpacing(8)
-
-        title = QLabel("Support Development")
-        title.setStyleSheet(f"font-size: 18px; font-weight: 700; color: {t['text']};")
-        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(title)
-
-        sub = QLabel("Scan with Binance App to donate")
-        sub.setStyleSheet(f"font-size: 12px; color: {t['muted']};")
-        sub.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(sub)
-
-        layout.addSpacing(6)
-
-        qr_label = QLabel()
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        qr_path = os.path.join(script_dir, "icons", "binance_pay.png")
-        qr_pix = QPixmap(qr_path)
-        if not qr_pix.isNull():
-            qr_pix = qr_pix.scaled(340, 340, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
-        qr_label.setPixmap(qr_pix)
-        qr_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        qr_label.setStyleSheet(f"border: 1px solid {t['border']}; border-radius: 12px; padding: 8px; background: #ffffff;")
-        layout.addWidget(qr_label)
-
-        layout.addSpacing(6)
-
-        user_card = QWidget()
-        user_card.setStyleSheet(f"background-color: {t['bg']}; border-radius: 14px;")
-        user_card_layout = QVBoxLayout(user_card)
-        user_card_layout.setContentsMargins(16, 10, 16, 10)
-        user_label = QLabel("User-ec639")
-        user_label.setStyleSheet(f"font-size: 14px; font-weight: 700; color: #d97706;")
-        user_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        user_card_layout.addWidget(user_label)
-        layout.addWidget(user_card)
-
-        layout.addSpacing(4)
-
-        close_btn = QPushButton("Close")
-        close_btn.setStyleSheet(f"""
-            QPushButton {{
-                background-color: {t['bg']};
-                color: {t['muted']};
-                border: none;
-                border-radius: 14px;
-                padding: 10px 24px;
-            }}
-            QPushButton:hover {{
-                background-color: {t['category_hover']};
-                color: {t['text']};
-            }}
-        """)
-        close_btn.clicked.connect(dialog.close)
-        btn_row = QHBoxLayout()
-        btn_row.addStretch()
-        btn_row.addWidget(close_btn)
-        btn_row.addStretch()
-        layout.addLayout(btn_row)
-
-        dialog.exec()
+        build_donate_dialog(self, self._theme(), self.dark_mode).exec()
 
     def cancel_last(self):
         for t in reversed(self.threads):
@@ -10127,8 +11379,47 @@ class DownloadManager(QMainWindow):
                     pass
 
     def clear_item(self):
-        row = self.table.currentRow()
-        if row >= 0:
+        """REMOVE button / Del key / right-click Remove: removes every selected row
+        (the list is multi-select, like IDM), or the current row if none is selected."""
+        rows = sorted({ix.row() for ix in self.table.selectionModel().selectedRows()
+                       if not self.table.isRowHidden(ix.row())}, reverse=True)
+        if not rows and self.table.currentRow() >= 0:
+            rows = [self.table.currentRow()]
+        self._remove_rows(rows)
+
+    def clear_completed(self):
+        """CLEAR button, as IDM's "Delete Completed": drops every finished entry from the
+        list (including ones whose file has since been moved or deleted). Files on disk
+        are not touched; unfinished / failed downloads stay."""
+        rows = []
+        for r in range(self.table.rowCount()):
+            st = self.table.item(r, 5)
+            if st and st.text() in ("Finished", "File Missing"):
+                rows.append(r)
+        self._remove_rows(rows)
+        if rows:
+            self._show_toast(f"Cleared {len(rows)} completed download{'s' if len(rows) != 1 else ''}")
+        else:
+            self._show_toast("No completed downloads to clear")
+
+    def _remove_rows(self, rows):
+        """Remove table rows (any order given); history is written once at the end."""
+        rows = sorted(set(rows), reverse=True)      # bottom-up so indices stay valid
+        if not rows:
+            return
+        self.table.setUpdatesEnabled(False)
+        try:
+            for row in rows:
+                self._remove_row(row)
+        finally:
+            self.table.setUpdatesEnabled(True)
+        save_history(self.history)
+        self._update_category_counts()
+
+    def _remove_row(self, row):
+        """One row out of the table + history + bookkeeping. Callers save history and
+        refresh the counts afterwards (see _remove_rows)."""
+        if 0 <= row < self.table.rowCount():
             self._delete_partials_for_row(row)
             name_item = self.table.item(row, 0)
             if name_item:
@@ -10148,7 +11439,6 @@ class DownloadManager(QMainWindow):
                         # No (url, path) match — fall back to URL-only so
                         # legacy entries without a path field still clear.
                         self.history = [e for e in self.history if e.get("url") != url]
-                    save_history(self.history)
                     # Only drop the cached "already finished" mapping if no
                     # other row still owns that URL's final file.
                     if not any(
@@ -10159,6 +11449,13 @@ class DownloadManager(QMainWindow):
                         self.finished_urls.pop(self._social_dedup_key(url), None)
                         self.yt_settings.pop(url, None)
             self.table.removeRow(row)
+            # Running downloads remember their row: shift the ones below, detach this one.
+            for t in getattr(self, "threads", []):
+                r = getattr(t, "_ldm_row", None)
+                if r is not None:
+                    t._ldm_row = -1 if r == row else (r - 1 if r > row else r)
+            self.yt_url_to_row = {u: (r - 1 if r > row else r)
+                                  for u, r in self.yt_url_to_row.items() if r != row}
             self.row_progress.pop(row, None)
             self._row_activity.pop(row, None)
             self.all_rows = [r for r in self.all_rows if r["row"] != row]
@@ -10172,9 +11469,35 @@ class DownloadManager(QMainWindow):
             self.row_progress = new_progress
             self._row_activity = {(r - 1 if r > row else r): v
                                   for r, v in self._row_activity.items()}
-            self._update_category_counts()
+
+    def _confirm_clear_all(self):
+        """File → Clear All Downloads: empties the whole list after a confirmation."""
+        n = self.table.rowCount()
+        if n == 0:
+            self._show_toast("The list is already empty")
+            return
+        unfinished = sum(1 for r in range(n) if self.table.item(r, 5)
+                         and self.table.item(r, 5).text() not in ("Finished", "File Missing"))
+        msg = f"Remove all {n} entries from the list?\n\nFinished files on disk are kept."
+        if unfinished:
+            msg += (f"\n\n{unfinished} unfinished download{'s' if unfinished != 1 else ''} will be removed"
+                    " too, and their partial files deleted.")
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle("Clear All Downloads")
+        box.setText(msg)
+        yes = box.addButton("Clear All", QMessageBox.ButtonRole.DestructiveRole)
+        cancel = box.addButton(QMessageBox.StandardButton.Cancel)
+        box.setDefaultButton(cancel)
+        box.exec()
+        if box.clickedButton() is yes:
+            self.clear_list()
+            self._show_toast(f"Cleared all {n} entries")
 
     def clear_list(self):
+        for t in getattr(self, "threads", []):
+            if hasattr(t, "_ldm_row"):
+                t._ldm_row = -1          # rows are going away; stop routing progress to them
         for row in range(self.table.rowCount()):
             self._delete_partials_for_row(row)
         self.history = []
