@@ -141,7 +141,7 @@
       return (
         /[?&]v=\d+/.test(u.search)           ||  // /watch?v=123
         /\/reel(\/|$)/.test(path)             ||  // /reel/ID or bare /reel/ (LDM shows paste dialog for bare)
-        /\/videos\/\d+/.test(path)            ||  // /username/videos/ID
+        /\/videos\/(?:[^/]+\/)?\d+/.test(path) ||  // /username/videos/ID, /videos/pcb.POST/ID (multi-video post), /videos/title/ID
         /\/share\/[vr]\//.test(path)              // /share/v/ID or /share/r/ID
       );
     } catch(e) { return false; }
@@ -280,10 +280,15 @@
 
   // Extract Facebook/Instagram video ID from page URL
   function getFbVideoId(url) {
-    // Numeric ID: /videos/ID, /reel/ID, watch?v=ID
-    var m = url.match(/(?:reel|video|watch(?:\?v=)|videos)\/?([\d]+)/);
+    // Numeric ID: /videos/ID, /reel/ID, watch?v=ID. In /videos/pcb.POST/ID or
+    // /videos/title/ID the video's own ID is the last part.
+    var m = url.match(/\/videos\/[^/?#]+\/(\d+)/);
+    if (m) return m[1];
+    m = url.match(/(?:reel|video|watch(?:\?v=)|videos)\/?([\d]+)/);
     if (m) return m[1];
     // Alphanumeric share URLs: /share/v/ID or /share/r/ID
+    m = url.match(/[?&]v=(\d+)/);   // /watch/?v=ID
+    if (m) return m[1];
     m = url.match(/\/share\/[vr]\/([A-Za-z0-9_\-]+)/);
     if (m) return m[1];
     return null;
@@ -298,7 +303,7 @@
       patterns = [/^\/(?:p|reel|reels|tv)\/[A-Za-z0-9_\-]+\/?$/];
     } else if (host.includes('facebook.com') || host.includes('fb.watch')) {
       // Require an ID after reel/watch/videos — bare /reel/ anchors are useless
-      patterns = [/\/(?:reel|videos)\/\d+/, /\/watch\/\?v=\d+/, /[?&]v=\d+/];
+      patterns = [/\/reel\/\d+/, /\/videos\/(?:[^/]+\/)?\d+/, /\/watch\/\?v=\d+/, /[?&]v=\d+/];
     } else if (host.includes('twitter.com') || host.includes('x.com')) {
       patterns = [/\/status\/\d+/];
     }
@@ -511,8 +516,7 @@
     ['mouseup', 'auxclick'].forEach(t =>
       window.addEventListener(t, e => { if (e.button === 2) stop(e); }, true));
     // Page listeners registered on window before ours still run first, so make
-    // the page's preventDefault() a no-op for contextmenu (Firefox Xray API;
-    // the Chrome build's popup does the same from the page world).
+    // the page's preventDefault() a no-op for contextmenu (Firefox Xray API).
     try {
       const PageEvent = window.wrappedJSObject && window.wrappedJSObject.Event;
       if (PageEvent && typeof exportFunction === 'function') {
