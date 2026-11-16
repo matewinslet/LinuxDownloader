@@ -43,12 +43,14 @@ chrome.storage.session.get(['tabM3u8Store', 'tabSocialStore', 'pendingIntercepts
 // Read it on every SW startup so toggling OFF survives SW idle termination.
 chrome.storage.local.get('interceptEnabled', function (result) {
   if (result.interceptEnabled !== undefined) interceptEnabled = result.interceptEnabled;
+  syncPixeldrainRule();
 });
 
 // Listen for toggle changes from popup
 chrome.storage.onChanged.addListener(function (changes, area) {
   if (area === 'local' && changes.interceptEnabled !== undefined) {
     interceptEnabled = changes.interceptEnabled.newValue;
+    syncPixeldrainRule();
   }
 });
 
@@ -94,13 +96,15 @@ function decodeFbVideoId(url) {
 }
 
 var cfProtectedDomains = [
-  'luluvdo.com', 'lulustream.com',
+  'luluvid.com', 'luluvdo.com', 'lulustream.com',
   'doodstream.com', 'dood.watch', 'dood.to',
 ];
 
 function isCFProtected(url) {
   try {
     var host = new URL(url).hostname;
+    // Lulu keeps moving domains: any lulu* host except lulucdn (thumbnails).
+    if (/(?:^|\.)lulu(?!cdn)[a-z]*\.[a-z]+$/.test(host)) return true;
     return cfProtectedDomains.some(function (d) { return host.includes(d); });
   } catch (e) { return false; }
 }
@@ -113,6 +117,15 @@ var skipExts = [
   '.md', '.rst', '.tex', '.csv', '.log', '.env',
   '.c', '.cpp', '.h', '.java', '.rb', '.go', '.rs', '.php',
   '.wasm', '.map',
+  // fonts
+  '.woff', '.woff2', '.ttf', '.otf', '.eot',
+  // subtitles / captions
+  '.vtt', '.srt', '.ass', '.ssa', '.sub',
+  // 3D / game / animation assets
+  '.riv', '.glb', '.gltf', '.fbx', '.obj', '.usdz', '.spine', '.atlas',
+  // data blobs
+  '.bin', '.dat', '.db', '.sqlite',
+  // HLS / DASH stream segments
   '.enc', '.key', '.aes', '.m4s', '.frag', '.chunk',
 ];
 
@@ -430,6 +443,48 @@ chrome.webRequest.onHeadersReceived.addListener(
   },
   { urls: ['<all_urls>'] },
   ['responseHeaders']  // No "blocking" — not supported in Chrome MV3
+);
+
+// ---------------------------------------------------------------------------
+// pixeldrain "hotlink-protected" files: the page solves a reCAPTCHA and opens
+// /api/file/<id>?download&recaptcha_response=<token>. The token works once, so
+// if Chrome's own request goes out first LDM gets HTTP 424. MV3 can't cancel
+// from webRequest, so a session network rule blocks the request (only while
+// LDM is active) and the observer below hands the untouched link to LDM.
+// ---------------------------------------------------------------------------
+var PIXELDRAIN_RULE_ID = 1;
+var PIXELDRAIN_RE = /^https?:\/\/(?:pixeldrain\.com|pixeldrain\.net|pixeldra\.in)\/api\/file\/([A-Za-z0-9]+)\?.*recaptcha_response=/;
+function syncPixeldrainRule() {
+  var add = interceptEnabled ? [{
+    id: PIXELDRAIN_RULE_ID,
+    priority: 1,
+    action: { type: 'block' },
+    condition: {
+      regexFilter: PIXELDRAIN_RE.source,
+      resourceTypes: ['main_frame', 'sub_frame', 'xmlhttprequest', 'other'],
+    },
+  }] : [];
+  chrome.declarativeNetRequest.updateSessionRules(
+    { removeRuleIds: [PIXELDRAIN_RULE_ID], addRules: add },
+    function () { void chrome.runtime.lastError; });
+}
+chrome.webRequest.onBeforeRequest.addListener(
+  function (details) {
+    if (!interceptEnabled) return;
+    var m = details.url.match(PIXELDRAIN_RE);
+    if (!m) return;
+    var origin = new URL(details.url).origin;
+    var referer = details.initiator || '';
+    // /info doesn't touch the token; it gives the real filename.
+    fetch(origin + '/api/file/' + m[1] + '/info')
+      .then(function (r) { return r.json(); })
+      .catch(function () { return {}; })
+      .then(function (info) {
+        var name = (info && info.name) || (m[1] + '.bin');
+        sendToPython(details.url, name, 'file', referer);
+      });
+  },
+  { urls: ['*://pixeldrain.com/api/file/*', '*://pixeldrain.net/api/file/*', '*://pixeldra.in/api/file/*'] }
 );
 
 // ---------------------------------------------------------------------------

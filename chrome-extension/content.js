@@ -8,6 +8,30 @@
   // left behind by an older copy (extension update/reload) and get purged.
   const LDM_INSTANCE = Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
 
+  // ── Video Buttons on/off (popup toggle, storage key videoButtons) ─────────
+  // Hidden via visibility, not display: the sweep below rewrites host display
+  // constantly. Declared up here so every overlay sees the setting.
+  var _ldmButtonsShown = true;
+  function applyButtonsShown(host) {
+    if (_ldmButtonsShown) host.style.removeProperty('visibility');
+    else host.style.setProperty('visibility', 'hidden', 'important');
+  }
+  function applyButtonsShownAll() {
+    document.querySelectorAll('[data-ldm-host]').forEach(applyButtonsShown);
+  }
+  try {
+    var _ldmStore = (typeof browser !== 'undefined') ? browser : chrome;
+    _ldmStore.storage.local.get('videoButtons').then(function(r) {
+      _ldmButtonsShown = r.videoButtons !== false;
+      applyButtonsShownAll();
+    });
+    _ldmStore.storage.onChanged.addListener(function(ch) {
+      if (!ch.videoButtons) return;
+      _ldmButtonsShown = ch.videoButtons.newValue !== false;
+      applyButtonsShownAll();
+    });
+  } catch (e) {}
+
   const YOUTUBE_HOSTS = ['youtube.com', 'youtu.be', 'youtube-nocookie.com'];
 
   function isYouTubePage() {
@@ -157,8 +181,11 @@
 
   // CF domains (luluvdo etc.) — always page URL → yt-dlp
   var CF_DOMAINS = ['luluvid.com', 'luluvdo.com', 'lulustream.com', 'doodstream.com', 'dood.watch', 'dood.to'];
+  // Lulu keeps moving domains (luluvdo → luluvid → luluvido…): any lulu*
+  // host except lulucdn (thumbnails).
+  var LULU_HOST = /(?:^|\.)lulu(?!cdn)[a-z]*\.[a-z]+$/;
   function isCFProtected(url) {
-    try { var h = new URL(url).hostname; return CF_DOMAINS.some(function(d) { return h.includes(d); }); }
+    try { var h = new URL(url).hostname; return LULU_HOST.test(h) || CF_DOMAINS.some(function(d) { return h.includes(d); }); }
     catch(e) { return false; }
   }
 
@@ -465,11 +492,74 @@
     }
   }
 
+  // ── Right-click unlock ────────────────────────────────────────────────────
+  // Flag on window so repeat clicks don't stack listeners and the popup can
+  // show the unlocked state for as long as this page stays loaded.
+  function unlockRightClick() {
+    if (window._ldmRightClickUnlocked) return;
+    window._ldmRightClickUnlocked = true;
+    // Window capture runs before any page handler on document/body/elements
+    // (incl. oncontextmenu="return false"); right-button mousedown/up too, for
+    // "no right click" scripts that alert or block from there.
+    const stop = e => e.stopImmediatePropagation();
+    window.addEventListener('contextmenu', e => { stop(e); restoreCovers(); }, true);
+    window.addEventListener('mousedown', e => {
+      if (e.button !== 2) return;
+      stop(e);
+      uncoverMediaAt(e.clientX, e.clientY);
+    }, true);
+    ['mouseup', 'auxclick'].forEach(t =>
+      window.addEventListener(t, e => { if (e.button === 2) stop(e); }, true));
+    // Page listeners registered on window before ours still run first, so make
+    // the page's preventDefault() a no-op for contextmenu (Firefox Xray API;
+    // the Chrome build's popup does the same from the page world).
+    try {
+      const PageEvent = window.wrappedJSObject && window.wrappedJSObject.Event;
+      if (PageEvent && typeof exportFunction === 'function') {
+        const origPreventDefault = PageEvent.prototype.preventDefault;
+        exportFunction(function () {
+          if (this.type === 'contextmenu') return;
+          return origPreventDefault.call(this);
+        }, PageEvent.prototype, { defineAs: 'preventDefault' });
+      }
+    } catch (e) {}
+  }
+
+  // Sites like Instagram/Pinterest lay a transparent div over each image, so a
+  // right-click lands on the div and Firefox offers no image items. On a right
+  // mousedown, let clicks fall through whatever sits above the image under the
+  // cursor; the contextmenu hit-test that follows then finds the <img> itself.
+  var coveredEls = [], coverTimer = null;
+  function uncoverMediaAt(x, y) {
+    restoreCovers();
+    var stack = document.elementsFromPoint(x, y);
+    var i = stack.findIndex(el => el.tagName === 'IMG' || el.tagName === 'VIDEO');
+    if (i <= 0) return;  // nothing under the cursor, or the media is already on top
+    var media = stack[i];
+    for (var j = 0; j < i; j++) {
+      var el = stack[j];
+      if (el.contains(media)) continue;  // a wrapper, not a cover
+      coveredEls.push([el, el.style.getPropertyValue('pointer-events'),
+                       el.style.getPropertyPriority('pointer-events')]);
+      el.style.setProperty('pointer-events', 'none', 'important');
+    }
+    coverTimer = setTimeout(restoreCovers, 1500);  // in case no contextmenu follows
+  }
+  function restoreCovers() {
+    clearTimeout(coverTimer);
+    // Next tick: Firefox reads the menu target during the contextmenu dispatch.
+    var els = coveredEls; coveredEls = [];
+    if (els.length) setTimeout(() => els.forEach(([el, v, prio]) =>
+      v ? el.style.setProperty('pointer-events', v, prio) : el.style.removeProperty('pointer-events')), 0);
+  }
+
   // ── Message listener (for popup grab/unlock actions) ──────────────────────
   chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     if (request.action === 'unlock') {
-      window.addEventListener('contextmenu', e => e.stopPropagation(), true);
+      unlockRightClick();
       sendResponse({ status: 'unlocked' });
+    } else if (request.action === 'unlockStatus') {
+      sendResponse({ unlocked: !!window._ldmRightClickUnlocked });
     } else if (request.action === 'grab') {
       var rt = isRedditPage() && window === window.top ? playingRedditTarget() : null;
       sendResponse(rt ? { url: rt.url, isHLS: true, title: rt.title } : detectStream());
@@ -491,7 +581,8 @@
 
   // Overlay icons, drawn rather than emoji so they look the same everywhere.
   var LDM_SVG = '<svg width="13" height="13" viewBox="0 0 16 16" style="flex:none" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" ';
-  var LDM_ICON_DL   = LDM_SVG + 'stroke-width="1.8" color="#38bdf8"><path d="M8 2v8m0 0L4.5 6.5M8 10l3.5-3.5M3 13.5h10"/></svg>';
+  // Solid arrow over a tray, with a dark rim so it reads as a raised shape.
+  var LDM_ICON_DL   = '<svg width="13" height="13" viewBox="0 0 16 16" style="flex:none"><path d="M6 1.5h4v5.2h3L8 11.6 3 6.7h3z" fill="#6cc8ff" stroke="#06223a" stroke-width=".7" stroke-linejoin="round"/><rect x="2.5" y="12.6" width="11" height="2.2" rx="1.1" fill="#6cc8ff" stroke="#06223a" stroke-width=".7"/></svg>';
   var LDM_ICON_SPIN = LDM_SVG + 'stroke-width="1.8"><g><path d="M8 2a6 6 0 1 1-6 6"/><animateTransform attributeName="transform" type="rotate" from="0 8 8" to="360 8 8" dur="1s" repeatCount="indefinite"/></g></svg>';
   var LDM_ICON_OK   = LDM_SVG + 'stroke-width="2"><path d="M3 8.5l3 3 7-7"/></svg>';
   var LDM_ICON_FAIL = LDM_SVG + 'stroke-width="2"><path d="M4 4l8 8M12 4l-8 8"/></svg>';
@@ -515,32 +606,47 @@
 
     video.setAttribute('data-ldm-overlay', '1');
     const isYT = isYouTubePage();
-    // YouTube keeps its original look. Everywhere else the left tag names the
-    // stream LDM will be sent (see streamKind), so it's clear before clicking
-    // whether a real stream was found or LDM will fall back to the page link.
-    const baseBg    = '#0f172a';
-    const accent    = isYT ? '#dc2626' : '#e0f2fe';
-    const hoverBg   = isYT ? 'rgba(220,38,38,0.25)' : '#12334a';
+    // Outside YouTube the left tag names the stream LDM will be sent (see
+    // streamKind), so it's clear before clicking whether a real stream was
+    // found or LDM will fall back to the page link.
+    // "Raised navy" look: one top-lit plate (gradient + bright top edge + dark
+    // bottom edge) painted on the wrapper; the three parts are transparent
+    // and separated by a dark groove with a light line beside it.
+    const plateBg   = 'linear-gradient(#2a3a5c 0%, #17233d 48%, #0e172b 52%, #0a1122 100%)';
+    const groove    = '1px solid rgba(0,0,0,0.6)';
+    const grooveHi  = '1px 0 0 rgba(255,255,255,0.09)';
+    const baseBg    = 'transparent';
+    const accent    = isYT ? '#ff5148' : '#eef8ff';
+    const hoverBg   = isYT ? 'linear-gradient(rgba(255,90,80,0.24), rgba(255,90,80,0.07))'
+                           : 'linear-gradient(rgba(120,200,255,0.22), rgba(120,200,255,0.06))';
+    const pressBg   = 'linear-gradient(rgba(0,0,0,0.45), rgba(0,0,0,0.15))';
     const label     = isYT ? '&#9654; YouTube'   : LDM_ICON_DL + 'Download';
-    const sendingTx = isYT ? '&#8987; Sending...' : LDM_ICON_SPIN + 'Sending';
-    const sentTx    = isYT ? '&#10003; Sent!'     : LDM_ICON_OK + 'Sent to LDM';
     const failedTx  = isYT ? '&#10007; Failed'    : LDM_ICON_FAIL + 'Failed';
 
     // ── Wrapper ───────────────────────────────────────────────────────────────
     const wrapper = document.createElement('div');
+    // Fixed, in viewport coordinates: an absolute overlay at a feed video's
+    // page position kept the document taller than the viewport, so when
+    // Instagram opened a reel viewer (body shrunk to the viewport) the window
+    // stayed scrolled, the viewer sat half off-screen and no reel played.
     Object.assign(wrapper.style, {
-      position:      'absolute',
+      position:      'fixed',
       zIndex:        '2147483647',
       display:       'flex',
       alignItems:    'stretch',
+      // One line always. A fixed box sizes itself to the space right of its
+      // `left`; flush against the right edge of a full-width player (embeds
+      // such as vidara, RedGifs inside Reddit) there was only room for
+      // "Download", so the longer "Sent to LDM" wrapped onto three lines.
+      whiteSpace:    'nowrap',
       pointerEvents: 'all',
       userSelect:    'none',
       touchAction:   'none',
       borderRadius:  isYT ? '5px' : '6px',
       overflow:      'hidden',
-      background:    baseBg,
-      border:        isYT ? '1px solid rgba(255,255,255,0.1)' : '1px solid rgba(56,189,248,0.35)',
-      boxShadow:     isYT ? '0 2px 10px rgba(0,0,0,0.6)' : '0 2px 12px rgba(0,0,0,0.6)',
+      background:    plateBg,
+      border:        '1px solid #04070d',
+      boxShadow:     'inset 0 1px 0 rgba(255,255,255,0.28), inset 0 -1px 0 rgba(0,0,0,0.6), 0 1px 0 rgba(255,255,255,0.1), 0 3px 9px rgba(0,0,0,0.65)',
     });
 
     // ── Left tag: "LDM" on YouTube, stream type + LDM elsewhere ───────────────
@@ -551,7 +657,8 @@
       badge.innerHTML = 'LDM';
       Object.assign(badge.style, {
         background:  baseBg,
-        color:       '#475569',
+        color:       '#8fd8ff',
+        textShadow:  '0 -1px 0 #000',
         fontFamily:  'sans-serif',
         fontSize:    '9px',
         fontWeight:  '700',
@@ -559,7 +666,8 @@
         letterSpacing: '0.1em',
         display:     'flex',
         alignItems:  'center',
-        borderRight: '1px solid rgba(255,255,255,0.06)',
+        borderRight: groove,
+        boxShadow:   grooveHi,
         cursor:      'grab',
       });
     } else {
@@ -567,20 +675,21 @@
       const brand = document.createElement('div');
       brand.textContent = 'LDM';
       Object.assign(kindLbl.style, {
-        font: '700 10px/1.1 ui-monospace, monospace', color: '#7dd3fc', letterSpacing: '0.04em',
+        font: '700 10px/1.1 ui-monospace, monospace', color: '#8fd8ff', letterSpacing: '0.04em',
+        textShadow: '0 -1px 0 #000',
       });
       Object.assign(brand.style, {
-        font: '500 8.5px/1.2 ui-monospace, monospace', color: '#5f89a3',
+        font: '500 8.5px/1.2 ui-monospace, monospace', color: '#6f93ad',
       });
       badge.appendChild(kindLbl);
       badge.appendChild(brand);
       Object.assign(badge.style, {
-        background:     '#0b2536',
         display:        'flex',
         flexDirection:  'column',
         justifyContent: 'center',
         padding:        '0 9px',
-        borderRight:    '1px solid rgba(56,189,248,0.25)',
+        borderRight:    groove,
+        boxShadow:      grooveHi,
         cursor:         'grab',
       });
     }
@@ -600,32 +709,47 @@
       display:     'flex',
       alignItems:  'center',
       gap:         isYT ? '5px' : '6px',
-      borderRight: '1px solid rgba(255,255,255,0.06)',
+      textShadow:  '0 -1px 0 rgba(0,0,0,0.8)',
+      borderRight: groove,
+      boxShadow:   grooveHi,
     });
-    btn.addEventListener('mouseenter', () => { btn.style.background = hoverBg; });
-    btn.addEventListener('mouseleave', () => { btn.style.background = baseBg; });
+    // Pressed = darker and the label drops 1px (height stays the same).
+    let over = false;
+    const press = down => {
+      btn.style.background    = down ? pressBg : (over ? hoverBg : baseBg);
+      btn.style.paddingTop    = down ? '7px' : '6px';
+      btn.style.paddingBottom = down ? '5px' : '6px';
+    };
+    btn.addEventListener('mouseenter', () => { over = true;  press(false); });
+    btn.addEventListener('mouseleave', () => { over = false; press(false); });
+    btn.addEventListener('mousedown',  e => { if (e.button === 0) press(true); });
+    btn.addEventListener('mouseup',    () => press(false));
+    // The texts differ in width, so re-align to the video after each change.
+    const setLabel = html => { btn.innerHTML = html; positionOverlay(video, wrapper); };
+    // Quiet send: the text stays "Download" (only dimmed) while the link goes
+    // to LDM, and the button leaves the moment LDM has it. Only a failure
+    // is spelled out.
+    let busy = false;
     btn.addEventListener('click', e => {
       e.stopPropagation(); e.preventDefault();
-      btn.innerHTML = sendingTx;
-      btn.style.opacity = '0.7';
+      if (busy) return;
+      busy = true;
+      btn.style.opacity = '0.6';
       captureVideo(video)
         .then(() => {
-          btn.innerHTML = sentTx;
-          btn.style.color = '#22c55e';
-          btn.style.opacity = '1';
           // Retire it like ×: removeOverlay alone clears data-ldm-overlay, and
           // the next DOM mutation would attach a fresh button to this video.
           video.setAttribute('data-ldm-dismissed', '1');
-          setTimeout(() => removeOverlay(video), 1500);
+          removeOverlay(video);
         })
         .catch(() => {
-          btn.innerHTML = failedTx;
+          setLabel(failedTx);
           btn.style.color = '#ef4444';
           btn.style.opacity = '1';
           setTimeout(() => {
-            btn.innerHTML = label;
+            setLabel(label);
             btn.style.color = accent;
-            btn.style.opacity = '1';
+            busy = false;
           }, 2000);
         });
     });
@@ -635,7 +759,8 @@
     closeBtn.innerHTML = '&#215;';
     Object.assign(closeBtn.style, {
       background:  baseBg,
-      color:       '#475569',
+      color:       '#7d8ba1',
+      textShadow:  '0 -1px 0 #000',
       fontFamily:  'sans-serif',
       fontSize:    '13px',
       fontWeight:  '700',
@@ -645,12 +770,12 @@
       alignItems:  'center',
     });
     closeBtn.addEventListener('mouseenter', () => {
-      closeBtn.style.background = 'rgba(239,68,68,0.2)';
-      closeBtn.style.color = '#ef4444';
+      closeBtn.style.background = 'rgba(239,68,68,0.18)';
+      closeBtn.style.color = '#ff6b6b';
     });
     closeBtn.addEventListener('mouseleave', () => {
       closeBtn.style.background = baseBg;
-      closeBtn.style.color = '#475569';
+      closeBtn.style.color = '#7d8ba1';
     });
     closeBtn.addEventListener('click', e => {
       e.stopPropagation(); e.preventDefault();
@@ -687,6 +812,7 @@
     var host = document.createElement('div');
     host.setAttribute('data-ldm-host', LDM_INSTANCE);
     host.attachShadow({ mode: 'open' }).appendChild(wrapper);
+    applyButtonsShown(host);
     document.body.appendChild(host);
     video._ldmIsYT = isYT;
 
@@ -741,12 +867,10 @@
       }
       e.preventDefault();
       // Keep it on screen so it can't be dropped somewhere unreachable.
-      var sx = window.scrollX || window.pageXOffset || 0;
-      var sy = window.scrollY || window.pageYOffset || 0;
       var vw = document.documentElement.clientWidth  || window.innerWidth;
       var vh = document.documentElement.clientHeight || window.innerHeight;
-      var left = Math.min(Math.max(start.left + dx, sx), sx + vw - wrapper.offsetWidth);
-      var top  = Math.min(Math.max(start.top  + dy, sy), sy + vh - wrapper.offsetHeight);
+      var left = Math.min(Math.max(start.left + dx, 0), vw - wrapper.offsetWidth);
+      var top  = Math.min(Math.max(start.top  + dy, 0), vh - wrapper.offsetHeight);
       wrapper.style.left = left + 'px';
       wrapper.style.top  = top  + 'px';
     }
@@ -762,11 +886,9 @@
         // Remember the spot relative to the video, so the reposition that
         // runs when it scrolls back into view keeps the user's placement.
         var r  = video.getBoundingClientRect();
-        var sx = window.scrollX || window.pageXOffset || 0;
-        var sy = window.scrollY || window.pageYOffset || 0;
         video._ldmDragOffset = {
-          dx: (parseFloat(wrapper.style.left) || 0) - (r.left + sx),
-          dy: (parseFloat(wrapper.style.top)  || 0) - (r.top  + sy),
+          dx: (parseFloat(wrapper.style.left) || 0) - r.left,
+          dy: (parseFloat(wrapper.style.top)  || 0) - r.top,
         };
         suppressClick = e.type === 'pointerup';
         // Not every drag ends in a click (released off the overlay), so don't
@@ -791,23 +913,24 @@
     if (r.width < 100 || r.height < 60) { wrapper.style.display = 'none'; return; }
     wrapper.style.display = 'flex';
     const btnH   = wrapper.offsetHeight || 28;
-    const scrollX = window.scrollX || window.pageXOffset || 0;
-    const scrollY = window.scrollY || window.pageYOffset || 0;
     if (video._ldmDragOffset) {
-      wrapper.style.left = `${r.left + scrollX + video._ldmDragOffset.dx}px`;
-      wrapper.style.top  = `${r.top  + scrollY + video._ldmDragOffset.dy}px`;
+      // Keep a dragged button fully on screen when its text gets longer.
+      const vw = document.documentElement.clientWidth || window.innerWidth;
+      const want = r.left + video._ldmDragOffset.dx;
+      wrapper.style.left = `${Math.max(0, Math.min(want, vw - (wrapper.offsetWidth || 160)))}px`;
+      wrapper.style.top  = `${r.top  + video._ldmDragOffset.dy}px`;
       return;
     }
     if (r.top > btnH + 4) {
-      wrapper.style.top  = `${r.top + scrollY - btnH - 4}px`;
+      wrapper.style.top  = `${r.top - btnH - 4}px`;
     } else {
-      wrapper.style.top  = `${r.top + scrollY + 6}px`;
+      wrapper.style.top  = `${r.top + 6}px`;
     }
     // Right-align to the video using the button's real width: the Download
     // button (with its stream tag) is wider than the old fixed 160px guess and
     // overhung the video's right edge.
     const btnW = wrapper.offsetWidth || 160;
-    wrapper.style.left = `${Math.max(r.left, r.right - btnW - 6) + scrollX}px`;
+    wrapper.style.left = `${Math.max(r.left, r.right - btnW - 6)}px`;
   }
 
   // Active overlay registry — used to purge hosts orphaned by SPA re-renders
@@ -984,9 +1107,42 @@
   // A video that's still in the DOM but not on screen in any real sense:
   // display:none / visibility:hidden ancestors, collapsed, or (YouTube) the
   // player kept alive after leaving the watch page.
+  // How much of the video really shows through ancestors that clip overflow.
+  // Instagram carousels keep the neighbouring slide's <video> laid out beside
+  // the visible one inside an overflow:hidden track: its own rect looks fine,
+  // but nothing of it is on screen, and its button floated beside the post.
+  // Only ancestors in the video's containing-block chain clip it (CSS: an
+  // absolutely positioned box escapes overflow of non-positioned ancestors).
+  // YouTube's <body> is overflow:scroll with height 0 while ytd-app is
+  // position:absolute — treating body as a clip hid every YouTube button (3.1.20).
+  function clippedRect(v, r) {
+    var left = r.left, top = r.top, right = r.right, bottom = r.bottom;
+    var pos = getComputedStyle(v).position;        // position of the box being clipped
+    for (var el = v.parentElement; el && el !== document.documentElement; el = el.parentElement) {
+      var cs = getComputedStyle(el);
+      var makesCB = cs.position !== 'static' || cs.transform !== 'none' ||
+                    cs.filter !== 'none' || /paint|layout|strict|content/.test(cs.contain || '');
+      var inChain = pos === 'absolute' ? makesCB
+                  : pos === 'fixed'    ? (cs.transform !== 'none' || cs.filter !== 'none' || /paint|layout|strict|content/.test(cs.contain || ''))
+                  : true;
+      if (!inChain) continue;                       // this ancestor can't clip the box
+      var clipX = cs.overflowX !== 'visible', clipY = cs.overflowY !== 'visible';
+      if (clipX || clipY) {
+        var pr = el.getBoundingClientRect();
+        if (clipX) { left = Math.max(left, pr.left); right = Math.min(right, pr.right); }
+        if (clipY) { top = Math.max(top, pr.top); bottom = Math.min(bottom, pr.bottom); }
+        if (right - left <= 0 || bottom - top <= 0) return { width: 0, height: 0 };
+      }
+      pos = cs.position;                            // continue from this box's own positioning
+    }
+    return { width: right - left, height: bottom - top };
+  }
+
   function videoShown(v) {
     var r = v.getBoundingClientRect();
     if (r.width < 100 || r.height < 60) return false;
+    var c = clippedRect(v, r);
+    if (c.width < r.width * 0.5 || c.height < 40) return false;
     if (v.checkVisibility && !v.checkVisibility({ visibilityProperty: true, checkVisibilityCSS: true })) return false;
     if (v._ldmIsYT && !isYouTubePage()) return false;
     // Facebook reels: the visibility observer hides buttons of reels that
@@ -1009,6 +1165,10 @@
       return;
     }
     _cleanOrphanedOverlays();
+    repositionAll();
+  }, 500);
+
+  function repositionAll() {
     _ldmActiveOverlays.forEach(function(item) {
       var v = item.video, w = v._ldmBtn;
       if (!w || v._ldmDragging) return;
@@ -1016,7 +1176,22 @@
       item.host.style.display = '';
       positionOverlay(v, w);
     });
-  }, 500);
+  }
+
+  // Buttons are position:fixed, so they no longer ride along with the page:
+  // follow every scroll (capture also catches inner scrollers such as reel
+  // viewers) and resize, once per frame.
+  var _ldmRepositionQueued = false;
+  function queueReposition() {
+    if (_ldmRepositionQueued || !_ldmActiveOverlays.length) return;
+    _ldmRepositionQueued = true;
+    requestAnimationFrame(function() {
+      _ldmRepositionQueued = false;
+      repositionAll();
+    });
+  }
+  window.addEventListener('scroll', queueReposition, { capture: true, passive: true });
+  window.addEventListener('resize', queueReposition, { passive: true });
 
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', attachToVideos);
