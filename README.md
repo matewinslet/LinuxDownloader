@@ -105,7 +105,7 @@ LDM works with Chrome too, and with other Chromium browsers such as Brave and Ed
 2. Turn on **Developer mode** in the top-right corner.
 3. Click **Load unpacked** and pick the `chrome-extension` folder inside the LDM folder you cloned.
 
-If you installed LDM from a package instead, download `ferospark-ldm-chrome-3.1.24.zip` from the [Releases](https://github.com/matewinslet/LinuxDownloader/releases) page, unzip it, and pick that folder in step 3.
+If you installed LDM from a package instead, download `ferospark-ldm-chrome-3.1.25.zip` from the [Releases](https://github.com/matewinslet/LinuxDownloader/releases) page, unzip it, and pick that folder in step 3.
 
 Leave the folder where it is. Chrome loads the extension from it each time it starts.
 
