@@ -63,7 +63,7 @@ A download manager for Linux. It takes over your Firefox downloads, grabs videos
 
 - Linux (Ubuntu or Debian based; tested on Zorin OS)
 - Python 3.10 or newer
-- Firefox
+- Firefox, or Chrome and other Chromium browsers (Brave, Edge)
 
 ---
 
@@ -96,6 +96,16 @@ Get it from Firefox Add-ons:
 [Ferospark LDM on Firefox Add-ons](https://addons.mozilla.org/en-US/firefox/addon/49cdbb655b5d47a7bce3/)
 
 You can also download the `.xpi` file from the [Releases](https://github.com/matewinslet/LinuxDownloader/releases) page and drag it into Firefox.
+
+### Using Chrome instead
+
+LDM works with Chrome too, and with other Chromium browsers such as Brave and Edge. The Chrome extension isn't on the Chrome Web Store, so you add it by hand:
+
+1. Open `chrome://extensions` (in Brave, `brave://extensions`).
+2. Turn on **Developer mode** in the top-right corner.
+3. Click **Load unpacked** and pick the `chrome-extension` folder inside the LDM folder you cloned.
+
+Leave that folder where it is. Chrome loads the extension from it each time it starts.
 
 ---
 
