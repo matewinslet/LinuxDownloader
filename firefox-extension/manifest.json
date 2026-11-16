@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Ferospark LDM",
-  "version": "3.1.25",
+  "version": "3.1.26",
   "description": "Silent Download Interceptor + Video Sender",
   "permissions": [
     "downloads",
@@ -41,6 +41,16 @@
     ]
   },
   "content_scripts": [
+    {
+      "matches": [
+        "<all_urls>"
+      ],
+      "js": [
+        "early.js"
+      ],
+      "run_at": "document_start",
+      "all_frames": true
+    },
     {
       "matches": [
         "<all_urls>"

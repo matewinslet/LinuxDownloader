@@ -734,7 +734,8 @@
     // to LDM, and the button leaves the moment LDM has it. Only a failure
     // is spelled out.
     let busy = false;
-    btn.addEventListener('click', e => {
+    // Also reachable through early.js (btn._ldmOnClick) on sites that swallow clicks.
+    const onDownloadClick = e => {
       e.stopPropagation(); e.preventDefault();
       if (busy) return;
       busy = true;
@@ -756,7 +757,9 @@
             busy = false;
           }, 2000);
         });
-    });
+    };
+    btn._ldmOnClick = onDownloadClick;
+    btn.addEventListener('click', onDownloadClick);
 
     // ── Dismiss button ────────────────────────────────────────────────────────
     const closeBtn = document.createElement('div');
@@ -781,11 +784,13 @@
       closeBtn.style.background = baseBg;
       closeBtn.style.color = '#7d8ba1';
     });
-    closeBtn.addEventListener('click', e => {
+    const onCloseClick = e => {
       e.stopPropagation(); e.preventDefault();
       video.setAttribute('data-ldm-dismissed', '1');
       removeOverlay(video);
-    });
+    };
+    closeBtn._ldmOnClick = onCloseClick;
+    closeBtn.addEventListener('click', onCloseClick);
 
     wrapper.appendChild(badge);
     wrapper.appendChild(btn);
@@ -836,6 +841,7 @@
     var start = null;
     var dragging = false;
     var suppressClick = false;
+    wrapper._ldmSuppressing = function() { return suppressClick; };   // for early.js
 
     wrapper.addEventListener('pointerdown', function(e) {
       if (e.button !== 0) return;
