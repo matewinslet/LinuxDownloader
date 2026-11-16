@@ -61,6 +61,10 @@ cp "$SRC_DIR/packaging/linux-download-manager.desktop" AppDir/linux-download-man
 cp "$SRC_DIR/icons/linux-downloader-256.png" AppDir/linux-downloader.png
 ln -sf linux-downloader.png AppDir/.DirIcon
 
+# Some bundled Python folders come out as 0700. appimagetool (continuous
+# build) now refuses AppDirs other users can't read, so open them up.
+chmod -R a+rX AppDir
+
 echo "==> Fetching appimagetool..."
 wget -q https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage -O appimagetool
 chmod +x appimagetool
