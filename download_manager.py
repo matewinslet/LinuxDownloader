@@ -8728,6 +8728,13 @@ class DownloadManager(QMainWindow):
 
         outer.addWidget(inner)
         self._refresh_storage_card()
+        # Keep the figures live: disk fills as downloads land and frees when Tj
+        # clears space. A statvfs every 20 s is negligible but stops the tile
+        # from freezing at whatever the disk looked like when LDM launched.
+        self._storage_timer = QTimer(self)
+        self._storage_timer.setInterval(20_000)
+        self._storage_timer.timeout.connect(self._refresh_storage_card)
+        self._storage_timer.start()
         return card
 
     def _refresh_storage_card(self):
