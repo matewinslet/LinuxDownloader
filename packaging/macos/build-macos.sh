@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Build "Ferospark LDM.app" + a .dmg for Apple Silicon (arm64) Macs.
-# Runs on a macOS arm64 machine (GitHub's macos-14 runner, or any M-series Mac
+# Runs on a macOS arm64 machine (GitHub's macos-latest runner, or any M-series Mac
 # with Python 3.12). Bundles Python + deps (PyInstaller), plus static ffmpeg,
 # ffprobe and deno so nothing has to be installed with Homebrew.
 #

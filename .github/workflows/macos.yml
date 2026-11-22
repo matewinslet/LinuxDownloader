@@ -1,6 +1,6 @@
 name: macOS build (Apple Silicon)
 
-# Builds Ferospark LDM.app + .dmg on GitHub's M1 runner and smoke-tests it.
+# Builds Ferospark LDM.app + .dmg on GitHub's Apple Silicon runner and smoke-tests it.
 # Manual via "Run workflow"; on a v* tag it also attaches the .dmg to the release.
 on:
   workflow_dispatch:
@@ -17,7 +17,7 @@ permissions:
 
 jobs:
   macos-arm64:
-    runs-on: macos-14
+    runs-on: macos-latest   # Apple Silicon (arm64)
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
