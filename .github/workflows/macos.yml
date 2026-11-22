@@ -1,0 +1,58 @@
+name: macOS build (Apple Silicon)
+
+# Builds Ferospark LDM.app + .dmg on GitHub's M1 runner and smoke-tests it.
+# Manual via "Run workflow"; on a v* tag it also attaches the .dmg to the release.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version string shown in the app bundle'
+        required: true
+        default: '3.1.0'
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  macos-arm64:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Build .app + .dmg
+        env:
+          VER: ${{ github.event.inputs.version || github.ref_name }}
+        run: bash packaging/macos/build-macos.sh
+      - name: Smoke test (launch headless, ping the bridge, check bundled tools)
+        run: |
+          set -x
+          APP="dist/Ferospark LDM.app"
+          "$APP/Contents/Resources/bin/ffmpeg" -hide_banner -version | head -1
+          "$APP/Contents/Resources/bin/ffprobe" -hide_banner -version | head -1
+          "$APP/Contents/Resources/bin/deno" --version | head -1
+          find "$APP" -path '*curl_cffi*' -name '*.so' | head -3 | grep -q . || { echo "curl_cffi native lib missing"; exit 1; }
+          QT_QPA_PLATFORM=offscreen "$APP/Contents/MacOS/Ferospark LDM" > ldm.log 2>&1 &
+          PID=$!
+          ok=0
+          for i in $(seq 1 45); do
+            sleep 2
+            kill -0 $PID 2>/dev/null || { echo "LDM exited early"; cat ldm.log; exit 1; }
+            if [ "$(curl -s --max-time 2 http://127.0.0.1:9999/ping)" = "LDM-OK" ]; then ok=1; break; fi
+          done
+          cat ldm.log
+          kill $PID || true
+          [ $ok = 1 ] || { echo "bridge never answered"; exit 1; }
+          ls ~/.config/ldm || true
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Ferospark_LDM-macOS-arm64
+          path: dist/*.dmg
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.dmg

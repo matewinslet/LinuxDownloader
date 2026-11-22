@@ -40,10 +40,26 @@ from PyQt6.QtGui import (
 )
 
 HOME = os.path.expanduser("~")
+IS_MAC = sys.platform == "darwin"
+# Opens a file/folder/URL with the desktop's default handler.
+_OPENER = "open" if IS_MAC else "xdg-open"
+# Firefox's profile root on macOS (profiles live under Profiles/<name>).
+_MAC_FF_ROOT = os.path.join(HOME, "Library", "Application Support", "Firefox")
+if IS_MAC:
+    # Apps launched from Finder get a bare PATH (/usr/bin:/bin:...), so tools the
+    # user installed (Homebrew deno/node/ffmpeg) and the ones bundled inside the
+    # .app (Contents/Resources/bin) would be invisible to subprocess calls.
+    _extra = [os.path.join(os.path.dirname(os.path.abspath(__file__)), "bin"),
+              os.path.join(os.path.dirname(sys.executable), "..", "Resources", "bin"),
+              "/opt/homebrew/bin", "/usr/local/bin", os.path.join(HOME, ".deno", "bin")]
+    os.environ["PATH"] = os.pathsep.join(
+        [os.path.normpath(d) for d in _extra if os.path.isdir(d)]
+        + [os.environ.get("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")])
 
 def get_firefox_profile():
     """Auto-detect Firefox profile directory across different Linux setups."""
     candidates = [
+        _MAC_FF_ROOT,
         # Firefox 150+ moved the profile root to the XDG path; check it first.
         os.path.join(HOME, '.config', 'mozilla', 'firefox'),
         os.path.join(HOME, '.mozilla', 'firefox'),
@@ -376,12 +392,18 @@ def open_and_select(path):
 
     def _open_folder_only():
         if folder and os.path.isdir(folder):
-            subprocess.Popen(['xdg-open', folder],
+            subprocess.Popen([_OPENER, folder],
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     # ShowItems can only highlight a file that is actually there.
     if not os.path.exists(path):
         _open_folder_only()
+        return
+
+    if IS_MAC:
+        # Finder: open the folder with the file selected.
+        subprocess.Popen(['open', '-R', path],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         return
 
     # Must be a real file:// URI — percent-encoded. Building it by hand as
@@ -696,6 +718,7 @@ def _firefox_cookies_for(host_substrings):
     it first. Returns {} on any failure (caller proceeds without cookies)."""
     import sqlite3, tempfile, shutil, glob
     bases = [
+        os.path.join(_MAC_FF_ROOT, 'Profiles'),
         os.path.join(HOME, '.config', 'mozilla', 'firefox'),
         os.path.join(HOME, '.mozilla', 'firefox'),
         os.path.join(HOME, '.var', 'app', 'org.mozilla.firefox', '.mozilla', 'firefox'),
@@ -1209,6 +1232,7 @@ def _firefox_gofile_token():
     # an active session's profile beats a stale one (e.g. leftover Flatpak
     # data after switching to apt).
     patterns = [
+        os.path.join(_MAC_FF_ROOT, "Profiles", "*", "storage", "default", "https+++gofile.io", "ls", "data.sqlite"),
         os.path.expanduser("~/.config/mozilla/firefox/*/storage/default/https+++gofile.io/ls/data.sqlite"),
         os.path.expanduser("~/.mozilla/firefox/*/storage/default/https+++gofile.io/ls/data.sqlite"),
         os.path.expanduser("~/snap/firefox/common/.mozilla/firefox/*/storage/default/https+++gofile.io/ls/data.sqlite"),
@@ -4215,7 +4239,7 @@ class StreamDialog(DownloaderDialogBase):
     def _open_downloaded_file(self):
         path = getattr(self, '_dl_path', '')
         if path and os.path.exists(path):
-            subprocess.Popen(['xdg-open', path])
+            subprocess.Popen([_OPENER, path])
         elif path:
             open_and_select(path)
         self.close()
@@ -5380,11 +5404,11 @@ class YouTubeDialog(DownloaderDialogBase):
     def _open_downloaded_file(self):
         path = self._downloaded_path()
         if path:
-            subprocess.Popen(['xdg-open', path])
+            subprocess.Popen([_OPENER, path])
         else:
             folder = getattr(self, '_dl_folder', '')
             if folder and os.path.isdir(folder):
-                subprocess.Popen(['xdg-open', folder])
+                subprocess.Popen([_OPENER, folder])
         self.close()
 
     def _open_downloaded_folder(self):
@@ -5394,7 +5418,7 @@ class YouTubeDialog(DownloaderDialogBase):
         else:
             folder = getattr(self, '_dl_folder', '')
             if folder and os.path.isdir(folder):
-                subprocess.Popen(['xdg-open', folder])
+                subprocess.Popen([_OPENER, folder])
         self.close()
 
 
@@ -6590,7 +6614,7 @@ class CoreDownloaderDialog(DownloaderDialogBase):
     def _open_downloaded_file(self):
         path = getattr(self, '_dl_path', '')
         if path and os.path.exists(path):
-            subprocess.Popen(['xdg-open', path])
+            subprocess.Popen([_OPENER, path])
         elif path:
             open_and_select(path)
         self.close()
@@ -6602,7 +6626,7 @@ class CoreDownloaderDialog(DownloaderDialogBase):
         else:
             folder = self.save_dir_edit.text().strip()
             if folder and os.path.isdir(folder):
-                subprocess.Popen(['xdg-open', folder])
+                subprocess.Popen([_OPENER, folder])
         self.close()
 
 
@@ -8458,7 +8482,17 @@ class DownloadManager(QMainWindow):
         timer_in.start(20)
 
     def _notify(self, title, message):
-        if self.notify_enabled:
+        if self.notify_enabled and IS_MAC:
+            try:
+                def _q(t):
+                    return '"' + str(t).replace('\\', '\\\\').replace('"', '\\"') + '"'
+                subprocess.Popen(
+                    ['osascript', '-e',
+                     f'display notification {_q(message)} with title {_q(title)}'],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except Exception:
+                pass
+        elif self.notify_enabled:
             try:
                 subprocess.Popen(
                     ['notify-send', '-a', 'Ferospark LDM',
@@ -8889,7 +8923,7 @@ class DownloadManager(QMainWindow):
         if path and os.path.exists(path):
             open_and_select(path)
         elif path and os.path.isdir(os.path.dirname(path)):
-            subprocess.Popen(['xdg-open', os.path.dirname(path)])
+            subprocess.Popen([_OPENER, os.path.dirname(path)])
             self._show_toast("File missing — opened its folder")
         else:
             self._show_toast("Folder not found on disk")
@@ -10751,7 +10785,7 @@ class DownloadManager(QMainWindow):
     def _row_open(self, row):
         path = self._row_path(row)
         if path and os.path.exists(path):
-            subprocess.Popen(['xdg-open', path])
+            subprocess.Popen([_OPENER, path])
         else:
             self._show_toast("File not found on disk")
 
@@ -10763,7 +10797,7 @@ class DownloadManager(QMainWindow):
             # File gone but its folder still exists — open the folder
             # (no highlight is possible without the file) and tell the
             # user why nothing got selected.
-            subprocess.Popen(['xdg-open', os.path.dirname(path)])
+            subprocess.Popen([_OPENER, os.path.dirname(path)])
             self._show_toast("File missing — opened its folder")
         else:
             self._show_toast("Folder not found on disk")
@@ -10893,7 +10927,7 @@ class DownloadManager(QMainWindow):
                 'QPushButton:hover { background-color: #e2e8f0; }'
             )
             ob.clicked.connect(lambda: open_and_select(path) if path and os.path.exists(path)
-                               else subprocess.Popen(['xdg-open', folder]))
+                               else subprocess.Popen([_OPENER, folder]))
             ob.setFixedSize(112, 32)
             btn_row.addWidget(ob)
         btn_row.addStretch()
@@ -11754,7 +11788,19 @@ def _autostart_exec():
             f"{shlex.quote(os.path.abspath(__file__))} {BACKGROUND_FLAG}")
 
 
+_MAC_AGENT = os.path.join(HOME, "Library", "LaunchAgents", "io.github.matewinslet.ferosparkldm.plist")
+
+
+def _mac_autostart_args():
+    # Frozen .app: sys.executable is Contents/MacOS/<name>; else python + script.
+    if getattr(sys, "frozen", False):
+        return [sys.executable, BACKGROUND_FLAG]
+    return [sys.executable, os.path.abspath(__file__), BACKGROUND_FLAG]
+
+
 def autostart_enabled():
+    if IS_MAC:
+        return os.path.exists(_MAC_AGENT)
     try:
         with open(AUTOSTART_FILE, encoding="utf-8") as f:
             text = f.read()
@@ -11766,6 +11812,24 @@ def autostart_enabled():
 
 def set_autostart(enabled):
     """Write or remove the autostart entry. Returns True on success."""
+    if IS_MAC:
+        try:
+            if not enabled:
+                if os.path.exists(_MAC_AGENT):
+                    os.remove(_MAC_AGENT)
+                return True
+            import plistlib
+            os.makedirs(os.path.dirname(_MAC_AGENT), exist_ok=True)
+            with open(_MAC_AGENT, "wb") as f:
+                plistlib.dump({
+                    "Label": "io.github.matewinslet.ferosparkldm",
+                    "ProgramArguments": _mac_autostart_args(),
+                    "RunAtLoad": True,
+                    "ProcessType": "Interactive",
+                }, f)
+            return True
+        except OSError:
+            return False
     try:
         if not enabled:
             if os.path.exists(AUTOSTART_FILE):
@@ -11818,7 +11882,7 @@ def _hand_off_to_running_instance(port=9999):
 
 
 if __name__ == "__main__":
-    if not os.environ.get("QT_QPA_PLATFORMTHEME"):
+    if not IS_MAC and not os.environ.get("QT_QPA_PLATFORMTHEME"):
         os.environ["QT_QPA_PLATFORMTHEME"] = "gtk3"
     _ensure_ytdlp_config()
     _end_startup_feedback()
@@ -11840,6 +11904,18 @@ if __name__ == "__main__":
     app.setQuitOnLastWindowClosed(False)
     _load_dialog_fonts()
     window = DownloadManager()
+    if IS_MAC:
+        # Clicking the Dock icon while the window is parked in the menu-bar
+        # tray should bring it back, like any Mac app.
+        class _DockReopen(QObject):
+            def eventFilter(self, obj, ev):
+                if (ev.type() == QEvent.Type.ApplicationActivate
+                        and not window.isVisible()
+                        and not getattr(window, "_quitting", False)):
+                    QTimer.singleShot(0, window._restore_from_tray)
+                return False
+        _dock_reopen = _DockReopen()
+        app.installEventFilter(_dock_reopen)
     if not background:
         window.show()
     elif window.tray is None:
