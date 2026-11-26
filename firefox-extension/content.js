@@ -327,6 +327,31 @@
     return null;
   }
 
+  // TikTok plays through blob: URLs and recycles its <video> elements as the
+  // feed scrolls, and it preloads the next videos — so a captured CDN URL can't
+  // be tied to the clip on screen. The player wrapper's id does carry the post
+  // ID (div#xgwrapper-<n>-<videoId>), read fresh at click time; yt-dlp takes
+  // the permalink. Returns { url, id } or null.
+  function tiktokPost(videoEl) {
+    if (!window.location.hostname.includes('tiktok.com')) return null;
+    var id = null, el = videoEl;
+    for (var k = 0; el && k < 15 && !id; k++, el = el.parentElement) {
+      var m = el.id && /^xgwrapper-\d+-(\d{8,})$/.exec(el.id);
+      if (m) id = m[1];
+    }
+    if (!id) {
+      var pm = window.location.pathname.match(/\/video\/(\d{8,})/);
+      if (pm) id = pm[1];
+    }
+    if (!id) return null;
+    var user = '';
+    var card = videoEl && videoEl.closest && videoEl.closest('article');
+    var a = card && card.querySelector('a[href^="/@"]');
+    var um = a && /^\/@([\w.\-]+)/.exec(a.getAttribute('href'));
+    if (um) user = um[1];
+    return { url: 'https://www.tiktok.com/@' + user + '/video/' + id, id: id };
+  }
+
   function captureVideo(videoEl) {
     if (isYouTubePage()) {
       return relayToBridge(window.location.href, 'youtube', 'youtube');
@@ -356,6 +381,12 @@
     if (isFacebookVideoPage(pageUrl)) {
       const filename = resolveFilename(pageUrl, document.title);
       return Promise.resolve(relayToBridge(pageUrl, 'stream_hls', filename));
+    }
+
+    // TikTok: the post on screen, by ID → yt-dlp (never a guessed CDN URL)
+    const tt = tiktokPost(videoEl);
+    if (tt) {
+      return Promise.resolve(relayToBridge(tt.url, 'stream_hls', 'tiktok_' + tt.id + '.mp4'));
     }
 
     // Social domains (Instagram, Twitter, TikTok — not Facebook feed, handled above)
@@ -456,6 +487,7 @@
       } catch (e) { cb('PAGE'); }   // extension reloaded under the page
     }
 
+    if (tiktokPost(video)) return cb('PAGE');
     if (isSocialDomain(pageUrl)) {
       if (video._ldmCdnEntry) return cb(kindFromUrl(video._ldmCdnEntry.cdnUrl));
       if (rescan || !('_ldmPostUrl' in video)) video._ldmPostUrl = extractPostUrl(video);
