@@ -7,7 +7,8 @@
 
 set -e
 
-INSTALL_DIR="$HOME/linux-downloader"
+# Wherever the repo was cloned (README clones into ./LinuxDownloader)
+INSTALL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DESKTOP_FILE="$HOME/.local/share/applications/downloader.desktop"
 ICON_NAME="linux-downloader"
 
@@ -17,7 +18,7 @@ echo "║     Ferospark LDM — Installer     ║"
 echo "╚════════════════════════════════════════════╝"
 echo ""
 
-# ── Step 1: System packages ──────────────────────────────────────────────────
+# ── Steps 1–2: System packages ──────────────────────────────────────────────────
 echo "► [1/6] Detecting package manager..."
 
 PKG_MANAGER=""
@@ -78,37 +79,50 @@ case $PKG_MANAGER in
 esac
 echo "  Done."
 
-# ── Step 2: Python packages ──────────────────────────────────────────────────
+# ── Step 3: Python packages ──────────────────────────────────────────────────
 echo "► [3/6] Installing Python packages (PyQt6, requests, yt-dlp, curl_cffi)..."
 # curl_cffi is pinned <0.15: yt-dlp 2026.3.17 only supports 0.10.x–0.14.x and
 # refuses to load 0.15+, which silently disables browser impersonation and
 # breaks hosts that fingerprint the TLS/JA3 handshake (HTTP 410 Gone).
 pip3 install PyQt6 requests yt-dlp browser-cookie3 "curl_cffi>=0.10,<0.15" pycryptodome --break-system-packages -q 2>/dev/null || \
 pip3 install PyQt6 requests yt-dlp browser-cookie3 "curl_cffi>=0.10,<0.15" pycryptodome -q
+# Distros (Mint/Ubuntu) ship an old yt-dlp apt package that pip treats as
+# "already satisfied" — always pull the current release into ~/.local.
+pip3 install --upgrade yt-dlp --break-system-packages -q 2>/dev/null || \
+pip3 install --upgrade yt-dlp -q
 echo "  Done."
 
-# ── Step 3: Deno (JavaScript runtime for YouTube) ────────────────────────────
+# ── Step 4: Deno (JavaScript runtime for YouTube) ────────────────────────────
 echo "► [4/6] Installing Deno (JavaScript runtime)..."
 if command -v deno &>/dev/null; then
     echo "  Deno already installed: $(deno --version | head -1)"
 else
-    curl -fsSL https://deno.land/install.sh | sh -s -- --quiet
-    export DENO_INSTALL="$HOME/.deno"
-    export PATH="$DENO_INSTALL/bin:$PATH"
-    # Add to shell profile permanently
-    SHELL_RC="$HOME/.bashrc"
-    [[ "$SHELL" == *"zsh"* ]] && SHELL_RC="$HOME/.zshrc"
-    if ! grep -q "DENO_INSTALL" "$SHELL_RC"; then
-        echo '' >> "$SHELL_RC"
-        echo '# Deno' >> "$SHELL_RC"
-        echo 'export DENO_INSTALL="$HOME/.deno"' >> "$SHELL_RC"
-        echo 'export PATH="$DENO_INSTALL/bin:$PATH"' >> "$SHELL_RC"
+    # Deno's installer forwards its args to its shell-setup step, which only
+    # accepts -y / --no-modify-path (anything else, e.g. --quiet, exits 1).
+    # We edit the shell rc ourselves below, hence --no-modify-path.
+    # Deno is only needed for YouTube, so a failure here must not abort.
+    if curl -fsSL https://deno.land/install.sh | sh -s -- -y --no-modify-path \
+            && [ -x "$HOME/.deno/bin/deno" ]; then
+        export DENO_INSTALL="$HOME/.deno"
+        export PATH="$DENO_INSTALL/bin:$PATH"
+        # Add to shell profile permanently
+        SHELL_RC="$HOME/.bashrc"
+        [[ "$SHELL" == *"zsh"* ]] && SHELL_RC="$HOME/.zshrc"
+        if ! grep -q "DENO_INSTALL" "$SHELL_RC" 2>/dev/null; then
+            echo '' >> "$SHELL_RC"
+            echo '# Deno' >> "$SHELL_RC"
+            echo 'export DENO_INSTALL="$HOME/.deno"' >> "$SHELL_RC"
+            echo 'export PATH="$DENO_INSTALL/bin:$PATH"' >> "$SHELL_RC"
+        fi
+        sudo ln -sf "$HOME/.deno/bin/deno" /usr/local/bin/deno 2>/dev/null || true
+        echo "  Done."
+    else
+        echo "  WARNING: Deno install failed — YouTube downloads may not work."
+        echo "  Install it later with: curl -fsSL https://deno.land/install.sh | sh"
     fi
-    sudo ln -sf "$HOME/.deno/bin/deno" /usr/local/bin/deno 2>/dev/null || true
-    echo "  Done."
 fi
 
-# ── Step 4: App icons ────────────────────────────────────────────────────────
+# ── Step 5: App icons ────────────────────────────────────────────────────────
 echo "► [5/6] Installing icons..."
 
 SVG_SRC=""
@@ -131,16 +145,24 @@ fi
 
 mkdir -p "$INSTALL_DIR/icons"
 
-if [ -n "$SVG_SRC" ] && [ -n "$RASTERIZER" ]; then
+# The repo ships ready-made PNGs for every size — use them as-is.
+ICONS_SHIPPED=1
+for size in 16 32 48 64 128 256; do
+    [ -f "$INSTALL_DIR/icons/${ICON_NAME}-${size}.png" ] || ICONS_SHIPPED=0
+done
+
+if [ "$ICONS_SHIPPED" = 1 ]; then
+    echo "  Using bundled icons."
+elif [ -n "$SVG_SRC" ] && [ -n "$RASTERIZER" ]; then
     echo "  Rasterizing SVG with $RASTERIZER..."
     if [ "$RASTERIZER" = "qt" ]; then
-        SVG_SRC="$SVG_SRC" ICON_DIR="$INSTALL_DIR/icons" ICON_NAME="$ICON_NAME" python3 - << 'PYEOF'
+        # offscreen: works without a display (SSH / text console installs)
+        QT_QPA_PLATFORM=offscreen SVG_SRC="$SVG_SRC" ICON_DIR="$INSTALL_DIR/icons" ICON_NAME="$ICON_NAME" python3 - << 'PYEOF' || echo "  WARNING: SVG rasterizing failed."
 import os, sys
 from PyQt6.QtSvg import QSvgRenderer
-from PyQt6.QtGui import QPixmap, QPainter, QColor
+from PyQt6.QtGui import QPixmap, QPainter, QColor, QGuiApplication
 from PyQt6.QtCore import QByteArray, Qt
-from PyQt6.QtWidgets import QApplication
-app = QApplication(sys.argv)
+app = QGuiApplication(sys.argv)
 with open(os.environ['SVG_SRC'], 'rb') as f:
     renderer = QSvgRenderer(QByteArray(f.read()))
 for size in [16, 32, 48, 64, 128, 256]:
@@ -172,7 +194,7 @@ PYEOF
     echo "  Icons rasterized from SVG."
 else
     # Fallback: generate crude geometric PNGs (no rasterizer or no SVG)
-    python3 << 'PYEOF'
+    ICON_DIR="$INSTALL_DIR/icons" python3 << 'PYEOF'
 import struct, zlib, os, math
 
 def create_png(size):
@@ -216,8 +238,7 @@ def create_png(size):
     png+=chunk(b'IEND',b'')
     return png
 
-install_dir = os.path.expanduser("~/linux-downloader")
-icons_dir = os.path.join(install_dir, "icons")
+icons_dir = os.environ["ICON_DIR"]
 os.makedirs(icons_dir, exist_ok=True)
 for s in [16,32,48,64,128,256]:
     path = os.path.join(icons_dir, f"linux-downloader-{s}.png")
@@ -243,7 +264,7 @@ fi
 sudo gtk-update-icon-cache -f /usr/share/icons/hicolor/ 2>/dev/null || true
 echo "  Done."
 
-# ── Step 5: Firefox profile detection ───────────────────────────────────────
+# ── Step 6: Firefox profile detection ───────────────────────────────────────
 echo "► [6/6] Detecting Firefox profile..."
 
 FF_PROFILE=""
