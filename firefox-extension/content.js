@@ -352,6 +352,44 @@
     return { url: 'https://www.tiktok.com/@' + user + '/video/' + id, id: id };
   }
 
+  // X / Twitter streams through DASH/HLS, so a sniffed video.twimg.com URL is
+  // usually one .m4s chunk (no header → unplayable), and on the home feed it
+  // may belong to whichever video autoplayed last. The tweet itself is the
+  // only reliable handle: its own permalink is the <a href="/user/status/ID">
+  // around the tweet's <time>, read fresh at click time; yt-dlp takes it.
+  // A video inside a quoted tweet uses the quoted tweet's ID when the quote
+  // card exposes one. Returns { url, id } or null.
+  function twitterPost(videoEl) {
+    var host = window.location.hostname;
+    if (!/(^|\.)(x|twitter)\.com$/.test(host)) return null;
+    var STATUS = /^\/([A-Za-z0-9_]{1,30})\/status\/(\d{6,})/;
+    function fromHref(href) {
+      var p = '';
+      try { p = new URL(href, window.location.origin).pathname; } catch (e) { return null; }
+      var m = STATUS.exec(p);
+      return m ? { url: 'https://x.com/' + m[1] + '/status/' + m[2], id: m[2] } : null;
+    }
+    var art = videoEl && videoEl.closest && videoEl.closest('article');
+    if (art) {
+      // Quoted tweet: a role=link card inside the article that holds the video
+      var quote = videoEl.closest('div[role="link"]');
+      if (quote && art.contains(quote)) {
+        var qa = quote.querySelector('a[href*="/status/"]');
+        var q = qa && fromHref(qa.getAttribute('href'));
+        if (q) return q;
+      }
+      var times = art.querySelectorAll('a[href*="/status/"] time');
+      for (var i = 0; i < times.length; i++) {
+        var a = times[i].closest('a');
+        if (quote && quote.contains(a)) continue;
+        var r = a && fromHref(a.getAttribute('href'));
+        if (r) return r;
+      }
+    }
+    // Opened tweet page (/user/status/ID or its /video/1 view)
+    return fromHref(window.location.pathname);
+  }
+
   function captureVideo(videoEl) {
     if (isYouTubePage()) {
       return relayToBridge(window.location.href, 'youtube', 'youtube');
@@ -387,6 +425,12 @@
     const tt = tiktokPost(videoEl);
     if (tt) {
       return Promise.resolve(relayToBridge(tt.url, 'stream_hls', 'tiktok_' + tt.id + '.mp4'));
+    }
+
+    // X / Twitter: the tweet that holds this video → yt-dlp (never a sniffed chunk)
+    const tw = twitterPost(videoEl);
+    if (tw) {
+      return Promise.resolve(relayToBridge(tw.url, 'stream_hls', 'twitter_' + tw.id + '.mp4', tw.url));
     }
 
     // Social domains (Instagram, Twitter, TikTok — not Facebook feed, handled above)
@@ -487,7 +531,7 @@
       } catch (e) { cb('PAGE'); }   // extension reloaded under the page
     }
 
-    if (tiktokPost(video)) return cb('PAGE');
+    if (tiktokPost(video) || twitterPost(video)) return cb('PAGE');
     if (isSocialDomain(pageUrl)) {
       if (video._ldmCdnEntry) return cb(kindFromUrl(video._ldmCdnEntry.cdnUrl));
       if (rescan || !('_ldmPostUrl' in video)) video._ldmPostUrl = extractPostUrl(video);

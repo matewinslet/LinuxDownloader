@@ -405,7 +405,11 @@ chrome.webRequest.onHeadersReceived.addListener(
         url.split('?')[0].toLowerCase().endsWith('.mp4') ||
         (contentType && contentType.toLowerCase().includes('video/'));
       var isTikTokVideo = isTikTok && url.includes('mime_type=video_mp4');
-      var sizeOk = isTikTok ? isTikTokVideo : contentLen > 100000;
+      // twimg .m4s = one DASH/HLS chunk with no header: never a whole video
+      var isTwimgChunk = isTwimg && /\.m4s$/i.test(url.split('?')[0]);
+      var sizeOk = isTikTok ? isTikTokVideo
+                 : isTwimgChunk ? false
+                 : contentLen > 100000;
 
       if (isVideoUrl && sizeOk) {
         var entry = {

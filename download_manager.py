@@ -11115,6 +11115,12 @@ class DownloadManager(QMainWindow):
                     r'(?:twitter\.com|x\.com)/[^/]+/status/\d+', norm_referer or ''
                 ):
                     norm_url = norm_referer
+                elif is_twimg_dash_segment(norm_url):
+                    # No tweet to fall back on (sent from the home feed by an
+                    # older extension): the chunk alone would save as an
+                    # unplayable few-second fragment. Refuse it.
+                    self._show_toast("X video: open the post itself, then Download", 4000)
+                    continue
                 _kvs_page = kvs_page_for(norm_url, norm_referer)
                 if _kvs_page:
                     # Keep the captured get_file link as a backup: if yt-dlp
