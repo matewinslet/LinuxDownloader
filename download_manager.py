@@ -1184,6 +1184,97 @@ def resolve_mixdrop_url(url):
         return None, None, None
 
 
+# Streamtape: the player page builds its get_video link in JS (the plain-HTML
+# copies carry decoy tokens), and the link is bound to the IP that loaded the
+# page (ip=…). A link captured in the browser fails from LDM whenever the
+# browser is on a different IP (Firefox VPN) — and Streamtape answers with
+# HTTP 200 + {"status":403,"msg":"Access Denied"}, so it "downloads" as a
+# 36-byte file. Re-load the page from LDM's own IP and decode the JS instead.
+_STREAMTAPE_HOST_RE = re.compile(
+    r"^(?:www\.)?(?:streamtape\.[a-z]+|streamta\.pe|strtape\.[a-z]+|strtpe\.link"
+    r"|stape\.fun|strcloud\.[a-z]+|shavetape\.cash|tapeadvertisement\.com"
+    r"|tapeblocker\.com|streamadblocker\.[a-z]+|adblockstrtape\.link)$", re.I)
+
+
+def streamtape_file_id(url):
+    try:
+        p = urlparse(url)
+    except Exception:
+        return None
+    if not _STREAMTAPE_HOST_RE.match((p.hostname or "").lower()):
+        return None
+    m = re.match(r"/[ve]/([A-Za-z0-9]{8,})", p.path or "")
+    if m:
+        return m.group(1)
+    if (p.path or "").startswith("/get_video"):
+        vid = (parse_qs(p.query).get("id") or [None])[0]
+        if vid and re.fullmatch(r"[A-Za-z0-9]{8,}", vid):
+            return vid
+    return None
+
+
+def is_streamtape_url(url):
+    return bool(streamtape_file_id(url))
+
+
+def _eval_streamtape_link_js(expr):
+    """Evaluate the page's `'a' + ('xyz…').substring(n).substring(m)` link
+    expression. Only string literals, '+' and .substring(n[, m]) occur."""
+    out, pos = [], 0
+    term = re.compile(r"""\s*\(?\s*(['"])(.*?)\1\s*\)?((?:\s*\.substring\(\s*\d+\s*(?:,\s*\d+\s*)?\))*)\s*(\+|$)""", re.S)
+    while pos < len(expr):
+        m = term.match(expr, pos)
+        if not m or m.end() == pos:
+            return None
+        s = m.group(2)
+        for a, b in re.findall(r"\.substring\(\s*(\d+)\s*(?:,\s*(\d+)\s*)?\)", m.group(3)):
+            s = s[int(a):int(b)] if b else s[int(a):]
+        out.append(s)
+        pos = m.end()
+    return "".join(out)
+
+
+def resolve_streamtape_url(url):
+    """Resolve a Streamtape page or captured get_video link to a get_video link
+    issued for LDM's own IP. Returns (direct_url, filename, page_url) or
+    (None, None, None) so callers can fall back."""
+    fid = streamtape_file_id(url)
+    if not fid:
+        return None, None, None
+    try:
+        host = (urlparse(url).hostname or "streamtape.com").lower()
+        page = f"https://{host}/v/{fid}"
+        s = requests.Session()
+        s.headers.update({"User-Agent": HEADERS["User-Agent"]})
+        html = s.get(page, timeout=20).text
+        links = {}
+        for name, expr in re.findall(
+                r"document\.getElementById\(\s*'(\w*link)'\s*\)\.innerHTML\s*=\s*([^;]+);",
+                html):
+            val = _eval_streamtape_link_js(expr)
+            if val and "get_video?" in val:
+                links[name] = val
+        # Only norobotlink/robotlink carry the real link; the page also writes
+        # decoys (ideoooolink, captchalink) that decode to broken hosts/tokens.
+        link = links.get("norobotlink") or links.get("robotlink")
+        if not link:
+            return None, None, None
+        link = "https://" + link.lstrip("/")
+        lp = urlparse(link)
+        if (not _STREAMTAPE_HOST_RE.match((lp.hostname or "").lower())
+                or (parse_qs(lp.query).get("id") or [None])[0] != fid):
+            return None, None, None
+        tm = re.search(r"<meta\s+name=\"og:title\"\s+content=\"([^\"]+)\"", html) or \
+             re.search(r"<title>\s*(.*?)\s+at\s+Streamtape", html, re.I | re.S)
+        title = (tm.group(1).strip() if tm else "") or f"streamtape_{fid}"
+        name = re.sub(r'[\\/:*?"<>|]+', "_", title)
+        if not re.search(r"\.(mp4|mkv|webm|mov|avi|m4v)$", name, re.I):
+            name += ".mp4"
+        return link, name, page
+    except Exception:
+        return None, None, None
+
+
 def is_pixeldrain_captcha_url(url):
     """pixeldrain /api/file/<id>?download&recaptcha_response=… — the token is
     single-use, so the first request that reaches the server spends it."""
@@ -11094,6 +11185,18 @@ class DownloadManager(QMainWindow):
                         filename=real_name or f"mixdrop_{mixdrop_file_id(url)}.mp4",
                         referer=ref or "")
                     continue
+            # Streamtape: a get_video link captured in the browser is bound to
+            # the browser's IP — re-mint it from LDM's own IP (see resolver).
+            _st = url if is_streamtape_url(url) else (referer if is_streamtape_url(referer) else "")
+            if _st:
+                direct, real_name, ref = resolve_streamtape_url(_st)
+                if direct:
+                    self.raise_(); self.activateWindow()
+                    self.open_core_dialog(
+                        url=direct,
+                        filename=real_name or f"streamtape_{streamtape_file_id(_st)}.mp4",
+                        referer=ref or "")
+                    continue
             if msg_type == "youtube":
                 self.raise_()
                 self.activateWindow()
@@ -11201,6 +11304,15 @@ class DownloadManager(QMainWindow):
                 self.open_core_dialog(
                     url=direct,
                     filename=real_name or f"mixdrop_{mixdrop_file_id(url)}.mp4",
+                    referer=referer or "")
+                return
+        # Streamtape hides the real link behind JS decoys, bound to this IP.
+        if is_streamtape_url(url):
+            direct, real_name, referer = resolve_streamtape_url(url)
+            if direct:
+                self.open_core_dialog(
+                    url=direct,
+                    filename=real_name or f"streamtape_{streamtape_file_id(url)}.mp4",
                     referer=referer or "")
                 return
         lurl  = url.lower()
